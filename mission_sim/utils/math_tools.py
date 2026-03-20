@@ -1,112 +1,74 @@
+# mission_sim/utils/math_tools.py
 import numpy as np
-from scipy.linalg import solve_continuous_are
+import scipy.linalg
 
-def get_lqr_gain(A, B, Q, R):
-    """求解连续时间 LQR 增益矩阵 K"""
-    P = solve_continuous_are(A, B, Q, R)
+def get_lqr_gain(A: np.ndarray, B: np.ndarray, Q: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """
+    计算连续时间线性二次型调节器 (LQR) 的最优反馈增益矩阵 K。
+    核心数学：求解连续代数黎卡提方程 (CARE)
+    A^T P + P A - P B R^-1 B^T P + Q = 0
+    
+    :param A: 状态矩阵 (nxn)
+    :param B: 控制输入矩阵 (nxm)
+    :param Q: 状态惩罚权重矩阵 (nxn)，半正定
+    :param R: 控制惩罚权重矩阵 (mxm)，正定
+    :return: 最优反馈增益矩阵 K (mxn)，使得 u(t) = -K * e(t)
+    """
+    # 使用 scipy 底层高度优化的 LAPACK 库求解黎卡提方程
+    try:
+        P = scipy.linalg.solve_continuous_are(A, B, Q, R)
+    except scipy.linalg.LinAlgError as e:
+        raise RuntimeError(f"LQR 黎卡提方程求解失败，请检查 A, B 矩阵是否可镇定！底层错误: {e}")
+        
+    # 计算增益矩阵 K = R^-1 B^T P
     K = np.linalg.inv(R) @ B.T @ P
     return K
 
-def get_lvlh_dcm(pos_chief, vel_chief, omega_frame=1.991e-7):
+
+def absolute_to_lvlh(state_chief: np.ndarray, state_deputy: np.ndarray) -> np.ndarray:
     """
-    计算从绝对旋转系到 LVLH 坐标系的方向余弦矩阵 (DCM)
+    【L2 级预留】将从星的绝对状态转换到以主星为原点的 LVLH (局部垂直/局部水平) 相对坐标系中。
+    这是后续进行星间编队共相控制的纯数学基石。
     
-    参数:
-        pos_chief: 主星在旋转系下的位置 [x, y, z]
-        vel_chief: 主星在旋转系下的速度 [vx, vy, vz]
-        omega_frame: 旋转系的基础角速度 (日地系统为 1.991e-7 rad/s)
-    返回:
-        3x3 的 DCM 矩阵
+    LVLH 坐标系定义 (标准径向-沿迹-法向体系):
+      - X轴 (径向 Radial) : 沿主星位置矢量方向 (从中心天体指向主星)
+      - Z轴 (法向 Cross-track) : 沿主星轨道角动量方向 (右手定则 r x v)
+      - Y轴 (沿迹 Along-track) : 补全右手坐标系 (Z x X)
+    
+    :param state_chief: 主星绝对状态 [x, y, z, vx, vy, vz]
+    :param state_deputy: 从星绝对状态 [x, y, z, vx, vy, vz]
+    :return: 相对状态 [x_rel, y_rel, z_rel, vx_rel, vy_rel, vz_rel]
     """
-    # 1. 旋转系的角速度矢量 (绕 Z 轴旋转)
-    omega_vec = np.array([0.0, 0.0, omega_frame])
+    r_c = state_chief[0:3]
+    v_c = state_chief[3:6]
+    r_d = state_deputy[0:3]
+    v_d = state_deputy[3:6]
 
-    # 2. 计算 Chief 在惯性系下的真实速度 (运动学基本定理)
-    # v_inertial = v_rot + omega x r
-    vel_inertial = vel_chief + np.cross(omega_vec, pos_chief)
-
-    # 3. 构造 LVLH 三轴单位矢量
-    # X轴 (Radial): 沿位置矢量方向
-    r_norm = np.linalg.norm(pos_chief)
-    x_lvlh = pos_chief / r_norm
-
-    # Z轴 (Normal): 沿惯性轨道角动量方向 h = r x v
-    h_inertial = np.cross(pos_chief, vel_inertial)
-    z_lvlh = h_inertial / np.linalg.norm(h_inertial)
-
-    # Y轴 (Along-track): 构成右手系 Y = Z x X
-    y_lvlh = np.cross(z_lvlh, x_lvlh)
-
-    # 4. 组装 DCM 矩阵 (从 旋转系 转换到 LVLH 系)
-    # 因为 x, y, z 已经是行向量，直接 vstack 即可构成旋转矩阵
-    dcm = np.vstack((x_lvlh, y_lvlh, z_lvlh))
-    return dcm
-
-def absolute_to_lvlh(state_chief, state_deputy, omega_frame=1.991e-7):
-    """
-    将 Deputy 的绝对状态转换为相对于 Chief 的 LVLH 状态。
+    # --- 1. 计算 LVLH 旋转矩阵的基向量 ---
+    norm_r = np.linalg.norm(r_c)
+    i_hat = r_c / norm_r
     
-    参数:
-        state_chief: 主星的 6D 绝对状态 (旋转系)
-        state_deputy: 从星的 6D 绝对状态 (旋转系)
-    返回:
-        relative_state_lvlh: 6D 相对状态 [x, y, z, vx, vy, vz] (LVLH系)
-    """
-    r_c, v_c = state_chief[0:3], state_chief[3:6]
-    r_d, v_d = state_deputy[0:3], state_deputy[3:6]
+    h_vec = np.cross(r_c, v_c)
+    norm_h = np.linalg.norm(h_vec)
+    k_hat = h_vec / norm_h
+    
+    j_hat = np.cross(k_hat, i_hat)
 
-    # 1. 计算在旋转系下的相对状态
-    delta_r_rot = r_d - r_c
-    delta_v_rot = v_d - v_c
-
-    # 2. 获取当前时刻的转换矩阵 DCM
-    dcm = get_lvlh_dcm(r_c, v_c, omega_frame)
-
-    # 3. 将相对位置投影到 LVLH 坐标轴上
-    delta_r_lvlh = dcm @ delta_r_rot
-
-    # 4. 将相对速度投影到 LVLH 坐标轴上
-    # (注：这里做了一个针对 L2 编队的极简运动学近似。
-    #  严格来说需减去 LVLH 系自身的旋转牵连速度，但在 L2 编队中 DCM 变化极慢，此近似精度足够)
-    delta_v_lvlh = dcm @ delta_v_rot
-
-    return np.concatenate((delta_r_lvlh, delta_v_lvlh))
-
-def get_hcw_matrices(n: float, mass: float):
-    """
-    生成经典 C-W (Clohessy-Wiltshire) 相对运动方程的状态空间 A 和 B 矩阵。
-    适用于近圆轨道或近似常数角速度的 LVLH 系相对编队控制。
+    # 旋转矩阵 C_I2L (从惯性/绝对系到 LVLH 系)
+    C_I2L = np.vstack([i_hat, j_hat, k_hat])
     
-    参数:
-        n: 主星轨道的平均角速度 (rad/s)。
-           (注: 若在日地 L2 点，n 近似为日地系统旋转角速度 omega)
-        mass: 从星的质量 (kg)，用于计算推力加速度映射
-        
-    返回:
-        A (6x6): 相对运动状态转移矩阵
-        B (6x3): 控制输入映射矩阵
-    """
-    n2 = n ** 2
+    # --- 2. 相对位置映射 ---
+    delta_r_I = r_d - r_c
+    rel_pos = C_I2L @ delta_r_I
     
-    # A 矩阵: 相对状态演化 X_dot = A * X
-    # 状态向量 X = [x, y, z, vx, vy, vz]^T in LVLH
-    A = np.zeros((6, 6))
+    # --- 3. 相对速度映射 (剔除坐标系旋转引起的科氏项) ---
+    # 主星轨道角速度标量 omega = |h| / |r|^2
+    omega_mag = norm_h / (norm_r**2)
+    # LVLH 系下的角速度向量始终在 Z 轴上
+    omega_vec_L = np.array([0.0, 0.0, omega_mag])
     
-    # 运动学关系: 速度是位置的导数
-    A[0:3, 3:6] = np.eye(3)
+    delta_v_I = v_d - v_c
+    # 物理学中的牵连速度剔除：v_rel = v_abs - omega x r_rel
+    rel_vel = C_I2L @ delta_v_I - np.cross(omega_vec_L, rel_pos)
     
-    # 动力学关系: 加速度项 (引力梯度与离心力)
-    A[3, 0] = 3 * n2   # X 轴 (径向) 引力梯度
-    A[4, 0] = 0.0      # Y 轴 (切向)
-    A[5, 2] = -n2      # Z 轴 (法向) 回复力
-    
-    # 科氏力耦合项
-    A[3, 4] = 2 * n
-    A[4, 3] = -2 * n
-    
-    # B 矩阵: 控制输入映射 X_dot = A * X + B * U
-    # 控制输入 U = [Fx, Fy, Fz]^T 
-    B = np.zeros((6, 3))
-    B[3:6, 0:3] = np.eye(3) / mass
-    
-    return A, B
+    return np.concatenate([rel_pos, rel_vel])
