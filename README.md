@@ -24,20 +24,35 @@
 
 ```text
 mission_sim/
-├── docs/                             # 架构演进文档 (PlantUML)
-│   ├── architecture_global_v2.puml   # 全局总体静态架构 (引入 L2 规划)
-│   └── architecture_L1_v2.puml       # Level 1 实现细节图 (引入 LQR 与 Telecommand)
-├── core/                             # 核心领域层 (各 Level 演进主战场)
-│   ├── types.py                      # 全局契约基石 (定义 CoordinateFrame, Telecommand)
-│   ├── spacecraft.py                 # 物理域：航天器本体与变质量动力学模型
-│   ├── environment.py                # 物理域：CRTBP 引力场与离心力/科氏力环境
-│   ├── ground_station.py             # 信息域：地面测控网模拟与指令上行
-│   └── gnc_subsystem.py              # 信息域：星载制导导航与控制大脑
-├── utils/                            # 基础设施层 (跨级复用工具)
-│   ├── math_tools.py                 # 数学工具箱 (LQR 代数 Riccati 方程求解器等)
-│   ├── loggers.py                    # 高性能 HDF5 增量记录器
-│   └── visualizer.py                 # 离线数据渲染与 3D 动画引擎
-├── tests/                            # 测试驱动开发 (TDD) 模块
-│   └── integration_L1_closed_loop.py # L1 级物理闭环与 LQR 最优控制收敛性集成测试
-├── main.py                           # 仿真场景主入口
-└── requirements.txt                  # 依赖清单
+├── core/                        # 核心领域模型
+│   ├── __init__.py
+│   ├── physics/                 # 【物理域】
+│   │   ├── __init__.py
+│   │   ├── spacecraft.py        # 航天器质点模型
+│   │   ├── environment.py       # 力学注册表 (Environment)
+│   │   └── models/              # 具体力学实现子包
+│   │       ├── __init__.py
+│   │       ├── gravity_crtbp.py # 三体引力模型
+│   │       └── srp_cannonball.py# 太阳光压模型
+│   ├── gnc/                     # 【信息域】
+│   │   ├── __init__.py
+│   │   ├── gnc_subsystem.py     # 动态星历追踪控制器
+│   │   └── ground_station.py    # 测控站模拟
+│   ├── trajectory/              # 【预处理】
+│   │   ├── __init__.py
+│   │   ├── ephemeris.py         # 标称星历数据契约
+│   │   ├── generators.py        # 轨道生成器基类
+│   │   └── halo_corrector.py    # 微分修正算法
+│   └── types.py                 # 全局类型定义 (CoordinateFrame 等)
+├── utils/                       # 基础设施
+│   ├── __init__.py
+│   ├── loggers_hdf5.py          # 高效记录器
+│   ├── math_tools.py            # 矩阵与 LQR 工具
+│   └── visualizer_L1.py         # 【L1级专用】可视化工具
+├── configs/                     # 配置文件
+│   └── L1_halo_mission.yaml     # 【L1级】任务配置
+├── data/                        # 仿真输出
+├── tests/                       # 测试脚本
+├── main_L1_runner.py            # 【L1级】仿真编排器入口
+└── requirements.txt
+```
