@@ -1,0 +1,72 @@
+@startuml
+title MCPC 框架全层级演进路线图 (Architecture Evolution Baseline)
+
+skinparam componentStyle rectangle
+skinparam noteBackgroundColor white
+skinparam noteBorderColor dimgray
+skinparam packageTitleAlignment center
+
+' --- 定义五个核心层级组件 ---
+package "L1: 总体概念与基准定标\n(The Baseline)" as P_L1 #LightCyan {
+    [**L1 基准定性**\n解决: 飞什么轨道、基本环境、地面测控接口] as L1
+}
+
+package "L2: 任务规划与协同效能\n(The Mission)" as P_L2 #PaleGreen {
+    [**L2 协同效能**\n解决: 空间频率覆盖率、构型重构频次与燃料] as L2
+}
+
+package "L3: 原理攻关与级间解耦\n(The Principle)" as P_L3 #LemonChiffon {
+    [**L3 原理验证**\n解决: 级间误差预算分配、耦合下控制算法验证] as L3
+}
+
+package "L4: 样机鉴定与地试比对\n(The Engineering)" as P_L4 #PeachPuff {
+    [**L4 样机鉴定**\n解决: 新研硬件出厂验收、支撑半物理仿真] as L4
+}
+
+package "L5: 数字平行与在轨伴飞\n(The Digital Twin)" as P_L5 #MistyRose {
+    [**L5 数字平行**\n解决: 在轨异常排除、故障诊断、载荷数据标定] as L5
+}
+
+' --- 演进关系流向 ---
+L1 -down-> L2 : **拓扑跃迁**\n引入星间相对状态
+L2 -down-> L3 : **内部降维**\n引入双层机构运动学
+L3 -down-> L4 : **物理逼近**\n引入全6-DOF与硬件非线性
+L4 -down-> L5 : **环境孪生**\n引入柔性多体与实时极端环境
+
+' --- 各层级核心特征注解 (动力学、测量、执行、控制) ---
+note right of L1
+  **Plant (动力学)**: 宏观轨道质点 (仅考虑主要摄动，无姿态)
+  **Perception (测量)**: 地基测控 (绝对遥测)
+  **Actuation (执行)**: 理想推力中心 (无延迟、无脉冲限制的 ΔV)
+  **Logic (控制)**: 绝对轨道维持 (Station Keeping)
+end note
+
+note right of L2
+  **Plant (动力学)**: 相对运动学 (姿态锁定假设，解耦绝对漂移)
+  **Perception (测量)**: 理想星间链路 (厘米级 ISL 测距与基线拓扑)
+  **Actuation (执行)**: 阵列推力分配 (理想推力矢量分解)
+  **Logic (控制)**: 时序与拓扑重构 (任务序列驱动)
+end note
+
+note right of L3
+  **Plant (动力学)**: 机构耦合动力学 (平台-载荷简化多体/运动学)
+  **Perception (测量)**: 光链路初建 (理想 OPD 与指向测量)
+  **Actuation (执行)**: 多级机构协同 (简化 Stewart 平台、快摆镜等)
+  **Logic (控制)**: 级间降维解耦 (平台粗调与载荷精调)
+end note
+
+note right of L4
+  **Plant (动力学)**: 姿轨强耦合 6-DOF (大角度机动与微振动叠加)
+  **Perception (测量)**: 工程噪声谱注入 (传感器本底噪声、温漂与延迟)
+  **Actuation (执行)**: 硬件物理约束 (推力建立时间、陀螺死区)
+  **Logic (控制)**: 鲁棒与抗扰控制 (H∞、自适应控制)
+end note
+
+note right of L5
+  **Plant (动力学)**: 刚柔液多体拓扑 (柔性模态、晃动、形变与老化)
+  **Perception (测量)**: 全息数据融合 (异步数据融合、在线辨识标定)
+  **Actuation (执行)**: 在轨真实工况 (摩擦、卡滞、控制量饱和)
+  **Logic (控制)**: 自主容错与一致性 (集群重构、退化预测)
+end note
+
+@enduml
