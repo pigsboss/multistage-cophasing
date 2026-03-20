@@ -1,0 +1,168 @@
+@startuml
+title MCPC 框架 L1 级静态类图 (Class Diagram)
+
+skinparam classAttributeIconSize 0
+skinparam monochrome false
+skinparam packageTitleAlignment center
+skinparam shadowing false
+
+' ==========================================
+' 1. 类型与契约 (Types & Contracts)
+' ==========================================
+package "mission_sim.core.types" #F8F9FA {
+    enum CoordinateFrame {
+        J2000_ECI
+        J2000_SSB
+        SUN_EARTH_ROTATING
+        EARTH_MOON_ROTATING
+        LVLH
+    }
+
+    class Telecommand {
+        + cmd_type : str
+        + target_state : np.ndarray
+        + frame : CoordinateFrame
+    }
+}
+
+' ==========================================
+' 2. 预处理与星历 (Pre-processing)
+' ==========================================
+package "mission_sim.core.trajectory" #E8F8F5 {
+    class Ephemeris {
+        + times : np.ndarray
+        + states : np.ndarray
+        + frame : CoordinateFrame
+        + get_interpolated_state(t: float) : np.ndarray
+    }
+
+    abstract class BaseTrajectoryGenerator {
+        + {abstract} generate(config: dict) : Ephemeris
+    }
+
+    class HaloDifferentialCorrector {
+        - target_region : str
+        + generate(config: dict) : Ephemeris
+        - _state_transition_matrix()
+    }
+
+    class KeplerianGenerator {
+        - j2_flag : bool
+        + generate(config: dict) : Ephemeris
+    }
+
+    BaseTrajectoryGenerator <|-- HaloDifferentialCorrector
+    BaseTrajectoryGenerator <|-- KeplerianGenerator
+    BaseTrajectoryGenerator ..> Ephemeris : <<creates>>
+}
+
+' ==========================================
+' 3. 物理底座 (The Plant)
+' ==========================================
+package "mission_sim.core.physics" #EAEDED {
+    class SpacecraftPointMass {
+        + id : str
+        + state : np.ndarray
+        + frame : CoordinateFrame
+        + mass : float
+        + accumulated_dv : float
+        + apply_thrust(force, frame)
+        + clear_thrust()
+        + get_derivative(env_accel, frame)
+        + consume_mass(m_dot, dt)
+    }
+
+    class CelestialEnvironment {
+        - force_registry : list<IForceModel>
+        + computation_frame : CoordinateFrame
+        + register_force(force_model: IForceModel)
+        + get_total_acceleration(state, frame, epoch) : np.ndarray
+    }
+
+    interface IForceModel {
+        + {abstract} compute_accel(state, epoch) : np.ndarray
+    }
+
+    class Gravity_CRTBP {
+        - mu : float
+        + compute_accel(state, epoch) : np.ndarray
+    }
+
+    class Cannonball_SRP {
+        - area_to_mass : float
+        - reflectivity : float
+        + compute_accel(state, epoch) : np.ndarray
+    }
+
+    CelestialEnvironment o-- IForceModel
+    IForceModel <|.. Gravity_CRTBP
+    IForceModel <|.. Cannonball_SRP
+}
+
+' ==========================================
+' 4. 感知与控制 (Perception & Logic)
+' ==========================================
+package "mission_sim.core.gnc" #FDF2E9 {
+    class GroundStation {
+        + name : str
+        + operating_frame : CoordinateFrame
+        + visibility_window : list<tuple>
+        + track_spacecraft(true_state, frame, epoch) : tuple
+        + generate_telecommand(cmd_type, target_state, target_frame) : Telecommand
+    }
+
+    class GNC_Subsystem {
+        + sc_id : str
+        + operating_frame : CoordinateFrame
+        - current_nav_state : np.ndarray
+        - ref_ephemeris : Ephemeris
+        + load_reference_trajectory(eph: Ephemeris)
+        + update_navigation(obs_state, frame)
+        + compute_control_force(epoch, K_matrix) : tuple
+    }
+    
+    GNC_Subsystem o-- Ephemeris : 追踪参考轨迹
+}
+
+' ==========================================
+' 5. 基础设施与编排 (Infra & Orchestrator)
+' ==========================================
+package "mission_sim.utils" #F5EEF8 {
+    class HDF5Logger {
+        - _buffer : dict
+        + set_metadata(path, meta_dict)
+        + log(group, dataset, data)
+        + step()
+        + flush()
+    }
+    class L1Visualizer {
+        + plot_absolute_convergence()
+        + plot_state_history()
+        + plot_gnc_activity()
+    }
+}
+
+class SimulationRunner <<Orchestrator>> {
+    - dt : float
+    - sim_time : float
+    - env : CelestialEnvironment
+    - sc : SpacecraftPointMass
+    - gs : GroundStation
+    - gnc : GNC_Subsystem
+    - logger : HDF5Logger
+    + initialize_simulation()
+    + execute_time_loop()
+    + run_post_processing()
+}
+
+' ==========================================
+' 顶层依赖与组合关系
+' ==========================================
+SimulationRunner *-- CelestialEnvironment
+SimulationRunner *-- SpacecraftPointMass
+SimulationRunner *-- GroundStation
+SimulationRunner *-- GNC_Subsystem
+SimulationRunner *-- HDF5Logger
+SimulationRunner ..> BaseTrajectoryGenerator : 预处理调用
+
+@enduml

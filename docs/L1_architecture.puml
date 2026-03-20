@@ -1,0 +1,97 @@
+@startuml
+title MCPC 框架 L1 级通用数字底座系统架构图 (The Baseline)
+
+skinparam componentStyle rectangle
+skinparam noteBackgroundColor white
+skinparam noteBorderColor dimgray
+skinparam packageTitleAlignment center
+skinparam arrowColor #2C3E50
+
+' ==========================================
+' 模块定义区 (Modules Definition)
+' ==========================================
+
+package "1. 预处理阶段 (Pre-processing)" #F8F9FA {
+    component "TrajectoryGenerator\n(多态星历工厂)" as TG #E8F8F5
+    interface "X_nominal(t)\n(全局离散星历表)" as Ephemeris
+    
+    note left of TG
+      **全域标称轨道生成 (多态实现)**
+      - 解析根数+J2外推 (LEO/GEO)
+      - 微分修正 (Halo/Lissajous/NRHO)
+      - 高精度历表积分 (Deep Space/Trailing)
+    end note
+}
+
+package "2. 测量与信息层 (Perception)" #EBF5FB {
+    component "GroundStation\n(受限真实测控)" as GS #D6EAF8
+    
+    note right of GS
+      **测控模拟**
+      - 可视弧段 (Visibility Window) 模拟
+      - 离散时间采样率控制
+      - 轨道特异性高斯白噪声注入
+    end note
+}
+
+package "3. 控制与算法层 (Logic)" #FDF2E9 {
+    component "GNC_Subsystem\n(动态星历追踪)" as GNC #FAE5D3
+    
+    note left of GNC
+      **控制器 (Station Keeping)**
+      - 泛化误差解算: e(t) = X_nav(t) - X_nominal(t)
+      - LQR / 轨道最优控制律计算
+    end note
+}
+
+package "4. 物理底座与执行层 (Plant & Actuation)" #EAEDED {
+    component "CelestialEnvironment\n(力学注册表)" as ENV #D5D8DC
+    component "SpacecraftPointMass\n(宏观轨道质点)" as SC #D5D8DC
+    
+    note right of ENV
+      **环境可插拔引擎 (隔离与解耦)**
+      - LEO: 高阶非球形引力 + 大气阻力
+      - 平动点: 多体引力(CRTBP) + Cannonball 光压
+    end note
+    
+    note right of SC
+      **物理执行代理**
+      - 状态维系: 仅位置与速度 (无姿态约束)
+      - 理想推力响应 (无延迟/死区)
+      - 累计 ΔV 燃料精确积分统计器
+    end note
+}
+
+package "5. 后处理阶段 (Post-processing)" #F5EEF8 {
+    component "HDF5Logger & Visualizer\n(数据持久化与评估)" as Logger #EBDEF0
+    
+    note right of Logger
+      **定标与报告输出**
+      - Station Keeping 燃料预算底账
+      - 3D 标称轨道偏离度
+    end note
+}
+
+' ==========================================
+' 数据流向与依赖关系 (Data Flow & Dependencies)
+' ==========================================
+
+' 1. 预处理流
+TG -down-> Ephemeris : "[1] 触发工厂\n生成当前任务类型基准星历"
+
+' 2. 测量感知流
+SC -up-> GS : "物理真值\n(受测控可视弧段限制)"
+GS -down-> GNC : "[2] 注入带噪遥测数据\n更新 X_nav(t)"
+
+' 3. 控制决策流
+Ephemeris -down-> GNC : "[3] 根据当前 t 插值\n获取目标状态 X_nominal(t)"
+GNC -down-> SC : "[4] 输出理想推力指令\n(force_cmd)"
+
+' 4. 物理演化流
+ENV -right-> SC : "注入主导摄动力\n(按需动态加载)"
+
+' 5. 持久化与定标流
+SC -right-> Logger : "[5] 高频物理状态与\n累计 ΔV 消耗量落盘"
+GNC -right-> Logger : "[5] 记录 GNC 追踪误差\n与打火指令"
+
+@enduml
