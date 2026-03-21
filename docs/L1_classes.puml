@@ -1,5 +1,5 @@
 @startuml
-title MCPC 框架 L1 级静态类图 (基于代码实现 + 开发计划)
+title MCPC 框架 L1 级静态类图 (基于代码实现)
 
 skinparam classAttributeIconSize 0
 skinparam monochrome false
@@ -62,13 +62,11 @@ package "mission_sim.core.trajectory" #E8F8F5 {
 
         class HaloDifferentialCorrector {
             - mu : float
-            - OMEGA : float
-            - AU : float
             + generate(config: dict) : Ephemeris
             - _crtbp_equations(t, state) : np.ndarray
-            - _find_period(state0) : float
-            - _closure_conditions(state0, tf) : np.ndarray
-            - _robust_initial_guess(Az) : tuple
+            - _find_half_period(state0) : float
+            - _validate_orbit(states, times)
+            - _jacobi_constant(state_nd) : float
         }
 
         BaseTrajectoryGenerator <|-- KeplerianGenerator
@@ -77,7 +75,6 @@ package "mission_sim.core.trajectory" #E8F8F5 {
         BaseTrajectoryGenerator ..> Ephemeris : <<creates>>
     }
 
-    ' 工厂函数
     class TrajectoryFactory <<utility>> {
         + {static} create_generator(orbit_type: str, **kwargs) : BaseTrajectoryGenerator
     }
@@ -149,7 +146,7 @@ package "mission_sim.core.physics" #EAEDED {
         + compute_accel(state: np.ndarray, epoch: float) : np.ndarray
     }
 
-    class AtmosphericDrag {
+    class AtmosphericDrag <<未实现>> {
         - area_to_mass : float
         - Cd : float
         - rho0 : float
@@ -224,7 +221,25 @@ package "mission_sim.core.gnc" #FDF2E9 {
 }
 
 ' ==========================================
-' 5. 基础设施与编排 (Infra & Orchestrator)
+' 5. 基础动力学 (Core Dynamics)
+' ==========================================
+package "mission_sim.core.dynamics" #E8F8F5 {
+    package "threebody" {
+        class CRTBP {
+            - mu : float
+            - L : float
+            - omega : float
+            - vel_scale : float
+            + dynamics(t, state) : np.ndarray
+            + jacobi_constant(state_nd) : float
+            + to_physical(state_nd, t_nd) : tuple
+            + to_nd(state_phys, t_phys) : tuple
+        }
+    }
+}
+
+' ==========================================
+' 6. 基础设施与编排 (Infra & Orchestrator)
 ' ==========================================
 package "mission_sim.utils" #F5EEF8 {
     class HDF5Logger {
@@ -255,51 +270,88 @@ package "mission_sim.utils" #F5EEF8 {
 
     class L1Visualizer {
         - mission_name : str
-        + plot_3d_trajectory(save_path: str = "data/L1_3d_trajectory.png")
-        + plot_tracking_error(save_path: str = "data/L1_tracking_error.png")
-        + plot_control_effort(save_path: str = "data/L1_control_effort.png")
+        + plot_3d_trajectory(save_path: str)
+        + plot_tracking_error(save_path: str)
+        + plot_control_effort(save_path: str)
     }
 
     BaseVisualizer <|-- L1Visualizer
 }
 
-class L1MissionSimulation <<Orchestrator>> {
-    - config : dict
-    - mission_id : str
-    - h5_file : str
-    - simulation_start_time : float | None
-    - simulation_end_time : float | None
-    - current_step : int
-    - total_steps : int
-    - environment : CelestialEnvironment
-    - spacecraft : SpacecraftPointMass
-    - ground_station : GroundStation
-    - gnc_system : GNC_Subsystem
-    - ephemeris : Ephemeris
-    - logger : HDF5Logger
-    - k_matrix : np.ndarray
-    + run() : bool
-    + get_statistics() : dict
-    - _generate_nominal_orbit() : bool
-    - _generate_fallback_orbit()
-    - _initialize_physical_domain()
-    - _initialize_information_domain()
-    - _design_control_law()
-    - _execute_simulation_loop()
-    - _finalize_simulation() : bool
-    - _report_progress(step: int, epoch: float, force_cmd: np.ndarray)
-    - _ensure_3d_control_force(force_cmd) : np.ndarray
-    - _get_state_derivative(state: np.ndarray) : np.ndarray
+' ==========================================
+' 7. 仿真控制器 (Simulation)
+' ==========================================
+package "mission_sim.simulation" #E6E6FA {
+    abstract class BaseSimulation {
+        - config : dict
+        - mission_id : str
+        - simulation_start_time : float | None
+        - simulation_end_time : float | None
+        - current_step : int
+        - total_steps : int
+        - ephemeris : Ephemeris
+        - environment : CelestialEnvironment
+        - spacecraft : SpacecraftPointMass
+        - ground_station : GroundStation
+        - gnc_system : GNC_Subsystem
+        - logger : HDF5Logger
+        - k_matrix : np.ndarray
+        + run() : bool
+        + get_statistics() : dict
+        # {abstract} _generate_nominal_orbit() : bool
+        # {abstract} _initialize_physical_domain()
+        # {abstract} _initialize_information_domain()
+        # {abstract} _design_control_law()
+        # _generate_fallback_orbit()
+        # _initialize_data_logging()
+        # _execute_simulation_loop()
+        # _finalize_simulation() : bool
+        # _get_observation(epoch) : tuple
+        # _compute_control(epoch, obs_state, frame) : tuple
+        # _propagate_state(force_cmd, force_frame, dt)
+        # _get_state_derivative(state) : np.ndarray
+        # _post_step_processing(dt)
+        # _log_step(epoch)
+        # _report_progress(step, epoch, force_cmd)
+        # _ensure_3d_control_force(force) : np.ndarray
+        # _emergency_shutdown()
+    }
+
+    package "threebody" {
+        class ThreeBodyBaseSimulation {
+            - crtbp : CRTBP
+            + __init__(config)
+            # _initialize_physical_domain()
+            # _initialize_information_domain()
+        }
+
+        class SunEarthL2L1Simulation {
+            + __init__(config)
+            # _generate_nominal_orbit() : bool
+            # _design_control_law()
+        }
+
+        ThreeBodyBaseSimulation <|-- SunEarthL2L1Simulation
+        BaseSimulation <|-- ThreeBodyBaseSimulation
+    }
+
+    package "twobody" {
+        class TwoBodyBaseSimulation <<占位>> {
+            # ... 未来实现
+        }
+        BaseSimulation <|-- TwoBodyBaseSimulation
+    }
 }
 
 ' ==========================================
 ' 顶层依赖与组合关系
 ' ==========================================
-L1MissionSimulation *-- CelestialEnvironment
-L1MissionSimulation *-- SpacecraftPointMass
-L1MissionSimulation *-- GroundStation
-L1MissionSimulation *-- GNC_Subsystem
-L1MissionSimulation *-- HDF5Logger
-L1MissionSimulation ..> TrajectoryFactory : 使用工厂创建生成器
+BaseSimulation *-- CelestialEnvironment
+BaseSimulation *-- SpacecraftPointMass
+BaseSimulation *-- GroundStation
+BaseSimulation *-- GNC_Subsystem
+BaseSimulation *-- HDF5Logger
+BaseSimulation ..> BaseTrajectoryGenerator : 使用工厂创建生成器
+ThreeBodyBaseSimulation o-- CRTBP
 
 @enduml

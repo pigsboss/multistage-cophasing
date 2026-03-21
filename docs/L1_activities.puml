@@ -10,15 +10,15 @@ skinparam ArrowColor #2980B9
 start
 
 partition "1. 预处理阶段 (Pre-processing)" {
-    :加载 L1 仿真配置 (轨道类型、总时长、步长 dt);
+    :加载 L1 仿真配置 (场景、层级、总时长、步长 dt);
     :初始化 CelestialEnvironment (力学注册表);
-    :根据轨道类型选择 TrajectoryGenerator 工厂;
+    :根据场景选择 TrajectoryGenerator 工厂;
     if (轨道类型?) then (开普勒)
         :KeplerianGenerator (二体解析);
     elseif (J2摄动)
         :J2KeplerianGenerator (数值积分+J2);
     elseif (平动点 Halo)
-        :HaloDifferentialCorrector (微分修正);
+        :HaloDifferentialCorrector (固定初值积分);
     else (其他)
         :... 扩展生成器;
     endif

@@ -19,7 +19,7 @@ package "1. 预处理阶段 (Pre-processing)" #F8F9FA {
       **全域标称轨道生成 (多态实现)**
       - 开普勒解析 (KeplerianGenerator)
       - J2摄动数值积分 (J2KeplerianGenerator)
-      - 微分修正 (HaloDifferentialCorrector)
+      - Halo轨道固定初值积分 (HaloDifferentialCorrector)
       - 未来扩展: Lissajous, NRHO, Earth-trailing
     end note
 }
@@ -63,7 +63,7 @@ package "4. 物理底座与执行层 (Plant & Actuation)" #EAEDED {
       **环境可插拔引擎 (隔离与解耦)**
       - LEO/GEO: J2Gravity + AtmosphericDrag
       - 平动点: Gravity_CRTBP + Cannonball_SRP
-      - 深空: 高精度历表 + 光压
+      - 基础动力学: CRTBP (core.dynamics) 提供运动方程
     end note
     
     note right of SC
@@ -79,7 +79,7 @@ package "5. 后处理阶段 (Post-processing)" #F5EEF8 {
     
     note right of Logger
       **定标与报告输出**
-      - Station Keeping 燃料预算底账
+      - Station Keeping 燃料预算底账 (CSV)
       - 3D 标称轨道偏离度
       - 燃料账单文件 (CSV/JSON)
     end note
