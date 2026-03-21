@@ -8,7 +8,7 @@ class CRTBP:
         self.L = length_unit      # 特征长度（AU 或地月距离）
         self.omega = time_unit        # 特征时间倒数（ω）
         # 物理量转换系数
-        self.vel_scale = self.L * self.T
+        self.vel_scale = self.L * self.omega
 
     def dynamics(self, t, state):
         """无量纲运动方程（输入输出均为无量纲状态）"""
@@ -36,7 +36,7 @@ class CRTBP:
         state_phys = state_nd.copy()
         state_phys[0:3] *= self.L
         state_phys[3:6] *= self.vel_scale
-        t_phys = t_nd / self.T
+        t_phys = t_nd / self.omega
         return state_phys, t_phys
 
     def to_nd(self, state_phys, t_phys):
@@ -44,5 +44,5 @@ class CRTBP:
         state_nd = state_phys.copy()
         state_nd[0:3] /= self.L
         state_nd[3:6] /= self.vel_scale
-        t_nd = t_phys * self.T
+        t_nd = t_phys * self.omega
         return state_nd, t_nd
