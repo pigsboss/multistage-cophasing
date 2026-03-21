@@ -72,10 +72,15 @@ def get_simulation_class(scene: str, level: int):
     except ImportError as e:
         raise ImportError(f"无法导入模块 {module_path}: {e}")
 
-    # 根据场景名生成类名（例如 sun_earth_l2 -> SunEarthL2L1Simulation）
-    # 将蛇形转换为驼峰
-    parts = scene.split('_')
-    class_name = ''.join(p.capitalize() for p in parts) + f"L{level}Simulation"
+    # 特殊处理：对于特定场景，使用特定的类名
+    if scene == "leo":
+        class_name = "LEOL1Simulation"
+    elif scene == "geo":
+        class_name = "GEOL1Simulation"
+    else:
+        # 根据场景名生成类名（例如 sun_earth_l2 -> SunEarthL2L1Simulation）
+        parts = scene.split('_')
+        class_name = ''.join(p.capitalize() for p in parts) + f"L{level}Simulation"
 
     if not hasattr(module, class_name):
         raise AttributeError(f"模块 {module_path} 中没有找到类 {class_name}")
@@ -103,6 +108,7 @@ def main():
     parser.add_argument("--time_step", type=float, help="积分步长 (秒)")
     parser.add_argument("--data_dir", help="数据输出目录")
     parser.add_argument("--enable_visualization", action="store_true", help="启用可视化")
+    parser.add_argument("--control_gain_scale", type=float, default=1.0, help="控制增益缩放因子")
     parser.add_argument("--disable_visualization", action="store_false", dest="enable_visualization", help="禁用可视化")
     parser.add_argument("--quiet", action="store_true", help="静默模式，仅输出错误信息（不输出进度等）")
     # 其他参数可通过 --key value 的形式传递，但 argparse 无法直接处理任意键值对。
@@ -115,7 +121,6 @@ def main():
     # 解析额外参数（格式：--key value）
     extra_args = {}
     if args.extra:
-        # 处理类似 ['--key1', 'value1', '--key2', 'value2'] 的列表
         i = 0
         while i < len(args.extra):
             if args.extra[i].startswith('--'):
@@ -125,11 +130,9 @@ def main():
                     extra_args[key] = value
                     i += 2
                 else:
-                    # 没有值，设置为 True
                     extra_args[key] = True
                     i += 1
             else:
-                # 忽略非选项
                 i += 1
 
     # 加载配置文件
@@ -145,8 +148,9 @@ def main():
         "log_buffer_size": 500,
         "log_compression": True,
         "progress_interval": 0.05,
-        "verbose": True,   # 默认详细输出
-        "integrator": "rk4",  # 可选 rk4 / rk45
+        "verbose": True,
+        "integrator": "rk4",
+        "control_gain_scale": 1.0,
     }
 
     # 合并配置：命令行参数覆盖文件配置，再覆盖默认

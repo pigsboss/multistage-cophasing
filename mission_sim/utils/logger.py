@@ -49,7 +49,6 @@ class HDF5Logger:
         # 如果文件已存在，先备份然后删除
         if os.path.exists(filepath):
             self._backup_existing_file()
-            os.remove(filepath)
         
         # 初始化内存缓冲区
         self._init_buffers()
@@ -438,6 +437,15 @@ class HDF5Logger:
             except:
                 pass
     
+    def __enter__(self):
+        """Enter the runtime context for the with statement."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit the runtime context, closing the logger."""
+        self.close()
+        return False  # Do not suppress exceptions
+
     def __repr__(self) -> str:
         """字符串表示"""
         stats = self.get_statistics()

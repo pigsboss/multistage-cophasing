@@ -42,6 +42,7 @@ class TwoBodyBaseSimulation(BaseSimulation):
                 - enable_j2: 是否启用 J2 摄动 [默认 True]
                 - spacecraft_mass: 航天器质量 (kg) [默认 1000]
                 - injection_error: 初始状态注入误差 [默认 [0,0,0,0,0,0]]
+                - elements: 轨道根数 [a, e, i, Omega, omega, M0] (必须提供)
                 - pos_noise_std, vel_noise_std, sampling_rate_hz, visibility_windows: 地面站参数
                 - propagator_type: 盲区外推器类型 ('simple', 'kepler', None)
                 - propagator_mu: 外推器引力常数（若使用 kepler 外推器）
@@ -59,6 +60,11 @@ class TwoBodyBaseSimulation(BaseSimulation):
         # 提取常用参数
         self.mu_earth = self.config.get("mu_earth", 3.986004418e14)
         self.enable_j2 = self.config.get("enable_j2", True)
+
+        # 确保轨道根数存在
+        self.elements = self.config.get("elements")
+        if self.elements is None or len(self.elements) != 6:
+            raise ValueError("二体场景必须提供 6 个轨道根数 'elements'。")
 
     # ====================== 抽象方法（子类必须实现） ======================
     @abstractmethod
@@ -83,8 +89,7 @@ class TwoBodyBaseSimulation(BaseSimulation):
     def _initialize_physical_domain(self):
         """
         初始化物理域（环境、航天器）。
-        注册 J2 摄动（若启用），并创建带初始偏差的航天器质点。
-        子类可重写以添加额外力模型（如大气阻力）。
+        直接使用理论值计算初始状态，避免星历插值误差。
         """
         # 创建环境引擎（地心惯性系）
         self.environment = CelestialEnvironment(
@@ -97,8 +102,10 @@ class TwoBodyBaseSimulation(BaseSimulation):
             j2_model = J2Gravity(mu_earth=self.mu_earth)
             self.environment.register_force(j2_model)
 
-        # 获取标称初始状态（从星历表插值 t=0）
-        nom0_phys = self.ephemeris.get_interpolated_state(0.0)
+        # 直接使用理论值计算初始状态，避免星历插值误差
+        from mission_sim.utils.math_tools import elements_to_cartesian
+        a, e, i, Omega, omega, M0 = self.elements
+        nom0_phys = elements_to_cartesian(self.mu_earth, a, e, i, Omega, omega, M0)
         injection = self.config.get("injection_error", np.zeros(6, dtype=np.float64))
         true0_phys = nom0_phys + injection
 
@@ -131,6 +138,9 @@ class TwoBodyBaseSimulation(BaseSimulation):
         self.gnc_system = GNC_Subsystem("SC", operating_frame=frame)
         self.gnc_system.load_reference_trajectory(self.ephemeris)
 
+        # 用航天器的初始状态初始化导航状态（避免初始巨大误差）
+        self.gnc_system.current_nav_state = self.spacecraft.state.copy()
+
         # 盲区外推器配置
         prop_type = self.config.get("propagator_type")
         if prop_type == "simple":
@@ -159,8 +169,6 @@ class TwoBodyBaseSimulation(BaseSimulation):
         omega = np.sqrt(self.mu_earth / r**3)  # 轨道角速度 (rad/s)
 
         # 状态矩阵 A (6x6) [位置, 速度] 在 LVLH 系下的线性化（简化）
-        # 此处使用经典 Hill 方程（Clohessy-Wiltshire）的扩展（含 J2 长期项简化）
-        # 实际可根据需要精确线性化
         A = np.zeros((6, 6))
         A[0:3, 3:6] = np.eye(3)
         A[3, 0] = 3 * omega**2

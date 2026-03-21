@@ -54,6 +54,9 @@ class ThreeBodyBaseSimulation(BaseSimulation):
         self.gnc_system = GNC_Subsystem("SC", operating_frame=frame)
         self.gnc_system.load_reference_trajectory(self.ephemeris)
 
+        # 用航天器的初始状态初始化导航状态（避免初始巨大误差）
+        self.gnc_system.current_nav_state = self.spacecraft.state.copy()
+
         # 外推器可选
         prop_type = self.config.get("propagator_type")
         if prop_type == "simple":

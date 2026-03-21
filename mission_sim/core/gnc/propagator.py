@@ -161,6 +161,6 @@ class CRTBPPropagator(Propagator):
         new_state_nd = state_nd + (dt_nd / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
         # 转换回物理状态 (新状态对应的时间增量为 dt)
-        new_state_phys, _ = self.crtbp.to_physical(new_state_nd, 0.0)
+        new_state_phys, _ = self.crtbp.to_physical(new_state_nd, dt_nd)
 
         return new_state_phys.astype(np.float64)

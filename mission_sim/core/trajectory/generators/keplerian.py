@@ -5,6 +5,7 @@ import numpy as np
 from mission_sim.core.types import CoordinateFrame
 from mission_sim.core.trajectory.ephemeris import Ephemeris
 from mission_sim.core.trajectory.generators.base import BaseTrajectoryGenerator
+from mission_sim.utils.math_tools import elements_to_cartesian
 
 
 class KeplerianGenerator(BaseTrajectoryGenerator):
@@ -49,7 +50,7 @@ class KeplerianGenerator(BaseTrajectoryGenerator):
         for t in times:
             # 平近点角
             M = M0 + n * t
-            # 解 Kepler 方程（简化：小 e 时可近似，这里使用牛顿迭代）
+            # 解 Kepler 方程 M = E - e sin(E) (牛顿迭代)
             E = self._kepler_solver(M, e)
             # 真近点角
             nu = 2 * np.arctan2(np.sqrt(1 + e) * np.sin(E/2), np.sqrt(1 - e) * np.cos(E/2))
@@ -60,10 +61,8 @@ class KeplerianGenerator(BaseTrajectoryGenerator):
             vx_orb = -np.sqrt(self.mu / (a * (1 - e**2))) * np.sin(nu)
             vy_orb = np.sqrt(self.mu / (a * (1 - e**2))) * (e + np.cos(nu))
 
-            # 坐标变换到 J2000_ECI (简化：仅处理圆轨道或忽略倾角)
-            # 为简化，此处假设轨道在赤道平面内 (i=0, Omega=0, omega=0)
-            # 实际应用中应包含完整的三维旋转。
-            state_eci = np.array([x_orb, y_orb, 0.0, vx_orb, vy_orb, 0.0])
+            # 使用完整的六根数转换函数
+            state_eci = elements_to_cartesian(self.mu, a, e, i, Omega, omega, M)
             states.append(state_eci)
 
         return Ephemeris(times, np.array(states), CoordinateFrame.J2000_ECI)

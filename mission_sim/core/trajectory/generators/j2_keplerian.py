@@ -7,6 +7,7 @@ from mission_sim.core.types import CoordinateFrame
 from mission_sim.core.trajectory.ephemeris import Ephemeris
 from mission_sim.core.trajectory.generators.base import BaseTrajectoryGenerator
 from mission_sim.core.physics.models.j2_gravity import J2Gravity
+from mission_sim.utils.math_tools import elements_to_cartesian
 
 
 class J2KeplerianGenerator(BaseTrajectoryGenerator):
@@ -80,17 +81,6 @@ class J2KeplerianGenerator(BaseTrajectoryGenerator):
         return Ephemeris(sol.t, sol.y.T, CoordinateFrame.J2000_ECI)
 
     def _elements_to_cartesian(self, elements):
-        """将轨道根数转换为 J2000_ECI 笛卡尔状态（简化，仅圆轨道）"""
+        """将轨道根数转换为 J2000_ECI 笛卡尔状态"""
         a, e, i, Omega, omega, M0 = elements
-        # 简化：仅支持圆轨道 e=0，且 i=0，Ω=0，ω=0
-        # 实际应用需实现完整转换
-        n = np.sqrt(self.mu / a**3)
-        M = M0
-        E = M  # 圆轨道近似
-        nu = E
-        r = a
-        x = r * np.cos(nu)
-        y = r * np.sin(nu)
-        vx = -np.sqrt(self.mu / a) * np.sin(nu)
-        vy = np.sqrt(self.mu / a) * np.cos(nu)
-        return np.array([x, y, 0.0, vx, vy, 0.0])
+        return elements_to_cartesian(self.mu, a, e, i, Omega, omega, M0)
