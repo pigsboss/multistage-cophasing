@@ -1,5 +1,5 @@
 @startuml
-title MCPC 框架 L1 级静态类图 (Class Diagram)
+title MCPC 框架 L1 级静态类图 (基于代码实现)
 
 skinparam classAttributeIconSize 0
 skinparam monochrome false
@@ -13,15 +13,19 @@ package "mission_sim.core.types" #F8F9FA {
     enum CoordinateFrame {
         J2000_ECI
         J2000_SSB
+        WGS84_ECEF
         SUN_EARTH_ROTATING
         EARTH_MOON_ROTATING
         LVLH
+        BODY_FRAME
     }
 
     class Telecommand {
         + cmd_type : str
         + target_state : np.ndarray
         + frame : CoordinateFrame
+        + execution_epoch : float
+        + __post_init__()
     }
 }
 
@@ -33,26 +37,30 @@ package "mission_sim.core.trajectory" #E8F8F5 {
         + times : np.ndarray
         + states : np.ndarray
         + frame : CoordinateFrame
+        - _interpolator : CubicSpline
         + get_interpolated_state(t: float) : np.ndarray
+        + __repr__()
     }
 
     abstract class BaseTrajectoryGenerator {
         + {abstract} generate(config: dict) : Ephemeris
     }
 
-    class HaloDifferentialCorrector {
-        - target_region : str
-        + generate(config: dict) : Ephemeris
-        - _state_transition_matrix()
-    }
-
     class KeplerianGenerator {
-        - j2_flag : bool
+        - mu : float
         + generate(config: dict) : Ephemeris
     }
 
-    BaseTrajectoryGenerator <|-- HaloDifferentialCorrector
+    class HaloDifferentialCorrector {
+        - mu : float
+        - OMEGA : float
+        - AU : float
+        + generate(config: dict) : Ephemeris
+        ' 私有方法省略，保持简洁
+    }
+
     BaseTrajectoryGenerator <|-- KeplerianGenerator
+    BaseTrajectoryGenerator <|-- HaloDifferentialCorrector
     BaseTrajectoryGenerator ..> Ephemeris : <<creates>>
 }
 
@@ -66,32 +74,41 @@ package "mission_sim.core.physics" #EAEDED {
         + frame : CoordinateFrame
         + mass : float
         + accumulated_dv : float
-        + apply_thrust(force, frame)
+        + external_accel : np.ndarray
+        + consumed_fuel : float
+        + position : np.ndarray (property)
+        + velocity : np.ndarray (property)
+        + apply_thrust(force_vector: np.ndarray, force_frame: CoordinateFrame)
         + clear_thrust()
-        + get_derivative(env_accel, frame)
-        + consume_mass(m_dot, dt)
+        + get_derivative(gravity_accel: np.ndarray, gravity_frame: CoordinateFrame) : np.ndarray
+        + integrate_dv(dt: float)
+        + consume_mass(m_dot: float, dt: float)
+        + __repr__()
     }
 
     class CelestialEnvironment {
-        - force_registry : list<IForceModel>
         + computation_frame : CoordinateFrame
+        + epoch : float
+        - _force_registry : list[IForceModel]
         + register_force(force_model: IForceModel)
-        + get_total_acceleration(state, frame, epoch) : np.ndarray
+        + step_time(dt: float)
+        + get_total_acceleration(sc_state: np.ndarray, sc_frame: CoordinateFrame) : tuple[np.ndarray, CoordinateFrame]
+        + __repr__()
     }
 
     interface IForceModel {
-        + {abstract} compute_accel(state, epoch) : np.ndarray
+        + {abstract} compute_accel(state: np.ndarray, epoch: float) : np.ndarray
     }
 
     class Gravity_CRTBP {
         - mu : float
-        + compute_accel(state, epoch) : np.ndarray
+        ' 其他物理常数省略，保持简洁
+        + compute_accel(state: np.ndarray, epoch: float) : np.ndarray
     }
 
-    class Cannonball_SRP {
-        - area_to_mass : float
-        - reflectivity : float
-        + compute_accel(state, epoch) : np.ndarray
+    ' 未实现，标记为 TODO
+    class Cannonball_SRP <<未实现>> {
+        + compute_accel(state: np.ndarray, epoch: float) : np.ndarray
     }
 
     CelestialEnvironment o-- IForceModel
@@ -106,21 +123,37 @@ package "mission_sim.core.gnc" #FDF2E9 {
     class GroundStation {
         + name : str
         + operating_frame : CoordinateFrame
-        + visibility_window : list<tuple>
-        + track_spacecraft(true_state, frame, epoch) : tuple
-        + generate_telecommand(cmd_type, target_state, target_frame) : Telecommand
+        + pos_noise_std : float
+        + vel_noise_std : float
+        - sampling_rate_hz : float
+        - min_interval : float
+        - last_track_time : float
+        - visibility_windows : list[tuple[float, float]]
+        + is_visible(epoch: float) : bool
+        + track_spacecraft(true_state: np.ndarray, sc_frame: CoordinateFrame, epoch: float) : tuple[np.ndarray | None, CoordinateFrame]
+        + generate_telecommand(cmd_type: str, target_state: np.ndarray, target_frame: CoordinateFrame, execution_epoch: float = 0.0) : Telecommand
+        + __repr__()
     }
 
     class GNC_Subsystem {
         + sc_id : str
         + operating_frame : CoordinateFrame
         - current_nav_state : np.ndarray
-        - ref_ephemeris : Ephemeris
+        - ref_ephemeris : Ephemeris | None
+        - last_control_force : np.ndarray
+        - last_tracking_error : np.ndarray
+        - last_target_state : np.ndarray
+        - total_control_calls : int
+        - force_shape_warnings : int
         + load_reference_trajectory(eph: Ephemeris)
-        + update_navigation(obs_state, frame)
-        + compute_control_force(epoch, K_matrix) : tuple
+        + update_navigation(obs_state: np.ndarray, frame: CoordinateFrame)
+        + compute_control_force(epoch: float, K_matrix: np.ndarray) : tuple[np.ndarray, CoordinateFrame]
+        + get_tracking_error(epoch: float) : np.ndarray
+        + get_performance_metrics() : dict
+        + reset()
+        + __repr__()
     }
-    
+
     GNC_Subsystem o-- Ephemeris : 追踪参考轨迹
 }
 
@@ -129,40 +162,78 @@ package "mission_sim.core.gnc" #FDF2E9 {
 ' ==========================================
 package "mission_sim.utils" #F5EEF8 {
     class HDF5Logger {
-        - _buffer : dict
-        + set_metadata(path, meta_dict)
-        + log(group, dataset, data)
-        + step()
-        + flush()
+        - filepath : str
+        - buffer_size : int
+        - compression : bool
+        - auto_flush : bool
+        - buffers : dict
+        - buffer_count : int
+        - is_initialized : bool
+        - total_steps : int
+        + initialize_file(metadata: dict | None)
+        + log_step(epoch: float, nominal_state: np.ndarray, true_state: np.ndarray, nav_state: np.ndarray, tracking_error: np.ndarray, control_force: Union[np.ndarray, float], accumulated_dv: float)
+        + flush() : int
+        + close() : bool
+        + get_statistics() : dict
+        + load_data(dataset_name: str, start_idx: int = 0, end_idx: int = None) : np.ndarray
+        + load_all_data() : dict
     }
+
+    class BaseVisualizer {
+        + filepath : str
+        + default_figsize : tuple
+        + create_figure(rows: int, cols: int, title: str, figsize: tuple = None) : tuple[plt.Figure, plt.Axes]
+        + save_plot(fig_obj: plt.Figure, save_path: str)
+        + load_dataset(dataset_path: str) : np.ndarray
+    }
+
     class L1Visualizer {
-        + plot_absolute_convergence()
-        + plot_state_history()
-        + plot_gnc_activity()
+        - mission_name : str
+        + plot_3d_trajectory(save_path: str = "data/L1_3d_trajectory.png")
+        + plot_tracking_error(save_path: str = "data/L1_tracking_error.png")
+        + plot_control_effort(save_path: str = "data/L1_control_effort.png")
     }
+
+    BaseVisualizer <|-- L1Visualizer
 }
 
-class SimulationRunner <<Orchestrator>> {
-    - dt : float
-    - sim_time : float
-    - env : CelestialEnvironment
-    - sc : SpacecraftPointMass
-    - gs : GroundStation
-    - gnc : GNC_Subsystem
+class L1MissionSimulation <<Orchestrator>> {
+    - config : dict
+    - mission_id : str
+    - h5_file : str
+    - simulation_start_time : float | None
+    - simulation_end_time : float | None
+    - current_step : int
+    - total_steps : int
+    - environment : CelestialEnvironment
+    - spacecraft : SpacecraftPointMass
+    - ground_station : GroundStation
+    - gnc_system : GNC_Subsystem
+    - ephemeris : Ephemeris
     - logger : HDF5Logger
-    + initialize_simulation()
-    + execute_time_loop()
-    + run_post_processing()
+    - k_matrix : np.ndarray
+    + run() : bool
+    + get_statistics() : dict
+    - _generate_nominal_orbit() : bool
+    - _generate_fallback_orbit()
+    - _initialize_physical_domain()
+    - _initialize_information_domain()
+    - _design_control_law()
+    - _execute_simulation_loop()
+    - _finalize_simulation() : bool
+    - _report_progress(step: int, epoch: float, force_cmd: np.ndarray)
+    - _ensure_3d_control_force(force_cmd) : np.ndarray
+    - _get_state_derivative(state: np.ndarray) : np.ndarray
 }
 
 ' ==========================================
 ' 顶层依赖与组合关系
 ' ==========================================
-SimulationRunner *-- CelestialEnvironment
-SimulationRunner *-- SpacecraftPointMass
-SimulationRunner *-- GroundStation
-SimulationRunner *-- GNC_Subsystem
-SimulationRunner *-- HDF5Logger
-SimulationRunner ..> BaseTrajectoryGenerator : 预处理调用
+L1MissionSimulation *-- CelestialEnvironment
+L1MissionSimulation *-- SpacecraftPointMass
+L1MissionSimulation *-- GroundStation
+L1MissionSimulation *-- GNC_Subsystem
+L1MissionSimulation *-- HDF5Logger
+L1MissionSimulation ..> BaseTrajectoryGenerator : 预处理调用
 
 @enduml
