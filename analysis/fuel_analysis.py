@@ -9,12 +9,15 @@ import os
 import sys
 import json
 import time
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from tqdm import tqdm
+import multiprocessing as mp
+from multiprocessing import Pool
 
 # Set matplotlib backend to non-interactive (avoid plt.show() warnings)
 import matplotlib
@@ -24,7 +27,6 @@ matplotlib.use('Agg')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from mission_sim.simulation.threebody.sun_earth_l2 import SunEarthL2L1Simulation
-from mission_sim.utils.logger import HDF5Logger
 from mission_sim.core.types import CoordinateFrame
 
 
@@ -44,6 +46,75 @@ class FuelMetrics:
     parameters: Dict[str, Any]   # Complete parameter copy
 
 
+def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[FuelMetrics]:
+    """
+    Run a single simulation and return fuel-related metrics.
+    Designed to be executed in a worker process.
+
+    Args:
+        config: Simulation configuration dictionary
+        mission_id: Unique identifier for this simulation run
+
+    Returns:
+        FuelMetrics if successful, else None
+    """
+    config["mission_id"] = mission_id
+
+    try:
+        sim = SunEarthL2L1Simulation(config)
+        start_time = time.time()
+        success = sim.run()
+        elapsed = time.time() - start_time
+
+        if not success:
+            print(f"  [Warning] Simulation failed, skipping")
+            return None
+
+        # Get basic statistics from simulation object
+        stats = sim.get_statistics()
+        total_dv = stats.get("accumulated_dv", np.nan)
+        final_pos_err = stats.get("final_position_error", np.nan)
+
+        # Load maximum control force from HDF5 file using absolute path
+        h5_file_abs = os.path.abspath(sim.h5_file)
+        max_force = np.nan
+        if os.path.exists(h5_file_abs):
+            try:
+                with h5py.File(h5_file_abs, 'r') as f:
+                    forces = f['control_forces'][:]
+                    if len(forces) > 0:
+                        max_force = np.max(np.linalg.norm(forces, axis=1))
+            except Exception as e:
+                print(f"  [Warning] Failed to read control force data: {e}")
+        else:
+            print(f"  [Warning] HDF5 file not found: {h5_file_abs}")
+
+        # Calculate average delta-V per day
+        sim_days = config.get("simulation_days", 30)
+        avg_dv_per_day = total_dv / sim_days if sim_days > 0 else np.nan
+
+        metrics = FuelMetrics(
+            mission_id=sim.mission_id,
+            orbit_type=config.get("orbit_type", "Unknown"),
+            control_gain_scale=config.get("control_gain_scale", 1.0),
+            blind_interval_days=config.get("blind_interval_days", 0),
+            simulation_days=sim_days,
+            total_dv=total_dv,
+            avg_dv_per_day=avg_dv_per_day,
+            max_control_force=max_force,
+            final_position_error=final_pos_err,
+            simulation_time=elapsed,
+            parameters=config
+        )
+        return metrics
+
+    except Exception as e:
+        print(f"  [Error] Simulation exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 class FuelAnalyzer:
     """
     Fuel consumption analyzer.
@@ -59,7 +130,8 @@ class FuelAnalyzer:
         "log_compression": True,
         "enable_visualization": False,
         "data_dir": "data/fuel_analysis",
-        "log_level": "WARNING"
+        "log_level": "WARNING",
+        "integrator": "rk4",            # Default integrator
     }
 
     # Default scan parameters
@@ -74,7 +146,8 @@ class FuelAnalyzer:
                  base_config: Optional[Dict] = None,
                  scan_params: Optional[Dict] = None,
                  output_dir: str = "analysis_results",
-                 n_repeats: int = 3):
+                 n_repeats: int = 3,
+                 n_processes: int = None):
         """
         Initialize fuel analyzer.
 
@@ -83,11 +156,13 @@ class FuelAnalyzer:
             scan_params: Parameter scan dictionary
             output_dir: Output directory for results
             n_repeats: Number of repeated runs per parameter combination (for statistical stability)
+            n_processes: Number of parallel processes (default: None -> cpu_count)
         """
         self.base_config = {**self.DEFAULT_BASE_CONFIG, **(base_config or {})}
         self.scan_params = scan_params or self.DEFAULT_SCAN_PARAMS
         self.output_dir = output_dir
         self.n_repeats = n_repeats
+        self.n_processes = n_processes or mp.cpu_count()
 
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -98,6 +173,7 @@ class FuelAnalyzer:
         print(f"[FuelAnalyzer] Initialized, output directory: {output_dir}")
         print(f"[FuelAnalyzer] Scan parameters: {list(self.scan_params.keys())}")
         print(f"[FuelAnalyzer] Repeats per combination: {n_repeats}")
+        print(f"[FuelAnalyzer] Parallel processes: {self.n_processes}")
 
     def _build_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -142,96 +218,48 @@ class FuelAnalyzer:
 
         return config
 
-    def _run_single_simulation(self, config: Dict[str, Any]) -> Optional[FuelMetrics]:
-        """
-        Run a single simulation and return fuel-related metrics.
-        """
-        try:
-            sim = SunEarthL2L1Simulation(config)
-            start_time = time.time()
-            success = sim.run()
-            elapsed = time.time() - start_time
-
-            if not success:
-                print(f"  [Warning] Simulation failed, skipping")
-                return None
-
-            # Get basic statistics from simulation object
-            stats = sim.get_statistics()
-            total_dv = stats.get("accumulated_dv", np.nan)
-            final_pos_err = stats.get("final_position_error", np.nan)
-
-            # Load maximum control force from HDF5 file using absolute path
-            h5_file_abs = os.path.abspath(sim.h5_file)
-            max_force = np.nan
-            if os.path.exists(h5_file_abs):
-                try:
-                    with h5py.File(h5_file_abs, 'r') as f:
-                        forces = f['control_forces'][:]
-                        if len(forces) > 0:
-                            max_force = np.max(np.linalg.norm(forces, axis=1))
-                except Exception as e:
-                    print(f"  [Warning] Failed to read control force data: {e}")
-            else:
-                print(f"  [Warning] HDF5 file not found: {h5_file_abs}")
-
-            # Calculate average delta-V per day
-            sim_days = config.get("simulation_days", 30)
-            avg_dv_per_day = total_dv / sim_days if sim_days > 0 else np.nan
-
-            metrics = FuelMetrics(
-                mission_id=sim.mission_id,
-                orbit_type=config.get("orbit_type", "Unknown"),
-                control_gain_scale=config.get("control_gain_scale", 1.0),
-                blind_interval_days=config.get("blind_interval_days", 0),
-                simulation_days=sim_days,
-                total_dv=total_dv,
-                avg_dv_per_day=avg_dv_per_day,
-                max_control_force=max_force,
-                final_position_error=final_pos_err,
-                simulation_time=elapsed,
-                parameters=config
-            )
-            return metrics
-
-        except Exception as e:
-            print(f"  [Error] Simulation exception: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _generate_param_combinations(self) -> List[Dict[str, Any]]:
+    def _generate_param_combinations(self) -> List[Tuple[Dict[str, Any], str]]:
         """
         Generate all parameter combinations (Cartesian product) and repeat n_repeats times.
+        Returns a list of (config, mission_id) pairs.
         """
-        import itertools
         keys = list(self.scan_params.keys())
         values = [self.scan_params[k] for k in keys]
         combinations = []
+        idx = 0
         for combo in itertools.product(*values):
             params = dict(zip(keys, combo))
             for _ in range(self.n_repeats):
-                combinations.append(params.copy())
+                mission_id = f"fuel_analysis_{idx:06d}"
+                config = self._build_config(params)
+                combinations.append((config, mission_id))
+                idx += 1
         return combinations
 
     def run_scan(self):
         """
-        Execute parameter scan simulations.
+        Execute parameter scan simulations in parallel.
         """
         param_combos = self._generate_param_combinations()
         total_runs = len(param_combos)
         print(f"\n[FuelAnalyzer] Starting parameter scan, total runs: {total_runs}")
+        print(f"[FuelAnalyzer] Using {self.n_processes} parallel processes...")
 
-        for i, params in enumerate(tqdm(param_combos, desc="Running simulations", unit="run")):
-            config = self._build_config(params)
-            metrics = self._run_single_simulation(config)
-            if metrics is not None:
-                self.metrics_list.append(metrics)
-            # Periodically save intermediate results
-            if (i+1) % 50 == 0:
-                self._save_results(partial=True)
+        with Pool(processes=self.n_processes) as pool:
+            args = [(config, mission_id) for config, mission_id in param_combos]
+            results = []
+            with tqdm(total=total_runs, desc="Running simulations", unit="run") as pbar:
+                for result in pool.starmap(_run_single_simulation, args):
+                    if result is not None:
+                        results.append(result)
+                    pbar.update(1)
 
-        # Final save
+                    # Periodically save intermediate results (every 50 runs)
+                    if len(results) % 50 == 0:
+                        self.metrics_list = results
+                        self._save_results(partial=True)
+
+        self.metrics_list = results
         self._save_results(final=True)
         print(f"\n[FuelAnalyzer] Scan finished, successful runs: {len(self.metrics_list)}/{total_runs}")
 
@@ -433,7 +461,8 @@ def main():
         "log_buffer_size": 200,
         "enable_visualization": False,
         "data_dir": "data/fuel_analysis",
-        "log_level": "WARNING"
+        "log_level": "WARNING",
+        "integrator": "rk4",   # Can be changed to "rk45" for variable-step integration
     }
 
     # Create analyzer
@@ -441,7 +470,8 @@ def main():
         base_config=base_config,
         scan_params=scan_params,
         output_dir="analysis_results",
-        n_repeats=2        # Runs per combination (increase for real analysis)
+        n_repeats=2,           # Runs per combination (increase for real analysis)
+        n_processes=4          # Adjust based on available CPU cores
     )
 
     # Run scan
@@ -453,4 +483,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Ensure safe multiprocessing on Windows
     main()

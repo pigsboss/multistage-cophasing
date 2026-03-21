@@ -8,12 +8,28 @@
 import numpy as np
 from mission_sim.core.physics.environment import IForceModel
 
+# 尝试导入 Numba 用于 JIT 加速，若不可用则回退到普通 Python
+try:
+    from numba import jit as njit
+    _HAS_NUMBA = True
+except ImportError:
+    # 定义一个空装饰器，使代码在无 numba 时仍能运行
+    def njit(func):
+        return func
+    _HAS_NUMBA = False
 
-class Cannonball_SRP(IForceModel):
+
+@njit
+def _srp_accel(
+    pos_sc: np.ndarray,
+    sun_position: np.ndarray,
+    area_to_mass: float,
+    reflectivity: float,
+    P_solar: float,
+    AU: float
+) -> np.ndarray:
     """
-    球对称太阳光压模型（Cannonball 模型）
-    继承自 IForceModel，提供基于面积质量比和反射系数的光压加速度计算。
-    假设太阳位于固定位置（日地旋转系中），适用于日地 L1/L2 等深空任务。
+    计算太阳光压加速度的纯函数 (可被 Numba JIT 编译)。
 
     物理公式:
         a_srp = (1 + r) * P_solar * (AU² / r²) * (A/m) * û
@@ -25,6 +41,41 @@ class Cannonball_SRP(IForceModel):
         r       : 航天器到太阳的距离 (m)
         A/m     : 面积质量比 (m²/kg)
         û       : 从航天器指向太阳的单位方向向量
+
+    Args:
+        pos_sc: 航天器位置向量 [x, y, z] (SI单位，日地旋转系)
+        sun_position: 太阳在坐标系中的固定位置 (3维向量)
+        area_to_mass: 面积质量比 A/m (m²/kg)
+        reflectivity: 表面反射系数 (0~1)
+        P_solar: 1 AU 处的太阳辐射压力 (N/m²)
+        AU: 天文单位 (m)
+
+    Returns:
+        加速度向量 [ax, ay, az] (m/s²)
+    """
+    # 计算从航天器指向太阳的矢量
+    r_vec = sun_position - pos_sc
+    r_mag = np.linalg.norm(r_vec)
+
+    # 防止除零 (距离过近时返回零加速度)
+    if r_mag < 1.0:
+        return np.zeros(3, dtype=np.float64)
+
+    # 单位方向向量
+    dir_sun = r_vec / r_mag
+
+    # 加速度大小: factor = (1+r)*P_solar*(AU²/r²)*(A/m)
+    factor = (1.0 + reflectivity) * P_solar * (AU * AU) * area_to_mass / (r_mag * r_mag)
+
+    # 加速度向量
+    return factor * dir_sun
+
+
+class Cannonball_SRP(IForceModel):
+    """
+    球对称太阳光压模型（Cannonball 模型）
+    继承自 IForceModel，提供基于面积质量比和反射系数的光压加速度计算。
+    假设太阳位于固定位置（日地旋转系中），适用于日地 L1/L2 等深空任务。
 
     坐标系假设: 日地旋转系，太阳位于 (-mu * AU, 0, 0)，地球位于 ((1-mu)*AU, 0, 0)
     """
@@ -61,7 +112,7 @@ class Cannonball_SRP(IForceModel):
             if self.sun_position.shape != (3,):
                 raise ValueError(f"sun_position 必须是形状为 (3,) 的数组，当前形状: {self.sun_position.shape}")
 
-        # 预计算常数因子，用于优化计算
+        # 预计算常数因子（保留以备可能用途，纯函数中直接计算）
         self._constant_factor = (1.0 + self.reflectivity) * self.P_solar * (self.AU ** 2) * self.area_to_mass
 
     def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
@@ -78,26 +129,15 @@ class Cannonball_SRP(IForceModel):
         # 提取位置
         pos_sc = state[:3]
 
-        # 计算从航天器指向太阳的矢量
-        r_vec = self.sun_position - pos_sc
-        r_mag = np.linalg.norm(r_vec)
-
-        # 防止除零
-        if r_mag < 1.0:
-            # 距离太近，返回零加速度（实际不会发生）
-            return np.zeros(3, dtype=np.float64)
-
-        # 单位方向向量
-        dir_sun = r_vec / r_mag
-
-        # 加速度大小: factor = (1+r)*P_solar*(AU²/r²)*(A/m)
-        # 其中 r 是航天器到太阳的距离
-        factor = self._constant_factor / (r_mag * r_mag)
-
-        # 加速度向量
-        acc = factor * dir_sun
-
-        return acc.astype(np.float64)
+        # 调用纯函数计算加速度
+        return _srp_accel(
+            pos_sc,
+            self.sun_position,
+            self.area_to_mass,
+            self.reflectivity,
+            self.P_solar,
+            self.AU
+        )
 
     def __repr__(self) -> str:
         return (f"Cannonball_SRP(A/m={self.area_to_mass:.4f} m²/kg, "

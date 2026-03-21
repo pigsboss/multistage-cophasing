@@ -201,7 +201,10 @@ class GNC_Subsystem:
         return control_force, self.operating_frame
 
     def _validate_and_fix_K_matrix(self, K_matrix: np.ndarray) -> np.ndarray:
-        """验证并修复K矩阵形状，确保为 (3,6)"""
+        """
+        验证并修复K矩阵形状，确保为 (3,6)。
+        【L1 稳健性升级】：移除静默妥协，遇到无法安全修复的维度错误时立即抛出异常 (Fail-Fast)。
+        """
         if not isinstance(K_matrix, np.ndarray):
             K_matrix = np.array(K_matrix, dtype=np.float64)
 
@@ -209,25 +212,34 @@ class GNC_Subsystem:
         if K_matrix.shape == expected_shape:
             return K_matrix
 
-        print(f"⚠️ [{self.sc_id} GNC] K矩阵形状异常: {K_matrix.shape}，期望 {expected_shape}")
+        print(f"⚠️ [{self.sc_id} GNC] K矩阵形状不匹配: 当前 {K_matrix.shape}，期望 {expected_shape}。尝试进行安全重塑...")
 
-        # 形状修正逻辑
-        if K_matrix.shape == (1, 6) or K_matrix.shape == (6,):
-            if K_matrix.shape == (6,):
-                K_matrix = K_matrix.reshape(1, 6)
-            K_matrix = np.tile(K_matrix, (3, 1))
-        elif K_matrix.shape[0] > 3:
-            K_matrix = K_matrix[:3, :]
-        elif K_matrix.shape[1] > 6:
-            K_matrix = K_matrix[:, :6]
-        else:
-            try:
+        # 尝试安全的形状修正逻辑 (仅处理明确可推导的降维/展平情况)
+        try:
+            if K_matrix.shape == (1, 6) or K_matrix.shape == (6,):
+                # 如果是 1D 数组，假定 3 个轴使用相同的反馈增益
+                if K_matrix.shape == (6,):
+                    K_matrix = K_matrix.reshape(1, 6)
+                K_matrix = np.tile(K_matrix, (3, 1))
+                print(f"  [{self.sc_id} GNC] 已将 1D 增益广播为 3D: {K_matrix.shape}")
+                return K_matrix
+
+            # 如果是纯粹的展平数组且元素数量匹配，则重塑
+            if K_matrix.size == 18:
                 K_matrix = K_matrix.reshape(expected_shape)
-            except:
-                K_matrix = np.eye(3, 6, dtype=np.float64) * 1e-3
-                print(f"  [{self.sc_id} GNC] 无法修复，使用备用增益")
+                print(f"  [{self.sc_id} GNC] 已重塑为标准维度: {K_matrix.shape}")
+                return K_matrix
 
-        return K_matrix
+        except Exception as e:
+            # 捕获任何在重塑过程中发生的意外错误
+            raise ValueError(f"[{self.sc_id} GNC 致命错误] K 矩阵重塑失败: {e}")
+
+        # 如果走到这里，说明矩阵维度完全不可控，必须 Fail-Fast
+        raise ValueError(
+            f"[{self.sc_id} GNC 致命错误] 拒绝执行控制指令！\n"
+            f"  传入的 K 矩阵形状 {K_matrix.shape} 无法安全转换为所需的 {expected_shape}。\n"
+            f"  请检查 _design_control_law 中的 LQR/反馈逻辑设计。"
+        )
 
     def _standardize_control_force(self, raw_force) -> np.ndarray:
         """标准化控制力输入，确保输出为 (3,) 数组"""

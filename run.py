@@ -8,9 +8,9 @@ MCPC 框架通用仿真入口
 
 使用示例：
     python run.py --scene sun_earth_l2 --level 1
-    python run.py --scene sun_earth_l2 --level 1 --config config.yaml
-    python run.py --scene sun_earth_l2 --level 1 --simulation_days 30 --time_step 60
-    python run.py --scene sun_earth_l2 --level 1 --quiet                 # 静默模式
+    python run.py --scene leo --level 1 --simulation_days 30 --time_step 10
+    python run.py --scene geo --level 1 --config config/geo_example.yaml
+    python run.py --scene sun_earth_l2 --level 1 --quiet
 """
 
 import sys
@@ -24,9 +24,9 @@ from typing import Dict, Any
 # 场景名到模块路径的映射
 SCENE_MODULE_MAP = {
     "sun_earth_l2": "mission_sim.simulation.threebody.sun_earth_l2",
+    "leo": "mission_sim.simulation.twobody.leo",
+    "geo": "mission_sim.simulation.twobody.geo",
     # 未来可扩展：
-    # "leo": "mission_sim.simulation.twobody.leo",
-    # "geo": "mission_sim.simulation.twobody.geo",
     # "heo": "mission_sim.simulation.twobody.heo",
     # "cislunar": "mission_sim.simulation.threebody.cislunar",
 }
@@ -95,7 +95,7 @@ def merge_config(default_config: Dict[str, Any], file_config: Dict[str, Any], cl
 
 def main():
     parser = argparse.ArgumentParser(description="MCPC 仿真通用入口")
-    parser.add_argument("--scene", required=True, help="仿真场景（如 sun_earth_l2）")
+    parser.add_argument("--scene", required=True, help="仿真场景（如 sun_earth_l2, leo, geo）")
     parser.add_argument("--level", type=int, required=True, choices=[1, 2, 3, 4, 5], help="仿真层级（L1-L5）")
     parser.add_argument("--config", help="YAML 配置文件路径")
     parser.add_argument("--mission_name", help="任务名称")
@@ -146,6 +146,7 @@ def main():
         "log_compression": True,
         "progress_interval": 0.05,
         "verbose": True,   # 默认详细输出
+        "integrator": "rk4",  # 可选 rk4 / rk45
     }
 
     # 合并配置：命令行参数覆盖文件配置，再覆盖默认

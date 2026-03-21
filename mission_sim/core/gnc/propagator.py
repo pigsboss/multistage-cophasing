@@ -11,7 +11,7 @@
 
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Optional
 
 
 class Propagator(ABC):
@@ -114,6 +114,53 @@ class KeplerPropagator(Propagator):
         return new_state.astype(np.float64)
 
 
-# 可选：CRTBP 外推器（日地旋转系），后续 L2 可能需要，这里暂不实现
-# class CRTBPPropagator(Propagator):
-#     pass
+class CRTBPPropagator(Propagator):
+    """
+    CRTBP (圆型限制性三体问题) 外推器。
+    适用于日地旋转系 (SUN_EARTH_ROTATING) 或地月旋转系等平动点附近区域。
+    利用 CRTBP 动力学进行高精度外推，比线性外推精度高两个数量级以上。
+
+    使用四阶 Runge-Kutta 积分器在无量纲域内积分，然后转换回物理单位。
+    """
+
+    def __init__(self, crtbp):
+        """
+        初始化 CRTBP 外推器。
+
+        Args:
+            crtbp: CRTBP 类实例 (来自 mission_sim.core.dynamics.threebody.base)
+                   包含 mu, L, omega, dynamics, to_physical, to_nd 等方法。
+        """
+        self.crtbp = crtbp
+
+    def propagate(self, state: np.ndarray, dt: float) -> np.ndarray:
+        """
+        使用 CRTBP 动力学外推状态。
+
+        Args:
+            state: 当前物理状态 [x, y, z, vx, vy, vz] (SI单位，日地旋转系)
+            dt: 外推时间步长 (s)
+
+        Returns:
+            np.ndarray: 外推后的物理状态 (SI单位)
+        """
+        # 转换为无量纲状态和时间
+        state_nd, t_nd = self.crtbp.to_nd(state, 0.0)
+        dt_nd = dt * self.crtbp.omega
+
+        # 定义无量纲导数函数
+        def derivatives_nd(s_nd: np.ndarray) -> np.ndarray:
+            # 忽略时间参数，直接调用 dynamics
+            return self.crtbp.dynamics(0.0, s_nd)
+
+        # RK4 积分 (无量纲域)
+        k1 = derivatives_nd(state_nd)
+        k2 = derivatives_nd(state_nd + 0.5 * dt_nd * k1)
+        k3 = derivatives_nd(state_nd + 0.5 * dt_nd * k2)
+        k4 = derivatives_nd(state_nd + dt_nd * k3)
+        new_state_nd = state_nd + (dt_nd / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        # 转换回物理状态 (新状态对应的时间增量为 dt)
+        new_state_phys, _ = self.crtbp.to_physical(new_state_nd, 0.0)
+
+        return new_state_phys.astype(np.float64)

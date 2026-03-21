@@ -1,7 +1,8 @@
 # mission_sim/utils/math_tools.py
 """
 Mathematical utilities for MCPC framework.
-Includes LQR gain calculation, LVLH transformation, and orbital mechanics conversions.
+Includes LQR gain calculation, LVLH transformation, orbital mechanics conversions,
+and coordinate frame transformations (inertial ↔ rotating).
 """
 
 import numpy as np
@@ -161,3 +162,105 @@ def elements_to_cartesian(
     vel = R @ [vx_orb, vy_orb, 0.0]
 
     return np.array([pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]], dtype=np.float64)
+
+
+def inertial_to_rotating(
+    state_inertial: np.ndarray,
+    t: float,
+    omega: float
+) -> np.ndarray:
+    """
+    Convert a state vector from the inertial frame (J2000_SSB or similar)
+    to the rotating frame that rotates about the Z-axis with constant angular velocity omega.
+
+    The transformation is a simple rotation about the Z-axis:
+        x_rot = x_inertial * cos(omega*t) + y_inertial * sin(omega*t)
+        y_rot = -x_inertial * sin(omega*t) + y_inertial * cos(omega*t)
+        z_rot = z_inertial
+
+    Velocities transform accordingly:
+        vx_rot = vx_inertial * cos(omega*t) + vy_inertial * sin(omega*t) + omega * y_rot
+        vy_rot = -vx_inertial * sin(omega*t) + vy_inertial * cos(omega*t) - omega * x_rot
+        vz_rot = vz_inertial
+
+    Args:
+        state_inertial: State vector in inertial frame [x, y, z, vx, vy, vz] (m, m/s)
+        t: Time (s)
+        omega: Angular velocity of rotating frame (rad/s)
+
+    Returns:
+        State vector in rotating frame [x_rot, y_rot, z_rot, vx_rot, vy_rot, vz_rot] (m, m/s)
+    """
+    x, y, z, vx, vy, vz = state_inertial
+
+    cos_theta = np.cos(omega * t)
+    sin_theta = np.sin(omega * t)
+
+    # Position transformation
+    x_rot = x * cos_theta + y * sin_theta
+    y_rot = -x * sin_theta + y * cos_theta
+    z_rot = z
+
+    # Velocity transformation (includes coriolis term)
+    vx_rot = vx * cos_theta + vy * sin_theta + omega * y_rot
+    vy_rot = -vx * sin_theta + vy * cos_theta - omega * x_rot
+    vz_rot = vz
+
+    return np.array([x_rot, y_rot, z_rot, vx_rot, vy_rot, vz_rot], dtype=np.float64)
+
+
+def rotating_to_inertial(
+    state_rotating: np.ndarray,
+    t: float,
+    omega: float
+) -> np.ndarray:
+    """
+    Convert a state vector from the rotating frame (which rotates about Z-axis with constant omega)
+    back to the inertial frame.
+
+    The inverse transformation of inertial_to_rotating.
+
+    Args:
+        state_rotating: State vector in rotating frame [x, y, z, vx, vy, vz] (m, m/s)
+        t: Time (s)
+        omega: Angular velocity of rotating frame (rad/s)
+
+    Returns:
+        State vector in inertial frame [x_inertial, y_inertial, z_inertial, vx_inertial, vy_inertial, vz_inertial] (m, m/s)
+    """
+    x_rot, y_rot, z_rot, vx_rot, vy_rot, vz_rot = state_rotating
+
+    cos_theta = np.cos(omega * t)
+    sin_theta = np.sin(omega * t)
+
+    # Position transformation (inverse rotation)
+    x = x_rot * cos_theta - y_rot * sin_theta
+    y = x_rot * sin_theta + y_rot * cos_theta
+    z = z_rot
+
+    # Velocity transformation (inverse of the rotating frame transformation)
+    # Derivation: from rotating to inertial, we need to add back the coriolis term.
+    # The known relation: v_inertial = v_rot + ω × r
+    # Here ω = [0,0,omega], r = [x_rot, y_rot, z_rot] in rotating coordinates.
+    # But careful: the velocity transformation can be derived directly from the forward formulas.
+    # Alternatively, we can use:
+    vx = vx_rot * cos_theta - vy_rot * sin_theta - omega * (x_rot * sin_theta + y_rot * cos_theta)
+    vy = vx_rot * sin_theta + vy_rot * cos_theta + omega * (x_rot * cos_theta - y_rot * sin_theta)
+    vz = vz_rot
+
+    # Simplified:
+    # vx = vx_rot * cos_theta - vy_rot * sin_theta - omega * y
+    # vy = vx_rot * sin_theta + vy_rot * cos_theta + omega * x
+    # where x,y are the inertial positions computed above.
+    # Let's compute using the derived positions for clarity.
+    # Using the computed x,y:
+    # vx = vx_rot * cos_theta - vy_rot * sin_theta - omega * y
+    # vy = vx_rot * sin_theta + vy_rot * cos_theta + omega * x
+    # This matches the formula above.
+
+    # We'll use the simpler expressions:
+    vx = vx_rot * cos_theta - vy_rot * sin_theta - omega * y
+    vy = vx_rot * sin_theta + vy_rot * cos_theta + omega * x
+    vz = vz_rot
+
+    return np.array([x, y, z, vx, vy, vz], dtype=np.float64)

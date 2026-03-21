@@ -9,12 +9,16 @@ Statistical charts and performance reports are output.
 import os
 import sys
 import time
+import json
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field, asdict
 from tqdm import tqdm
+import multiprocessing as mp
+from multiprocessing import Pool
 
 # Set matplotlib backend to non-interactive (avoid plt.show() warnings)
 import matplotlib
@@ -42,6 +46,86 @@ class RobustnessMetrics:
     parameters: Dict[str, Any] = field(default_factory=dict)
 
 
+def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[RobustnessMetrics]:
+    """
+    Run a single simulation and return performance metrics.
+    This function is designed to be executed in a worker process.
+
+    Args:
+        config: Simulation configuration dictionary
+        mission_id: Unique identifier for this simulation run (to avoid filename conflicts)
+
+    Returns:
+        RobustnessMetrics if successful, else None
+    """
+    # Inject mission_id into config (simulation will use it if BaseSimulation supports it)
+    config["mission_id"] = mission_id
+
+    try:
+        sim = SunEarthL2L1Simulation(config)
+        start_time = time.time()
+        success = sim.run()
+        elapsed = time.time() - start_time
+
+        if not success:
+            print(f"  [Warning] Simulation failed, skipping")
+            return None
+
+        # Get basic statistics from simulation object
+        stats = sim.get_statistics()
+        final_pos_err = stats.get("final_position_error", np.nan)
+        final_vel_err = stats.get("final_velocity_error", np.nan)
+        total_dv = stats.get("accumulated_dv", np.nan)
+
+        # Load additional metrics from HDF5 file using absolute path
+        h5_file_abs = os.path.abspath(sim.h5_file)
+        if os.path.exists(h5_file_abs):
+            try:
+                with h5py.File(h5_file_abs, 'r') as f:
+                    # Tracking errors
+                    errors = f['tracking_errors'][:]
+                    if len(errors) > 0:
+                        rms_pos = np.sqrt(np.mean(errors[:, 0:3]**2))
+                        rms_vel = np.sqrt(np.mean(errors[:, 3:6]**2))
+                        # Convergence time: first time position error < 1000m
+                        threshold = 1000.0
+                        times = f['epochs'][:]
+                        idx = np.where(np.linalg.norm(errors[:, 0:3], axis=1) < threshold)[0]
+                        conv_time = times[idx[0]] if len(idx) > 0 else np.nan
+                    else:
+                        rms_pos = rms_vel = conv_time = np.nan
+
+                    # Control forces
+                    forces = f['control_forces'][:]
+                    max_force = np.max(np.linalg.norm(forces, axis=1)) if len(forces) > 0 else np.nan
+            except Exception as e:
+                print(f"  [Warning] Failed to read HDF5 data: {e}")
+                rms_pos = rms_vel = conv_time = max_force = np.nan
+        else:
+            print(f"  [Warning] HDF5 file not found: {h5_file_abs}")
+            rms_pos = rms_vel = conv_time = max_force = np.nan
+
+        metrics = RobustnessMetrics(
+            mission_id=sim.mission_id,
+            position_error_final=final_pos_err,
+            velocity_error_final=final_vel_err,
+            accumulated_dv=total_dv,
+            max_control_force=max_force,
+            rms_position_error=rms_pos,
+            rms_velocity_error=rms_vel,
+            convergence_time=conv_time,
+            simulation_time=elapsed,
+            parameters=config
+        )
+        return metrics
+
+    except Exception as e:
+        print(f"  [Error] Simulation exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 class ControlRobustnessAnalyzer:
     """
     Control robustness analyzer.
@@ -58,7 +142,8 @@ class ControlRobustnessAnalyzer:
         "log_compression": True,
         "enable_visualization": False,   # Disable visualization for speed
         "data_dir": "data/robustness_analysis",
-        "log_level": "WARNING"
+        "log_level": "WARNING",
+        "integrator": "rk4",             # Default integrator
     }
 
     # Default parameter variation ranges
@@ -74,7 +159,8 @@ class ControlRobustnessAnalyzer:
                  base_config: Optional[Dict] = None,
                  param_vary: Optional[Dict] = None,
                  output_dir: str = "analysis_results",
-                 n_runs: int = 10):
+                 n_runs: int = 10,
+                 n_processes: int = None):
         """
         Initialize the analyzer.
 
@@ -83,11 +169,13 @@ class ControlRobustnessAnalyzer:
             param_vary: Parameter variation dictionary, key = parameter name, value = list or array
             output_dir: Output directory for results
             n_runs: Number of repeated runs per parameter combination (for statistical stability)
+            n_processes: Number of parallel processes (default: None -> cpu_count)
         """
         self.base_config = {**self.DEFAULT_CONFIG, **(base_config or {})}
         self.param_vary = param_vary or self.DEFAULT_PARAM_VARY
         self.output_dir = output_dir
         self.n_runs = n_runs
+        self.n_processes = n_processes or mp.cpu_count()
 
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -98,6 +186,7 @@ class ControlRobustnessAnalyzer:
         print(f"[Analyzer] Initialized, output directory: {output_dir}")
         print(f"[Analyzer] Parameter variation keys: {list(self.param_vary.keys())}")
         print(f"[Analyzer] Runs per combination: {n_runs}")
+        print(f"[Analyzer] Parallel processes: {self.n_processes}")
 
     def _build_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -108,117 +197,69 @@ class ControlRobustnessAnalyzer:
             config[key] = value
         return config
 
-    def _run_single_simulation(self, config: Dict[str, Any]) -> Optional[RobustnessMetrics]:
-        """
-        Run a single simulation and return performance metrics.
-        """
-        try:
-            sim = SunEarthL2L1Simulation(config)
-            start_time = time.time()
-            success = sim.run()
-            elapsed = time.time() - start_time
-
-            if not success:
-                print(f"  [Warning] Simulation failed, skipping")
-                return None
-
-            # Get basic statistics from simulation object
-            stats = sim.get_statistics()
-            final_pos_err = stats.get("final_position_error", np.nan)
-            final_vel_err = stats.get("final_velocity_error", np.nan)
-            total_dv = stats.get("accumulated_dv", np.nan)
-
-            # Load additional metrics from HDF5 file using absolute path
-            h5_file_abs = os.path.abspath(sim.h5_file)
-            if os.path.exists(h5_file_abs):
-                try:
-                    with h5py.File(h5_file_abs, 'r') as f:
-                        # Tracking errors
-                        errors = f['tracking_errors'][:]
-                        if len(errors) > 0:
-                            rms_pos = np.sqrt(np.mean(errors[:, 0:3]**2))
-                            rms_vel = np.sqrt(np.mean(errors[:, 3:6]**2))
-                            # Convergence time: first time position error < 1000m
-                            threshold = 1000.0
-                            times = f['epochs'][:]
-                            idx = np.where(np.linalg.norm(errors[:, 0:3], axis=1) < threshold)[0]
-                            conv_time = times[idx[0]] if len(idx) > 0 else np.nan
-                        else:
-                            rms_pos = rms_vel = conv_time = np.nan
-
-                        # Control forces
-                        forces = f['control_forces'][:]
-                        max_force = np.max(np.linalg.norm(forces, axis=1)) if len(forces) > 0 else np.nan
-                except Exception as e:
-                    print(f"  [Warning] Failed to read HDF5 data: {e}")
-                    rms_pos = rms_vel = conv_time = max_force = np.nan
-            else:
-                print(f"  [Warning] HDF5 file not found: {h5_file_abs}")
-                rms_pos = rms_vel = conv_time = max_force = np.nan
-
-            metrics = RobustnessMetrics(
-                mission_id=sim.mission_id,
-                position_error_final=final_pos_err,
-                velocity_error_final=final_vel_err,
-                accumulated_dv=total_dv,
-                max_control_force=max_force,
-                rms_position_error=rms_pos,
-                rms_velocity_error=rms_vel,
-                convergence_time=conv_time,
-                simulation_time=elapsed,
-                parameters=config
-            )
-            return metrics
-
-        except Exception as e:
-            print(f"  [Error] Simulation exception: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _generate_param_combinations(self) -> List[Dict[str, Any]]:
+    def _generate_param_combinations(self) -> List[Tuple[Dict[str, Any], str]]:
         """
         Generate all parameter combinations (Cartesian product) and repeat n_runs times.
+        Returns a list of (config, mission_id) pairs.
         """
-        import itertools
         keys = list(self.param_vary.keys())
         values = [self.param_vary[k] for k in keys]
         combinations = []
+        idx = 0
         for combo in itertools.product(*values):
             params = dict(zip(keys, combo))
             for _ in range(self.n_runs):
-                combinations.append(params.copy())
+                # Generate a unique mission_id for each run
+                mission_id = f"robustness_{idx:06d}"
+                config = self._build_config(params)
+                combinations.append((config, mission_id))
+                idx += 1
         return combinations
 
     def run_monte_carlo(self):
         """
-        Execute Monte Carlo simulations.
+        Execute Monte Carlo simulations in parallel.
         """
         param_combos = self._generate_param_combinations()
         total_runs = len(param_combos)
         print(f"\n[Analyzer] Starting Monte Carlo simulation, total runs: {total_runs}")
+        print(f"[Analyzer] Using {self.n_processes} parallel processes...")
 
-        for i, params in enumerate(tqdm(param_combos, desc="Running simulations", unit="run")):
-            config = self._build_config(params)
-            metrics = self._run_single_simulation(config)
-            if metrics is not None:
-                self.metrics_list.append(metrics)
-            # Periodically save intermediate results
-            if (i+1) % 50 == 0:
-                self._save_intermediate_results()
+        # Use a process pool to run simulations in parallel
+        with Pool(processes=self.n_processes) as pool:
+            # Prepare arguments for starmap (each item is (config, mission_id))
+            args = [(config, mission_id) for config, mission_id in param_combos]
 
-        # Save final results
+            # Use imap_unordered for progress bar
+            results = []
+            with tqdm(total=total_runs, desc="Running simulations", unit="run") as pbar:
+                for result in pool.starmap(_run_single_simulation, args):
+                    if result is not None:
+                        results.append(result)
+                    pbar.update(1)
+
+                    # Periodically save intermediate results (every 50 completed runs)
+                    if len(results) % 50 == 0:
+                        self.metrics_list = results
+                        self._save_intermediate_results(partial=True)
+
+        # After all workers finish, save final results
+        self.metrics_list = results
         self._save_intermediate_results(final=True)
         print(f"\n[Analyzer] Simulation finished, successful runs: {len(self.metrics_list)}/{total_runs}")
 
-    def _save_intermediate_results(self, final: bool = False):
+    def _save_intermediate_results(self, final: bool = False, partial: bool = False):
         """
         Save current results to a JSON file.
         """
-        import json
         if not self.metrics_list:
             return
-        filename = "robustness_results_final.json" if final else "robustness_results_partial.json"
+        if final:
+            filename = "robustness_results_final.json"
+        elif partial:
+            filename = "robustness_results_partial.json"
+        else:
+            filename = "robustness_results.json"
         filepath = os.path.join(self.output_dir, filename)
         data = [asdict(m) for m in self.metrics_list]
         with open(filepath, 'w') as f:
@@ -412,7 +453,8 @@ def main():
         "time_step": 10.0,
         "log_buffer_size": 100,
         "enable_visualization": False,
-        "data_dir": "data/robustness_analysis"
+        "data_dir": "data/robustness_analysis",
+        "integrator": "rk4",   # Can be changed to "rk45" for variable-step integration
     }
 
     # Create analyzer
@@ -420,7 +462,8 @@ def main():
         base_config=base_config,
         param_vary=param_vary,
         output_dir="analysis_results",
-        n_runs=3          # Runs per combination (increase for real analysis)
+        n_runs=3,               # Runs per combination (increase for real analysis)
+        n_processes=4           # Adjust based on available CPU cores
     )
 
     # Run Monte Carlo
@@ -432,4 +475,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Ensure safe multiprocessing on Windows
     main()

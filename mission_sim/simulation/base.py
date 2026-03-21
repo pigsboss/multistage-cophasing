@@ -54,6 +54,11 @@ class BaseSimulation(ABC):
         self.logger = None             # 数据记录器（HDF5Logger）
         self.k_matrix = None           # 控制增益矩阵（可选）
 
+        # 积分器配置（第二阶段新增）
+        self.integrator_type = self.config.get("integrator", "rk4")
+        self.integrator_rtol = self.config.get("integrator_rtol", 1e-9)
+        self.integrator_atol = self.config.get("integrator_atol", 1e-12)
+
         # 输出目录和文件
         self.data_dir = self.config.get("data_dir", "data")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -76,6 +81,7 @@ class BaseSimulation(ABC):
         print(f"   任务ID: {self.mission_id}")
         print(f"   仿真时长: {self.config.get('simulation_days', 0)} 天")
         print(f"   积分步长: {self.config.get('time_step', 0)} 秒")
+        print(f"   积分器: {self.integrator_type}")
         print(f"   输出文件: {self.h5_file}")
         print("=" * 80)
 
@@ -135,7 +141,8 @@ class BaseSimulation(ABC):
             "spacecraft_mass": self.spacecraft.mass,
             "control_type": "LQR",
             "mission_id": self.mission_id,
-            "ephemeris_period_days": self.ephemeris.times[-1] / 86400
+            "ephemeris_period_days": self.ephemeris.times[-1] / 86400,
+            "integrator": self.integrator_type,
         }
     
         # 使用 HDF5Logger 初始化文件
@@ -215,15 +222,58 @@ class BaseSimulation(ABC):
 
     def _propagate_state(self, force_cmd: np.ndarray, force_frame: CoordinateFrame, dt: float):
         """
-        状态传播（默认 RK4 积分）。
-        子类可重写以使用其他积分器或增加更多物理效应。
+        状态传播，支持可配置积分器（rk4 或 rk45）。
         """
+        # 施加推力（信息域→物理域）
         self.spacecraft.apply_thrust(force_cmd, force_frame)
-        k1 = self._get_state_derivative(self.spacecraft.state)
-        k2 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k1)
-        k3 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k2)
-        k4 = self._get_state_derivative(self.spacecraft.state + dt * k3)
-        self.spacecraft.state += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        if self.integrator_type == "rk45":
+            # 使用 scipy.integrate.solve_ivp 进行单步自适应积分
+            from scipy.integrate import solve_ivp
+
+            def dynamics(t, y):
+                """
+                微分方程右端项，供 solve_ivp 使用。
+                注意：t 为当前积分时间，但环境引擎尚未支持任意时间查询，
+                这里使用 self.environment.epoch（步起始时间）近似。
+                对于 L1 级时变较弱的模型（J2、SRP），该近似可接受。
+                """
+                pos = y[:3]
+                vel = y[3:6]
+                # 获取当前状态的环境加速度（使用步起始时间）
+                acc_env, _ = self.environment.get_total_acceleration(y, self.spacecraft.frame)
+                acc_total = acc_env + self.spacecraft.external_accel
+                return np.concatenate([vel, acc_total])
+
+            t0 = self.environment.epoch
+            y0 = self.spacecraft.state.copy()
+            sol = solve_ivp(
+                dynamics,
+                (t0, t0 + dt),
+                y0,
+                method='RK45',
+                rtol=self.integrator_rtol,
+                atol=self.integrator_atol
+            )
+            if sol.success:
+                self.spacecraft.state = sol.y[:, -1]
+            else:
+                # 积分失败时回退到 RK4（并发出警告）
+                if self.verbose:
+                    print(f"⚠️ RK45 积分失败（步 {self.current_step}），回退到 RK4")
+                # 回退 RK4
+                k1 = self._get_state_derivative(self.spacecraft.state)
+                k2 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k1)
+                k3 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k2)
+                k4 = self._get_state_derivative(self.spacecraft.state + dt * k3)
+                self.spacecraft.state += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        else:
+            # 默认 RK4 固定步长积分
+            k1 = self._get_state_derivative(self.spacecraft.state)
+            k2 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k1)
+            k3 = self._get_state_derivative(self.spacecraft.state + 0.5 * dt * k2)
+            k4 = self._get_state_derivative(self.spacecraft.state + dt * k3)
+            self.spacecraft.state += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def _get_state_derivative(self, state: np.ndarray) -> np.ndarray:
         """
