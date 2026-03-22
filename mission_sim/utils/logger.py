@@ -5,6 +5,7 @@ MCPC 框架高性能科学数据记录器 - 重构版
 """
 
 import os
+import time
 import h5py
 import numpy as np
 from datetime import datetime
@@ -29,7 +30,8 @@ class HDF5Logger:
                  buffer_size: int = 1000,
                  compression: bool = True,
                  auto_flush: bool = True,
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 backup: bool = True):
         """
         初始化 HDF5 记录器
         
@@ -39,19 +41,21 @@ class HDF5Logger:
             compression: 是否启用数据压缩
             auto_flush: 是否在每次记录后自动检查并刷新缓冲区
             verbose: 是否输出详细日志信息
+            backup: 是否在文件已存在时备份（若为 False 则直接删除，用于并行场景）
         """
         self.filepath = os.path.abspath(filepath)
         self.buffer_size = buffer_size
         self.compression = compression
         self.auto_flush = auto_flush
         self.verbose = verbose
+        self.backup = backup
         
         # 确保输出目录存在
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
         
-        # 如果文件已存在，先备份然后删除
+        # 如果文件已存在，处理
         if os.path.exists(filepath):
-            self._backup_existing_file()
+            self._handle_existing_file()
         
         # 初始化内存缓冲区
         self._init_buffers()
@@ -65,6 +69,43 @@ class HDF5Logger:
             print(f"[HDF5Logger] 初始化完成，文件: {filepath}")
             print(f"[HDF5Logger] 缓冲区大小: {buffer_size}, 压缩: {compression}")
     
+    def _handle_existing_file(self):
+        """处理已存在的文件"""
+        if self.backup:
+            self._backup_existing_file()
+        else:
+            # 直接删除，不备份（用于蒙特卡洛等批量场景）
+            try:
+                os.remove(self.filepath)
+                if self.verbose:
+                    print(f"[HDF5Logger] 删除已存在的文件: {self.filepath}")
+            except Exception as e:
+                if self.verbose:
+                    print(f"[HDF5Logger] 删除文件失败: {e}")
+    
+    def _backup_existing_file(self, max_retries=3):
+        """备份已存在的文件，带重试机制"""
+        backup_path = self.filepath + f".backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        for attempt in range(max_retries):
+            try:
+                os.rename(self.filepath, backup_path)
+                if self.verbose:
+                    print(f"[HDF5Logger] 已备份旧文件: {backup_path}")
+                return
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    if self.verbose:
+                        print(f"[HDF5Logger] 备份失败: {e}")
+                    # 最后尝试直接删除原文件
+                    try:
+                        os.remove(self.filepath)
+                        if self.verbose:
+                            print(f"[HDF5Logger] 备份失败，已删除原文件: {self.filepath}")
+                    except:
+                        pass
+                else:
+                    time.sleep(0.1)   # 短暂等待后重试
+    
     def _init_buffers(self):
         """初始化内存缓冲区数据结构"""
         self.buffers = {
@@ -77,17 +118,6 @@ class HDF5Logger:
             'accumulated_dvs': []
         }
         self.buffer_count = 0
-    
-    def _backup_existing_file(self):
-        """备份已存在的文件"""
-        backup_path = self.filepath + f".backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        try:
-            os.rename(self.filepath, backup_path)
-            if self.verbose:
-                print(f"[HDF5Logger] 已备份旧文件: {backup_path}")
-        except Exception as e:
-            if self.verbose:
-                print(f"[HDF5Logger] 备份失败: {e}")
     
     def initialize_file(self, metadata: Optional[Dict[str, Any]] = None):
         """

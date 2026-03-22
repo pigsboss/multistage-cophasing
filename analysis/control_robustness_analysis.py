@@ -8,6 +8,7 @@ Statistical charts and performance reports are output.
 
 import os
 import sys
+import argparse
 import time
 import json
 import itertools
@@ -46,20 +47,24 @@ class RobustnessMetrics:
     parameters: Dict[str, Any] = field(default_factory=dict)
 
 
-def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[RobustnessMetrics]:
+def _run_single_simulation(args: Tuple[Dict[str, Any], str]) -> Optional[RobustnessMetrics]:
     """
     Run a single simulation and return performance metrics.
     This function is designed to be executed in a worker process.
 
     Args:
-        config: Simulation configuration dictionary
-        mission_id: Unique identifier for this simulation run (to avoid filename conflicts)
+        args: Tuple of (config, mission_id)
 
     Returns:
         RobustnessMetrics if successful, else None
     """
-    # Inject mission_id into config (simulation will use it if BaseSimulation supports it)
+    config, mission_id = args
+
+    # Inject mission_id and force silent mode for parallel runs
     config["mission_id"] = mission_id
+    config["verbose"] = False
+    config["save_fuel_bill"] = False
+    config["log_backup"] = False
 
     try:
         sim = SunEarthL2L1Simulation(config)
@@ -68,8 +73,6 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
         elapsed = time.time() - start_time
 
         if not success:
-            # Use logging instead of print to avoid cluttering in parallel runs
-            # Since this runs in worker, we can just return None and rely on main progress bar
             return None
 
         # Get basic statistics from simulation object
@@ -99,8 +102,7 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
                     # Control forces
                     forces = f['control_forces'][:]
                     max_force = np.max(np.linalg.norm(forces, axis=1)) if len(forces) > 0 else np.nan
-            except Exception as e:
-                # Silent fail in worker, just set to nan
+            except Exception:
                 rms_pos = rms_vel = conv_time = max_force = np.nan
         else:
             rms_pos = rms_vel = conv_time = max_force = np.nan
@@ -119,8 +121,7 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
         )
         return metrics
 
-    except Exception as e:
-        # Silent fail
+    except Exception:
         return None
 
 
@@ -131,7 +132,7 @@ class ControlRobustnessAnalyzer:
     generates statistical reports and charts.
     """
 
-    # Default simulation configuration
+    # Default simulation configuration (silent, no backup)
     DEFAULT_CONFIG = {
         "mission_name": "Robustness_Analysis",
         "simulation_days": 30,
@@ -142,8 +143,9 @@ class ControlRobustnessAnalyzer:
         "data_dir": "data/robustness_analysis",
         "log_level": "WARNING",
         "integrator": "rk4",             # Default integrator
-        "verbose": False,                # Suppress verbose output in workers
-        "save_fuel_bill": False,         # Do not generate separate CSV files
+        "verbose": False,                # Suppress simulation internal output
+        "save_fuel_bill": False,         # Do not generate CSV fuel bills
+        "log_backup": False,             # Disable file backup for parallel runs
     }
 
     # Default parameter variation ranges
@@ -218,27 +220,23 @@ class ControlRobustnessAnalyzer:
 
     def run_monte_carlo(self):
         """
-        Execute Monte Carlo simulations in parallel.
+        Execute Monte Carlo simulations in parallel with real-time progress.
         """
         param_combos = self._generate_param_combinations()
         total_runs = len(param_combos)
         print(f"\n[Analyzer] Starting Monte Carlo simulation, total runs: {total_runs}")
         print(f"[Analyzer] Using {self.n_processes} parallel processes...")
 
-        # Use a process pool to run simulations in parallel
+        # Use imap_unordered for real-time progress updates
         with Pool(processes=self.n_processes) as pool:
-            # Prepare arguments for starmap (each item is (config, mission_id))
-            args = [(config, mission_id) for config, mission_id in param_combos]
-
-            # Use imap_unordered for progress bar
             results = []
             with tqdm(total=total_runs, desc="Running simulations", unit="run") as pbar:
-                for result in pool.starmap(_run_single_simulation, args):
+                for result in pool.imap_unordered(_run_single_simulation, param_combos):
                     if result is not None:
                         results.append(result)
                     pbar.update(1)
 
-                    # Periodically save intermediate results (every 50 completed runs)
+                    # Periodically save intermediate results
                     if len(results) % 50 == 0:
                         self.metrics_list = results
                         self._save_intermediate_results(partial=True)
@@ -436,9 +434,22 @@ class ControlRobustnessAnalyzer:
 
 def main():
     """
-    Example run.
+    Example run with command-line arguments.
     """
-    # Custom parameter variation ranges
+    parser = argparse.ArgumentParser(description="Control Robustness Monte Carlo Analysis")
+    parser.add_argument("--n_processes", type=int, default=None,
+                        help="Number of parallel processes (default: cpu_count)")
+    parser.add_argument("--n_runs", type=int, default=3,
+                        help="Number of runs per parameter combination (default: 3)")
+    parser.add_argument("--simulation_days", type=float, default=10,
+                        help="Simulation duration in days (default: 10)")
+    parser.add_argument("--output_dir", type=str, default="analysis_results",
+                        help="Output directory for results (default: analysis_results)")
+    parser.add_argument("--data_dir", type=str, default="data/robustness_analysis",
+                        help="Data directory for simulation outputs (default: data/robustness_analysis)")
+    args = parser.parse_args()
+
+    # Parameter variation ranges (customize as needed)
     param_vary = {
         "initial_pos_error_scale": [0.5, 1.0, 2.0],
         "initial_vel_error_scale": [0.5, 1.0, 2.0],
@@ -447,25 +458,26 @@ def main():
         # "control_gain_scale": [0.5, 1.0, 2.0]   # Uncomment if control gain scaling is supported
     }
 
-    # Base configuration (suppress verbose output, disable CSV files)
+    # Base configuration (suppress verbose output, disable CSV, disable backup)
     base_config = {
-        "simulation_days": 10,
+        "simulation_days": args.simulation_days,
         "time_step": 10.0,
         "log_buffer_size": 100,
         "enable_visualization": False,
-        "data_dir": "data/robustness_analysis",
+        "data_dir": args.data_dir,
         "integrator": "rk4",   # Can be changed to "rk45" for variable-step integration
         "verbose": False,      # Suppress simulation internal output
         "save_fuel_bill": False,  # Do not generate CSV fuel bills
+        "log_backup": False,   # Disable file backup for parallel runs
     }
 
     # Create analyzer
     analyzer = ControlRobustnessAnalyzer(
         base_config=base_config,
         param_vary=param_vary,
-        output_dir="analysis_results",
-        n_runs=3,               # Runs per combination (increase for real analysis)
-        n_processes=4           # Adjust based on available CPU cores
+        output_dir=args.output_dir,
+        n_runs=args.n_runs,
+        n_processes=args.n_processes
     )
 
     # Run Monte Carlo
@@ -477,5 +489,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure safe multiprocessing on Windows
     main()

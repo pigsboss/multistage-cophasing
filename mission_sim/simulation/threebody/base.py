@@ -23,7 +23,8 @@ class ThreeBodyBaseSimulation(BaseSimulation):
         from mission_sim.core.physics.models.gravity_crtbp import Gravity_CRTBP
         self.environment = CelestialEnvironment(
             computation_frame=CoordinateFrame.SUN_EARTH_ROTATING,
-            initial_epoch=0.0
+            initial_epoch=0.0,
+            verbose=self.verbose
         )
         self.environment.register_force(Gravity_CRTBP())
 
@@ -51,7 +52,7 @@ class ThreeBodyBaseSimulation(BaseSimulation):
             sampling_rate_hz=self.config.get("sampling_rate_hz", 0.1),
             visibility_windows=self.config.get("visibility_windows")
         )
-        self.gnc_system = GNC_Subsystem("SC", operating_frame=frame)
+        self.gnc_system = GNC_Subsystem("SC", operating_frame=frame, verbose=self.verbose)
         self.gnc_system.load_reference_trajectory(self.ephemeris)
 
         # 用航天器的初始状态初始化导航状态（避免初始巨大误差）

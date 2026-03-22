@@ -6,6 +6,7 @@
 
 import os
 import time
+import uuid
 import numpy as np
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -39,7 +40,12 @@ class BaseSimulation(ABC):
                 其他字段由子类定义。
         """
         self.config = config
-        self.mission_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.mission_id = config.get("mission_id")
+        if self.mission_id is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pid = os.getpid()
+            uid = str(uuid.uuid4())[:8]
+            self.mission_id = f"{timestamp}_{pid}_{uid}"
         self.simulation_start_time = None
         self.simulation_end_time = None
         self.current_step = 0
@@ -145,13 +151,14 @@ class BaseSimulation(ABC):
             "integrator": self.integrator_type,
         }
 
-        # 使用 HDF5Logger 初始化文件，传递 verbose 参数
+        # 使用 HDF5Logger 初始化文件，传递 verbose 和 backup 参数
         self.logger = HDF5Logger(
             filepath=self.h5_file,
             buffer_size=self.config.get("log_buffer_size", 500),
             compression=self.config.get("log_compression", True),
             auto_flush=True,
-            verbose=self.verbose   # 将仿真详细程度传递给记录器
+            verbose=self.verbose,
+            backup=self.config.get("log_backup", True)   # 是否备份已存在文件
         )
         self.logger.initialize_file(metadata)
 

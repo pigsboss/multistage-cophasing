@@ -94,7 +94,8 @@ class TwoBodyBaseSimulation(BaseSimulation):
         # 创建环境引擎（地心惯性系）
         self.environment = CelestialEnvironment(
             computation_frame=CoordinateFrame.J2000_ECI,
-            initial_epoch=0.0
+            initial_epoch=0.0,
+            verbose=self.verbose
         )
 
         # 注册 J2 摄动（若启用）
@@ -135,7 +136,7 @@ class TwoBodyBaseSimulation(BaseSimulation):
         )
 
         # GNC 子系统
-        self.gnc_system = GNC_Subsystem("SC", operating_frame=frame)
+        self.gnc_system = GNC_Subsystem("SC", operating_frame=frame, verbose=self.verbose)
         self.gnc_system.load_reference_trajectory(self.ephemeris)
 
         # 用航天器的初始状态初始化导航状态（避免初始巨大误差）

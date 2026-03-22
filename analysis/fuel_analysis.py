@@ -7,6 +7,7 @@ Supports parameter scanning and result visualization.
 
 import os
 import sys
+import argparse
 import json
 import time
 import itertools
@@ -46,19 +47,24 @@ class FuelMetrics:
     parameters: Dict[str, Any]   # Complete parameter copy
 
 
-def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[FuelMetrics]:
+def _run_single_simulation(args: Tuple[Dict[str, Any], str]) -> Optional[FuelMetrics]:
     """
     Run a single simulation and return fuel-related metrics.
     Designed to be executed in a worker process.
 
     Args:
-        config: Simulation configuration dictionary
-        mission_id: Unique identifier for this simulation run
+        args: Tuple of (config, mission_id)
 
     Returns:
         FuelMetrics if successful, else None
     """
+    config, mission_id = args
+
+    # Inject mission_id and force silent mode for parallel runs
     config["mission_id"] = mission_id
+    config["verbose"] = False
+    config["save_fuel_bill"] = False
+    config["log_backup"] = False
 
     try:
         sim = SunEarthL2L1Simulation(config)
@@ -67,7 +73,6 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
         elapsed = time.time() - start_time
 
         if not success:
-            # Silent fail in worker
             return None
 
         # Get basic statistics from simulation object
@@ -85,7 +90,6 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
                     if len(forces) > 0:
                         max_force = np.max(np.linalg.norm(forces, axis=1))
             except Exception:
-                # Silent fail
                 pass
 
         # Calculate average delta-V per day
@@ -108,7 +112,6 @@ def _run_single_simulation(config: Dict[str, Any], mission_id: str) -> Optional[
         return metrics
 
     except Exception:
-        # Silent fail in worker
         return None
 
 
@@ -119,7 +122,7 @@ class FuelAnalyzer:
     generates reports and charts.
     """
 
-    # Default base configuration (suppress verbose output)
+    # Default base configuration (silent, no backup)
     DEFAULT_BASE_CONFIG = {
         "mission_name": "Fuel_Analysis",
         "time_step": 10.0,
@@ -131,6 +134,7 @@ class FuelAnalyzer:
         "integrator": "rk4",            # Default integrator
         "verbose": False,               # Suppress simulation internal output
         "save_fuel_bill": False,        # Do not generate CSV fuel bills
+        "log_backup": False,            # Disable file backup for parallel runs
     }
 
     # Default scan parameters
@@ -237,7 +241,7 @@ class FuelAnalyzer:
 
     def run_scan(self):
         """
-        Execute parameter scan simulations in parallel.
+        Execute parameter scan simulations in parallel with real-time progress.
         """
         param_combos = self._generate_param_combinations()
         total_runs = len(param_combos)
@@ -245,10 +249,9 @@ class FuelAnalyzer:
         print(f"[FuelAnalyzer] Using {self.n_processes} parallel processes...")
 
         with Pool(processes=self.n_processes) as pool:
-            args = [(config, mission_id) for config, mission_id in param_combos]
             results = []
             with tqdm(total=total_runs, desc="Running simulations", unit="run") as pbar:
-                for result in pool.starmap(_run_single_simulation, args):
+                for result in pool.imap_unordered(_run_single_simulation, param_combos):
                     if result is not None:
                         results.append(result)
                     pbar.update(1)
@@ -444,35 +447,49 @@ class FuelAnalyzer:
 
 def main():
     """
-    Example run.
+    Example run with command-line arguments.
     """
+    parser = argparse.ArgumentParser(description="Fuel Consumption Parameter Scan")
+    parser.add_argument("--n_processes", type=int, default=None,
+                        help="Number of parallel processes (default: cpu_count)")
+    parser.add_argument("--n_repeats", type=int, default=2,
+                        help="Number of repeated runs per parameter combination (default: 2)")
+    parser.add_argument("--simulation_days", type=float, default=30,
+                        help="Simulation duration in days (default: 30)")
+    parser.add_argument("--output_dir", type=str, default="analysis_results",
+                        help="Output directory for results (default: analysis_results)")
+    parser.add_argument("--data_dir", type=str, default="data/fuel_analysis",
+                        help="Data directory for simulation outputs (default: data/fuel_analysis)")
+    args = parser.parse_args()
+
     # Custom scan parameters (adjust as needed)
     scan_params = {
         "orbit_type": ["Halo", "Keplerian"],          # Orbit types
         "control_gain_scale": [0.5, 1.0, 2.0],        # Control gain scaling factor
         "blind_interval_days": [0, 3, 7],             # Blind interval duration (days)
-        "simulation_days": [30]                       # Simulation duration (days)
+        "simulation_days": [args.simulation_days]     # Simulation duration (days)
     }
 
-    # Base configuration (suppress verbose output, disable CSV)
+    # Base configuration (suppress verbose output, disable CSV, disable backup)
     base_config = {
         "time_step": 10.0,
         "log_buffer_size": 200,
         "enable_visualization": False,
-        "data_dir": "data/fuel_analysis",
+        "data_dir": args.data_dir,
         "log_level": "WARNING",
         "integrator": "rk4",   # Can be changed to "rk45" for variable-step integration
         "verbose": False,      # Suppress simulation internal output
         "save_fuel_bill": False,  # Do not generate CSV fuel bills
+        "log_backup": False,   # Disable file backup for parallel runs
     }
 
     # Create analyzer
     analyzer = FuelAnalyzer(
         base_config=base_config,
         scan_params=scan_params,
-        output_dir="analysis_results",
-        n_repeats=2,           # Runs per combination (increase for real analysis)
-        n_processes=4          # Adjust based on available CPU cores
+        output_dir=args.output_dir,
+        n_repeats=args.n_repeats,
+        n_processes=args.n_processes
     )
 
     # Run scan
@@ -484,5 +501,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure safe multiprocessing on Windows
     main()
