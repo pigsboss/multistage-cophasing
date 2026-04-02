@@ -1,12 +1,31 @@
 # mission_sim/utils/math_tools.py
 """
-Mathematical utilities for MCPC framework.
-Includes LQR gain calculation, LVLH transformation, orbital mechanics conversions,
-and coordinate frame transformations (inertial ↔ rotating).
+MCPC Core Math Utility Library
+------------------------------
+Provides high-precision coordinate frame transformations, matrix operations, 
+and quaternion processing across domains.
+Specifically targets L2 multi-satellite formations, providing rigorous 
+bidirectional transformations between the absolute frame and the relative (LVLH) frame.
 """
-
 import numpy as np
 import scipy.linalg
+from typing import Tuple
+
+def normalize_vector(v: np.ndarray) -> np.ndarray:
+    """
+    Calculate the unit vector of a given vector.
+    Returns a zero vector if the norm is extremely small to prevent division by zero.
+    
+    Args:
+        v: Input vector (numpy array).
+        
+    Returns:
+        Unit vector or zero vector.
+    """
+    norm = np.linalg.norm(v)
+    if norm < 1e-12:
+        return np.zeros_like(v)
+    return v / norm
 
 
 def get_lqr_gain(A: np.ndarray, B: np.ndarray, Q: np.ndarray, R: np.ndarray) -> np.ndarray:
@@ -264,3 +283,114 @@ def rotating_to_inertial(
     vz = vz_rot
 
     return np.array([x, y, z, vx, vy, vz], dtype=np.float64)
+
+# =====================================================================
+# L2 Level Core: High-precision Bidirectional Transformations 
+# Between Absolute Frame and Relative Frame (LVLH)
+# =====================================================================
+
+def compute_lvlh_dcm(r_chief_abs: np.ndarray, v_chief_abs: np.ndarray) -> np.ndarray:
+    """
+    Compute the Direction Cosine Matrix (DCM) from the Absolute frame 
+    to the Local Vertical Local Horizontal (LVLH) frame.
+    
+    LVLH Frame Definition (Standard Formation Control Convention):
+    - Z-axis (r_hat): Radial direction, pointing away from the central body.
+    - Y-axis (h_hat): Cross-track direction, parallel to the orbital angular momentum.
+    - X-axis (theta_hat): Along-track direction, completing the right-handed system (Y x Z).
+    
+    Args:
+        r_chief_abs: Chief's position vector in the absolute frame (3x1).
+        v_chief_abs: Chief's velocity vector in the absolute frame (3x1).
+        
+    Returns:
+        dcm_abs_to_lvlh: 3x3 rotation matrix.
+    """
+    # Force float64 to suppress truncation errors in deep space scales
+    r = np.array(r_chief_abs, dtype=np.float64)
+    v = np.array(v_chief_abs, dtype=np.float64)
+    
+    # 1. Z-axis: Radial
+    r_hat = normalize_vector(r)
+    
+    # 2. Y-axis: Cross-track / Normal (r x v)
+    h = np.cross(r, v)
+    h_hat = normalize_vector(h)
+    
+    # 3. X-axis: Along-track / Transverse (Right-hand rule: Y x Z)
+    theta_hat = np.cross(h_hat, r_hat)
+    
+    # The row vectors of the DCM are the basis vectors of the LVLH frame 
+    # expressed in the absolute frame.
+    dcm_abs_to_lvlh = np.vstack((theta_hat, h_hat, r_hat))
+    
+    return dcm_abs_to_lvlh
+
+def absolute_to_lvlh(r_chief_abs: np.ndarray, v_chief_abs: np.ndarray, 
+                     r_deputy_abs: np.ndarray, v_deputy_abs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Transform the absolute state of a deputy spacecraft into the relative state 
+    within the Chief's LVLH coordinate frame.
+    
+    [Critical] Strictly handles the relative velocity correction caused by the 
+    angular velocity of the rotating LVLH frame (Coriolis effect).
+    
+    Returns:
+        rho_lvlh: Deputy's relative position vector in LVLH (3x1).
+        rho_dot_lvlh: Deputy's relative velocity vector in LVLH (3x1).
+    """
+    r_c = np.array(r_chief_abs, dtype=np.float64)
+    v_c = np.array(v_chief_abs, dtype=np.float64)
+    r_d = np.array(r_deputy_abs, dtype=np.float64)
+    v_d = np.array(v_deputy_abs, dtype=np.float64)
+    
+    # 1. Relative displacement and velocity in the absolute frame
+    delta_r_abs = r_d - r_c
+    delta_v_abs = v_d - v_c
+    
+    # 2. Transform position
+    dcm = compute_lvlh_dcm(r_c, v_c)
+    rho_lvlh = dcm @ delta_r_abs
+    
+    # 3. Calculate the angular velocity of the LVLH frame (omega = h / r^2)
+    h = np.cross(r_c, v_c)
+    r_norm_sq = np.dot(r_c, r_c)
+    omega_lvlh_abs = (h / r_norm_sq) if r_norm_sq >= 1e-12 else np.zeros(3)
+        
+    # 4. Transform velocity (Subtracting the transport velocity component)
+    # v_rel_lvlh_in_abs = delta_v_abs - (omega x delta_r_abs)
+    v_rel_lvlh_in_abs = delta_v_abs - np.cross(omega_lvlh_abs, delta_r_abs)
+    rho_dot_lvlh = dcm @ v_rel_lvlh_in_abs
+    
+    return rho_lvlh, rho_dot_lvlh
+
+def lvlh_to_absolute(r_chief_abs: np.ndarray, v_chief_abs: np.ndarray, 
+                     rho_lvlh: np.ndarray, rho_dot_lvlh: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    (Inverse Transformation) Restore the relative state in the LVLH frame 
+    back to the absolute true state in the physical domain.
+    """
+    r_c = np.array(r_chief_abs, dtype=np.float64)
+    v_c = np.array(v_chief_abs, dtype=np.float64)
+    rho = np.array(rho_lvlh, dtype=np.float64)
+    rho_dot = np.array(rho_dot_lvlh, dtype=np.float64)
+    
+    dcm = compute_lvlh_dcm(r_c, v_c)
+    dcm_inv = dcm.T  # The inverse of an orthogonal matrix is its transpose
+    
+    # 1. Restore absolute position
+    delta_r_abs = dcm_inv @ rho
+    r_deputy_abs = r_c + delta_r_abs
+    
+    # 2. Calculate frame angular velocity
+    h = np.cross(r_c, v_c)
+    r_norm_sq = np.dot(r_c, r_c)
+    omega_lvlh_abs = (h / r_norm_sq) if r_norm_sq >= 1e-12 else np.zeros(3)
+    
+    # 3. Restore absolute velocity (Adding back the transport velocity)
+    v_rel_lvlh_in_abs = dcm_inv @ rho_dot
+    delta_v_abs = v_rel_lvlh_in_abs + np.cross(omega_lvlh_abs, delta_r_abs)
+    
+    v_deputy_abs = v_c + delta_v_abs
+    
+    return r_deputy_abs, v_deputy_abs
