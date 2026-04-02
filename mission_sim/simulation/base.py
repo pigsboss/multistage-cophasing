@@ -56,7 +56,7 @@ class BaseSimulation(ABC):
         self.environment = None        # 环境引擎（CelestialEnvironment）
         self.spacecraft = None         # 航天器模型（SpacecraftPointMass 或更高层级的模型）
         self.ground_station = None     # 地面站（GroundStation）
-        self.gnc_system = None         # GNC 子系统（GNC_Subsystem 或其子类）
+        self.gnc_system = None         # GNC 子系统（GNCSubsystem 或其子类）
         self.logger = None             # 数据记录器（HDF5Logger）
         self.k_matrix = None           # 控制增益矩阵（可选）
 

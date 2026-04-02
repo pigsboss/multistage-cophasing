@@ -4,7 +4,7 @@ from mission_sim.simulation.base import BaseSimulation
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.physics.environment import CelestialEnvironment
 from mission_sim.core.cyber.platform_gnc.ground_station import GroundStation
-from mission_sim.core.cyber.platform_gnc.gnc_subsystem import GNC_Subsystem
+from mission_sim.core.cyber.platform_gnc.gnc_subsystem import GNCSubsystem
 from mission_sim.core.cyber.models.threebody.base import CRTBP
 from mission_sim.core.physics.spacecraft import SpacecraftPointMass
 
@@ -64,7 +64,7 @@ class ThreeBodyBaseSimulation(BaseSimulation):
             sampling_rate_hz=self.config.get("sampling_rate_hz", 0.1),
             visibility_windows=self.config.get("visibility_windows")
         )
-        self.gnc_system = GNC_Subsystem("SC", operating_frame=frame, verbose=self.verbose)
+        self.gnc_system = GNCSubsystem("SC", operating_frame=frame, verbose=self.verbose)
         self.gnc_system.load_reference_trajectory(self.ephemeris)
 
         # 用航天器的初始状态初始化导航状态（避免初始巨大误差）

@@ -11,7 +11,7 @@ from mission_sim.core.spacetime.ephemeris import Ephemeris
 from mission_sim.core.cyber.platform_gnc.propagator import Propagator
 
 
-class GNC_Subsystem:
+class GNCSubsystem:
     """
     制导、导航与控制 (GNC) 子系统 (Level 1) - 增强版
     职责：接收带有坐标系契约的导航状态，读取动态星历标称轨迹，
@@ -309,7 +309,3 @@ class GNC_Subsystem:
                 f"PosErr: {metrics['position_error_m']:.2f}m | "
                 f"VelErr: {metrics['velocity_error_mps']*1000:.2f}mm/s | "
                 f"Calls: {metrics['total_control_calls']}")
-
-
-# 兼容性别名
-GNCSubsystem = GNC_Subsystem

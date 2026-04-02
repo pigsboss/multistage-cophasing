@@ -51,7 +51,7 @@ class DataQualityFlag(Enum):
     INVALID = auto()
 
 @dataclass
-class ISL_MessageFrame:
+class ISLMessage:
     sender_id: int
     receiver_id: int
     msg_type: str

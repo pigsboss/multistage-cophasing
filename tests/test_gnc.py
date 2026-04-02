@@ -2,14 +2,14 @@ import numpy as np
 import pytest
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.spacetime.ephemeris import Ephemeris
-from mission_sim.core.cyber.platform_gnc.gnc_subsystem import GNC_Subsystem
+from mission_sim.core.cyber.platform_gnc.gnc_subsystem import GNCSubsystem
 from mission_sim.core.cyber.platform_gnc.propagator import SimplePropagator, KeplerPropagator, CRTBPPropagator
 from mission_sim.core.cyber.models.threebody.base import CRTBP
 
 
 def test_gnc_load_reference_trajectory():
     """测试加载参考轨迹"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     times = np.array([0.0, 1.0])
     states = np.zeros((2, 6))
     eph = Ephemeris(times, states, CoordinateFrame.SUN_EARTH_ROTATING)
@@ -19,7 +19,7 @@ def test_gnc_load_reference_trajectory():
 
 def test_gnc_load_reference_trajectory_wrong_frame():
     """测试错误坐标系的轨迹被拒绝"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     times = np.array([0.0, 1.0])
     states = np.zeros((2, 6))
     eph = Ephemeris(times, states, CoordinateFrame.J2000_ECI)
@@ -29,7 +29,7 @@ def test_gnc_load_reference_trajectory_wrong_frame():
 
 def test_gnc_update_navigation():
     """测试导航状态更新"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     obs = np.array([1, 2, 3, 4, 5, 6])
     gnc.update_navigation(obs, CoordinateFrame.SUN_EARTH_ROTATING)
     assert np.array_equal(gnc.current_nav_state, obs)
@@ -37,7 +37,7 @@ def test_gnc_update_navigation():
 
 def test_gnc_update_navigation_wrong_frame():
     """测试错误坐标系观测被拒绝"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     obs = np.zeros(6)
     with pytest.raises(ValueError, match="导航状态坐标系不匹配"):
         gnc.update_navigation(obs, CoordinateFrame.J2000_ECI)
@@ -45,7 +45,7 @@ def test_gnc_update_navigation_wrong_frame():
 
 def test_gnc_compute_control_force():
     """测试控制力计算"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     times = np.array([0.0, 1.0])
     states = np.zeros((2, 6))
     eph = Ephemeris(times, states, CoordinateFrame.SUN_EARTH_ROTATING)
@@ -59,7 +59,7 @@ def test_gnc_compute_control_force():
 
 def test_gnc_propagator_simple():
     """测试简单外推器"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     gnc.set_propagator(SimplePropagator())
     gnc.current_nav_state = np.array([0, 0, 0, 1, 0, 0])
     gnc.update_navigation(None, CoordinateFrame.SUN_EARTH_ROTATING, dt=10.0)
@@ -70,7 +70,7 @@ def test_gnc_propagator_kepler():
     """测试二体外推器"""
     mu = 3.986004418e14
     propagator = KeplerPropagator(mu)
-    gnc = GNC_Subsystem("test", CoordinateFrame.J2000_ECI)
+    gnc = GNCSubsystem("test", CoordinateFrame.J2000_ECI)
     gnc.set_propagator(propagator)
     # 初始状态：地心 7000km 圆轨道
     r = 7000e3
@@ -88,7 +88,7 @@ def test_gnc_propagator_kepler():
 
 def test_gnc_k_matrix_invalid_shape_raises():
     """测试不可修复的 K 矩阵形状导致异常（Fail-Fast）"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     times = np.array([0.0, 1.0])
     states = np.zeros((2, 6))
     eph = Ephemeris(times, states, CoordinateFrame.SUN_EARTH_ROTATING)
@@ -103,7 +103,7 @@ def test_gnc_k_matrix_invalid_shape_raises():
 
 def test_gnc_k_matrix_broadcast():
     """测试可修复的 K 矩阵形状（(6,)）成功广播为 (3,6) 并正常执行"""
-    gnc = GNC_Subsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
+    gnc = GNCSubsystem("test", CoordinateFrame.SUN_EARTH_ROTATING)
     times = np.array([0.0, 1.0])
     states = np.zeros((2, 6))
     eph = Ephemeris(times, states, CoordinateFrame.SUN_EARTH_ROTATING)

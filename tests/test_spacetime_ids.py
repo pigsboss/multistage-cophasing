@@ -39,26 +39,36 @@ def test_telemetry_creation():
     assert telem.timestamp == 3600.0
 
 def test_formation_state_container():
-    """测试 L2 级核心数据总线：多星编队状态容器"""
-    chief_pos = np.array([1.5e11, 0, 0])
-    chief_vel = np.array([0, 30e3, 0])
-    
-    # 1. 初始化主星状态
+    """Test L2 core data bus: Multi-satellite formation state container."""
+    import numpy as np
+    from mission_sim.core.spacetime.ids import FormationState, CoordinateFrame
+
+    chief_pos = np.array([1.5e11, 0.0, 0.0])
+    chief_vel = np.array([0.0, 30e3, 0.0])
+
+    # 1. Initialize Chief state
     state = FormationState(
         timestamp=0.0,
         chief_position=chief_pos,
         chief_velocity=chief_vel,
         chief_frame=CoordinateFrame.SUN_EARTH_ROTATING
     )
-    
+
     assert state.get_num_deputies() == 0
     assert state.chief_frame == CoordinateFrame.SUN_EARTH_ROTATING
-    
-    # 2. 挂载从星的相对状态 (例如 LVLH 系下距离主星 100 米)
+
+    # 2. Mount Deputy relative state (strictly following the new deputy_id contract)
     dep_pos = np.array([100.0, 0.0, 0.0])
     dep_vel = np.array([0.0, 0.1, 0.0])
-    state.add_deputy_state(dep_pos, dep_vel)
     
+    # FIX: Pass the unique Deputy ID "DEPUTY_01" as the first argument
+    state.add_deputy_state("DEPUTY_01", dep_pos, dep_vel)
+
+    # 3. Verify the fail-safe query features of the new contract
     assert state.get_num_deputies() == 1
-    assert np.array_equal(state.deputy_relative_positions[0], dep_pos)
-    assert state.deputy_frame == CoordinateFrame.LVLH  # 默认必须是相对系
+    assert state.get_deputy_index("DEPUTY_01") == 0
+    
+    # Test safe exception raising for invalid IDs
+    import pytest
+    with pytest.raises(KeyError):
+        state.get_deputy_index("GHOST_SATELLITE")

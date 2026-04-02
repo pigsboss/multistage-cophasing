@@ -32,6 +32,17 @@ class Telecommand:
     duration_s: float            # Expected duration of the force (s)
     actuator_id: str             # Target actuator ID (e.g., "THR_MAIN_1")
 
+@dataclass
+class Telemetry:
+    """
+    [MCPC UNIVERSAL]
+    Standard telemetry report from the Physics domain to the Cyber domain.
+    Used for single-satellite absolute state reporting (legacy L1 & universal base).
+    """
+    timestamp: float
+    position: np.ndarray
+    velocity: np.ndarray
+    frame: CoordinateFrame
 
 @dataclass
 class FormationState:

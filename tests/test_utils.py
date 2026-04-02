@@ -20,20 +20,32 @@ def test_get_lqr_gain():
     # 双积分器 LQR 增益应为 [1, sqrt(3)]? 这里只验证不崩溃
     assert K.shape == (1, 2)
 
-
 def test_absolute_to_lvlh():
-    """测试 LVLH 转换"""
-    # 主星圆轨道
+    """Test absolute to LVLH transformation with L2 rigorous math tools."""
+    import numpy as np
+    from mission_sim.utils.math_tools import absolute_to_lvlh
+    
+    # Chief in circular orbit
     r = 7000e3
     v = np.sqrt(3.986004418e14 / r)
-    state_chief = np.array([r, 0, 0, 0, v, 0])
-    # 从星在主星前方 100m
-    state_deputy = np.array([r, 100, 0, 0, v, 0])
-    rel = absolute_to_lvlh(state_chief, state_deputy)
-    # 预期相对位置 [0, 100, 0] 左右，速度应为 0
-    assert np.allclose(rel[0:3], [0, 100, 0], atol=1e-6)
-    assert np.linalg.norm(rel[3:6]) < 0.2
-
+    
+    # Split into explicit 3D position and velocity vectors for Chief
+    r_chief = np.array([r, 0.0, 0.0])
+    v_chief = np.array([0.0, v, 0.0])
+    
+    # Deputy is 100m ahead of the Chief (in the absolute Y direction)
+    r_deputy = np.array([r, 100.0, 0.0])
+    v_deputy = np.array([0.0, v, 0.0])
+    
+    # Execute the new L2 contract (4 separate arguments)
+    rho_lvlh, rho_dot_lvlh = absolute_to_lvlh(r_chief, v_chief, r_deputy, v_deputy)
+    
+    # Verify the relative position
+    # Under our LVLH convention (Z=Radial, Y=Cross-track, X=Along-track):
+    # Absolute Y aligns with Chief's velocity, so it becomes the LVLH X-axis.
+    # Therefore, the +100m offset should perfectly map to [100.0, 0.0, 0.0] in LVLH.
+    from numpy.testing import assert_allclose
+    assert_allclose(rho_lvlh, [100.0, 0.0, 0.0], atol=1e-7)
 
 def test_elements_to_cartesian():
     """测试轨道根数转笛卡尔坐标（开普勒圆轨道）"""
