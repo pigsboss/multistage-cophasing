@@ -75,7 +75,7 @@ def _crtbp_accel(
     return accel_grav_sun + accel_grav_earth + accel_centrifugal + accel_coriolis
 
 
-class Gravity_CRTBP(IForceModel):
+class GravityCRTBP(IForceModel):
     """
     日地系统圆型限制性三体引力模型 (CRTBP) - SI 单位制
     包含：太阳引力、地球引力、以及旋转坐标系带来的离心力与科氏力。
@@ -118,4 +118,4 @@ class Gravity_CRTBP(IForceModel):
         )
 
     def __repr__(self) -> str:
-        return (f"Gravity_CRTBP(mu={self.mu:.2e}, AU={self.AU:.2e}, OMEGA={self.OMEGA:.2e})")
+        return (f"GravityCRTBP(mu={self.mu:.2e}, AU={self.AU:.2e}, OMEGA={self.OMEGA:.2e})")

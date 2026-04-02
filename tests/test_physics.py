@@ -3,9 +3,9 @@ import pytest
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.physics.environment import CelestialEnvironment, IForceModel
 from mission_sim.core.physics.spacecraft import SpacecraftPointMass
-from mission_sim.core.physics.models.gravity_crtbp import Gravity_CRTBP
+from mission_sim.core.physics.models.gravity_crtbp import GravityCRTBP
 from mission_sim.core.physics.models.j2_gravity import J2Gravity
-from mission_sim.core.physics.models.srp import Cannonball_SRP
+from mission_sim.core.physics.models.srp import CannonballSRP
 from mission_sim.core.physics.models.atmospheric_drag import AtmosphericDrag
 
 
@@ -170,7 +170,7 @@ def test_j2_pure_function_consistency():
 
 def test_crtbp_pure_function_consistency():
     """验证 CRTBP 纯函数与类方法计算结果一致"""
-    model = Gravity_CRTBP()
+    model = GravityCRTBP()
 
     # 日地旋转系中某位置（例如 Halo 轨道附近）
     pos = np.array([1.1e11, 0.0, 5e9])
@@ -194,7 +194,7 @@ def test_srp_pure_function_consistency():
     P_solar = 4.56e-6
     sun_pos = np.array([-mu * AU, 0.0, 0.0])
 
-    srp_model = Cannonball_SRP(area_to_mass, reflectivity, sun_pos, AU, mu, P_solar)
+    srp_model = CannonballSRP(area_to_mass, reflectivity, sun_pos, AU, mu, P_solar)
 
     # 日地旋转系中某位置
     pos = np.array([1.0e11, 0.0, 0.0])

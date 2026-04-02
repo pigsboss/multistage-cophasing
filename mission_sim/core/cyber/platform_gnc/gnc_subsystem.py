@@ -147,7 +147,7 @@ class GNCSubsystem:
             vel_norm = np.linalg.norm(obs_state[3:6])
             print(f"  [{self.sc_id} GNC] 导航更新: 位置={pos_norm:.1f}m, 速度={vel_norm:.4f}m/s")
 
-    def compute_control_force(self, epoch: float, K_matrix: np.ndarray) -> Tuple[np.ndarray, CoordinateFrame]:
+    def compute_control_force(self, epoch: float, k_matrix: np.ndarray) -> Tuple[np.ndarray, CoordinateFrame]:
         """
         计算站位维持的补偿推力。
 
@@ -156,7 +156,7 @@ class GNCSubsystem:
 
         Args:
             epoch: 当前仿真历元时间 (s)
-            K_matrix: 最优控制反馈增益矩阵，期望形状 (3, 6)
+            k_matrix: 最优控制反馈增益矩阵，期望形状 (3, 6)
 
         Returns:
             Tuple[np.ndarray, CoordinateFrame]:
@@ -182,11 +182,11 @@ class GNCSubsystem:
         self.last_tracking_error = np.copy(error)
 
         # 验证K矩阵形状
-        K_matrix = self._validate_and_fix_K_matrix(K_matrix)
+        k_matrix = self._validate_and_fix_k_matrix(k_matrix)
 
         # 线性反馈控制律
         try:
-            raw_force = -K_matrix @ error
+            raw_force = -k_matrix @ error
             control_force = self._standardize_control_force(raw_force)
             self.last_control_force = np.copy(control_force)
         except Exception as e:
@@ -205,38 +205,38 @@ class GNCSubsystem:
 
         return control_force, self.operating_frame
 
-    def _validate_and_fix_K_matrix(self, K_matrix: np.ndarray) -> np.ndarray:
+    def _validate_and_fix_k_matrix(self, k_matrix: np.ndarray) -> np.ndarray:
         """
         验证并修复K矩阵形状，确保为 (3,6)。
         【L1 稳健性升级】：移除静默妥协，遇到无法安全修复的维度错误时立即抛出异常 (Fail-Fast)。
         """
-        if not isinstance(K_matrix, np.ndarray):
-            K_matrix = np.array(K_matrix, dtype=np.float64)
+        if not isinstance(k_matrix, np.ndarray):
+            k_matrix = np.array(k_matrix, dtype=np.float64)
 
         expected_shape = (3, 6)
-        if K_matrix.shape == expected_shape:
-            return K_matrix
+        if k_matrix.shape == expected_shape:
+            return k_matrix
 
         if self.verbose:
-            print(f"⚠️ [{self.sc_id} GNC] K矩阵形状不匹配: 当前 {K_matrix.shape}，期望 {expected_shape}。尝试进行安全重塑...")
+            print(f"⚠️ [{self.sc_id} GNC] K矩阵形状不匹配: 当前 {k_matrix.shape}，期望 {expected_shape}。尝试进行安全重塑...")
 
         # 尝试安全的形状修正逻辑 (仅处理明确可推导的降维/展平情况)
         try:
-            if K_matrix.shape == (1, 6) or K_matrix.shape == (6,):
+            if k_matrix.shape == (1, 6) or k_matrix.shape == (6,):
                 # 如果是 1D 数组，假定 3 个轴使用相同的反馈增益
-                if K_matrix.shape == (6,):
-                    K_matrix = K_matrix.reshape(1, 6)
-                K_matrix = np.tile(K_matrix, (3, 1))
+                if k_matrix.shape == (6,):
+                    k_matrix = k_matrix.reshape(1, 6)
+                k_matrix = np.tile(k_matrix, (3, 1))
                 if self.verbose:
-                    print(f"  [{self.sc_id} GNC] 已将 1D 增益广播为 3D: {K_matrix.shape}")
-                return K_matrix
+                    print(f"  [{self.sc_id} GNC] 已将 1D 增益广播为 3D: {k_matrix.shape}")
+                return k_matrix
 
             # 如果是纯粹的展平数组且元素数量匹配，则重塑
-            if K_matrix.size == 18:
-                K_matrix = K_matrix.reshape(expected_shape)
+            if k_matrix.size == 18:
+                k_matrix = k_matrix.reshape(expected_shape)
                 if self.verbose:
-                    print(f"  [{self.sc_id} GNC] 已重塑为标准维度: {K_matrix.shape}")
-                return K_matrix
+                    print(f"  [{self.sc_id} GNC] 已重塑为标准维度: {k_matrix.shape}")
+                return k_matrix
 
         except Exception as e:
             # 捕获任何在重塑过程中发生的意外错误
@@ -245,7 +245,7 @@ class GNCSubsystem:
         # 如果走到这里，说明矩阵维度完全不可控，必须 Fail-Fast
         raise ValueError(
             f"[{self.sc_id} GNC 致命错误] 拒绝执行控制指令！\n"
-            f"  传入的 K 矩阵形状 {K_matrix.shape} 无法安全转换为所需的 {expected_shape}。\n"
+            f"  传入的 K 矩阵形状 {k_matrix.shape} 无法安全转换为所需的 {expected_shape}。\n"
             f"  请检查 _design_control_law 中的 LQR/反馈逻辑设计。"
         )
 

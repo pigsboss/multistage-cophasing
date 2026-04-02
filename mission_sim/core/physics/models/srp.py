@@ -71,7 +71,7 @@ def _srp_accel(
     return factor * dir_sun
 
 
-class Cannonball_SRP(IForceModel):
+class CannonballSRP(IForceModel):
     """
     球对称太阳光压模型（Cannonball 模型）
     继承自 IForceModel，提供基于面积质量比和反射系数的光压加速度计算。
@@ -140,6 +140,6 @@ class Cannonball_SRP(IForceModel):
         )
 
     def __repr__(self) -> str:
-        return (f"Cannonball_SRP(A/m={self.area_to_mass:.4f} m²/kg, "
+        return (f"CannonballSRP(A/m={self.area_to_mass:.4f} m²/kg, "
                 f"reflectivity={self.reflectivity:.2f}, "
                 f"sun_pos=({self.sun_position[0]:.2e}, {self.sun_position[1]:.2e}, {self.sun_position[2]:.2e}) m)")
