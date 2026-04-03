@@ -26,7 +26,7 @@ def formation_config(tmp_path):
         "simulation_days": 0.01,
         "time_step": 1.0,
         "data_dir": str(tmp_path),
-        "verbose": False,
+        "verbose": True,
         "chief_initial_state": [7000e3, 0.0, 0.0, 0.0, 7.5e3, 0.0],
         "deputy_initial_states": [
             ("DEP1", [7000e3, 100.0, 0.0, 0.0, 7.5e3, 0.0]),

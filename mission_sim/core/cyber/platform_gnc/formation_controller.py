@@ -67,12 +67,11 @@ class FormationController:
 
         if K_lqr is None:
             # Compute continuous-time LQR gain for CW dynamics
-            # (linearized around zero relative state)
             A = dynamics._continuous_matrix() if hasattr(dynamics, '_continuous_matrix') else None
             if A is None:
-                raise ValueError("Dynamics model must provide continuous matrix for LQR design")
+                raise ValueError("Dynamics model must provide continuous matrix for LQR design when K_lqr is not provided")
             B = np.zeros((6, 3))
-            B[3:6, 0:3] = np.eye(3)  # Control affects acceleration directly
+            B[3:6, 0:3] = np.eye(3)
             self.K = get_lqr_gain(A, B, Q, R)
         else:
             self.K = K_lqr
