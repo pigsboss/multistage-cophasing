@@ -6,11 +6,11 @@ This module provides a generic CRTBP implementation that supports any two-body s
 """
 import numpy as np
 from typing import Tuple, Dict, Any
-from mission_sim.core.physics.models.base import ForceModel
+from mission_sim.core.physics.environment import IForceModel
 from mission_sim.utils.math_tools import inertial_to_rotating, rotating_to_inertial
 
 
-class UniversalCRTBP(ForceModel):
+class UniversalCRTBP(IForceModel):
     """
     Universal Circular Restricted Three-Body Problem (CRTBP) Dynamics Model
     
@@ -219,6 +219,29 @@ class UniversalCRTBP(ForceModel):
         accel_physical = accel_nd * (self._L * self._omega**2)
         
         return accel_physical
+    
+    def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+        """
+        Batch compute CRTBP accelerations for multiple spacecraft.
+        
+        Args:
+            state_matrix: 2D array of shape (N, 6) representing N spacecraft states
+            epoch: Current time (seconds)
+            
+        Returns:
+            2D array of shape (N, 3) representing accelerations for each spacecraft
+        """
+        if state_matrix.ndim != 2 or state_matrix.shape[1] != 6:
+            raise ValueError(f"state_matrix must be of shape (N, 6), got {state_matrix.shape}")
+        
+        N = state_matrix.shape[0]
+        accel_matrix = np.zeros((N, 3), dtype=np.float64)
+        
+        # Process each spacecraft
+        for i in range(N):
+            accel_matrix[i] = self.compute_accel(state_matrix[i], epoch)
+        
+        return accel_matrix
     
     def jacobi_constant(self, state: np.ndarray) -> float:
         """

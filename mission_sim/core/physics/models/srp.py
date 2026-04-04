@@ -139,6 +139,37 @@ class CannonballSRP(IForceModel):
             self.AU
         )
 
+    def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+        """
+        Batch compute SRP accelerations for multiple spacecraft.
+        
+        Args:
+            state_matrix: 2D array of shape (N, 6) representing N spacecraft states
+            epoch: Current time (seconds)
+            
+        Returns:
+            2D array of shape (N, 3) representing accelerations for each spacecraft
+        """
+        if state_matrix.ndim != 2 or state_matrix.shape[1] != 6:
+            raise ValueError(f"state_matrix must be of shape (N, 6), got {state_matrix.shape}")
+        
+        N = state_matrix.shape[0]
+        accel_matrix = np.zeros((N, 3), dtype=np.float64)
+        
+        # Process each spacecraft
+        for i in range(N):
+            pos_sc = state_matrix[i, :3]
+            accel_matrix[i] = _srp_accel(
+                pos_sc,
+                self.sun_position,
+                self.area_to_mass,
+                self.reflectivity,
+                self.P_solar,
+                self.AU
+            )
+        
+        return accel_matrix
+
     def __repr__(self) -> str:
         return (f"CannonballSRP(A/m={self.area_to_mass:.4f} m²/kg, "
                 f"reflectivity={self.reflectivity:.2f}, "

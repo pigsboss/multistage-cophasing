@@ -135,6 +135,40 @@ class AtmosphericDrag(IForceModel):
             self.R_earth
         )
 
+    def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+        """
+        Batch compute atmospheric drag accelerations for multiple spacecraft.
+        
+        Args:
+            state_matrix: 2D array of shape (N, 6) representing N spacecraft states
+            epoch: Current time (seconds)
+            
+        Returns:
+            2D array of shape (N, 3) representing accelerations for each spacecraft
+        """
+        if state_matrix.ndim != 2 or state_matrix.shape[1] != 6:
+            raise ValueError(f"state_matrix must be of shape (N, 6), got {state_matrix.shape}")
+        
+        N = state_matrix.shape[0]
+        accel_matrix = np.zeros((N, 3), dtype=np.float64)
+        
+        # Process each spacecraft
+        for i in range(N):
+            pos = state_matrix[i, :3]
+            vel = state_matrix[i, 3:6]
+            accel_matrix[i] = _atmospheric_drag_accel(
+                pos,
+                vel,
+                self.area_to_mass,
+                self.Cd,
+                self.rho0,
+                self.H,
+                self.h0,
+                self.R_earth
+            )
+        
+        return accel_matrix
+
     def __repr__(self) -> str:
         return (f"AtmosphericDrag(A/m={self.area_to_mass:.4f} m²/kg, "
                 f"Cd={self.Cd:.2f}, rho0={self.rho0:.3f} kg/m³, "

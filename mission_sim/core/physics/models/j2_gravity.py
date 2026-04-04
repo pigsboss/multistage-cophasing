@@ -112,6 +112,30 @@ class J2Gravity(IForceModel):  # 修改这里
         # 调用纯函数计算加速度
         return _j2_accel(pos, self.mu_earth, self.j2, self.r_earth)
 
+    def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+        """
+        Batch compute J2 accelerations for multiple spacecraft.
+        
+        Args:
+            state_matrix: 2D array of shape (N, 6) representing N spacecraft states
+            epoch: Current time (seconds)
+            
+        Returns:
+            2D array of shape (N, 3) representing accelerations for each spacecraft
+        """
+        if state_matrix.ndim != 2 or state_matrix.shape[1] != 6:
+            raise ValueError(f"state_matrix must be of shape (N, 6), got {state_matrix.shape}")
+        
+        N = state_matrix.shape[0]
+        accel_matrix = np.zeros((N, 3), dtype=np.float64)
+        
+        # Process each spacecraft
+        for i in range(N):
+            pos = state_matrix[i, :3]
+            accel_matrix[i] = _j2_accel(pos, self.mu_earth, self.j2, self.r_earth)
+        
+        return accel_matrix
+
     def __repr__(self) -> str:
         return (f"J2Gravity(mu_earth={self.mu_earth:.4e} m³/s², "
                 f"j2={self.j2:.6e}, r_earth={self.r_earth:.3f} m)")
