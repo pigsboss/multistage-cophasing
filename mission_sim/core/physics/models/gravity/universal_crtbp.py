@@ -75,6 +75,24 @@ class UniversalCRTBP(IForceModel):
         self._gm1 = self.G * self._primary_mass
         self._gm2 = self.G * self._secondary_mass
         
+        # Legacy constants for backward compatibility
+        self.OMEGA = self._omega
+        if system_name == 'sun_earth':
+            # Sun is primary, Earth is secondary
+            self.GM_SUN = self.G * self._primary_mass
+            self.GM_EARTH = self.G * self._secondary_mass
+            self.AU = self._distance
+        elif system_name == 'earth_moon':
+            # For earth-moon system, maintain naming for compatibility
+            self.GM_SUN = self.G * self._primary_mass      # Actually Earth's GM
+            self.GM_EARTH = self.G * self._secondary_mass  # Actually Moon's GM
+            self.AU = self._distance
+        else:
+            # Generic system
+            self.GM_SUN = self._gm1
+            self.GM_EARTH = self._gm2
+            self.AU = self._distance
+        
         # Numba acceleration setup
         if use_numba:
             try:
@@ -125,6 +143,11 @@ class UniversalCRTBP(IForceModel):
     @property
     def omega(self) -> float:
         """System angular velocity (rad/s)"""
+        return self._omega
+    
+    @property
+    def OMEGA(self) -> float:
+        """Legacy alias for system angular velocity (rad/s)"""
         return self._omega
     
     @property
