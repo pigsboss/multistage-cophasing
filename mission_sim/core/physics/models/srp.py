@@ -6,7 +6,7 @@
 """
 
 import numpy as np
-from mission_sim.core.physics.models.base import ForceModel
+from mission_sim.core.physics.environment import IForceModel
 
 # 尝试导入 Numba 用于 JIT 加速，若不可用则回退到普通 Python
 try:
@@ -71,7 +71,7 @@ def _srp_accel(
     return factor * dir_sun
 
 
-class CannonballSRP(ForceModel):
+class CannonballSRP(IForceModel):
     """
     球对称太阳光压模型（Cannonball 模型）
     继承自 IForceModel，提供基于面积质量比和反射系数的光压加速度计算。
