@@ -38,7 +38,8 @@ class UniversalCRTBP(IForceModel):
     G = 6.67430e-11
     
     def __init__(self, primary_mass: float, secondary_mass: float, 
-                 distance: float, system_name: str = 'custom'):
+                 distance: float, system_name: str = 'custom',
+                 use_numba: bool = False):
         """
         Initialize CRTBP system with physical parameters.
         
@@ -47,11 +48,13 @@ class UniversalCRTBP(IForceModel):
             secondary_mass: Mass of smaller primary body (kg)
             distance: Distance between primaries (m)
             system_name: System identifier (e.g., 'earth_moon', 'sun_earth')
+            use_numba: Enable Numba acceleration for single state computations
         """
         self._primary_mass = float(primary_mass)
         self._secondary_mass = float(secondary_mass)
         self._distance = float(distance)
         self._system_name = system_name
+        self._use_numba = use_numba
         
         # Compute derived parameters
         total_mass = self._primary_mass + self._secondary_mass
@@ -67,9 +70,22 @@ class UniversalCRTBP(IForceModel):
         # Positions of primaries in rotating frame (normalized by L)
         self._primary_pos = np.array([-self._mu, 0.0, 0.0])    # Larger primary (e.g., Earth)
         self._secondary_pos = np.array([1.0 - self._mu, 0.0, 0.0])  # Smaller primary (e.g., Moon)
+        
+        # Compute GM values for compatibility with legacy code
+        self._gm1 = self.G * self._primary_mass
+        self._gm2 = self.G * self._secondary_mass
+        
+        # Numba acceleration setup
+        if use_numba:
+            try:
+                from numba import jit as njit
+                self._accel_numba = njit(self._crtbp_acceleration_nd)
+            except ImportError:
+                self._use_numba = False
+                print("警告: Numba 不可用，将使用纯 NumPy 实现")
     
     @classmethod
-    def earth_moon_system(cls) -> 'UniversalCRTBP':
+    def earth_moon_system(cls, use_numba: bool = False) -> 'UniversalCRTBP':
         """
         Create Earth-Moon system CRTBP instance.
         
@@ -80,10 +96,10 @@ class UniversalCRTBP(IForceModel):
         moon_mass = 7.342e22   # kg
         distance = 3.844e8     # m (semi-major axis)
         
-        return cls(earth_mass, moon_mass, distance, 'earth_moon')
+        return cls(earth_mass, moon_mass, distance, 'earth_moon', use_numba)
     
     @classmethod
-    def sun_earth_system(cls) -> 'UniversalCRTBP':
+    def sun_earth_system(cls, use_numba: bool = False) -> 'UniversalCRTBP':
         """
         Create Sun-Earth system CRTBP instance.
         
@@ -94,7 +110,7 @@ class UniversalCRTBP(IForceModel):
         earth_mass = 5.972e24  # kg
         distance = 1.496e11    # m (1 AU)
         
-        return cls(sun_mass, earth_mass, distance, 'sun_earth')
+        return cls(sun_mass, earth_mass, distance, 'sun_earth', use_numba)
     
     @property
     def mu(self) -> float:
@@ -125,6 +141,16 @@ class UniversalCRTBP(IForceModel):
     def secondary_mass(self) -> float:
         """Mass of smaller primary body (kg)"""
         return self._secondary_mass
+    
+    @property
+    def gm1(self) -> float:
+        """GM of larger primary (m³/s²)"""
+        return self._gm1
+    
+    @property
+    def gm2(self) -> float:
+        """GM of smaller primary (m³/s²)"""
+        return self._gm2
     
     def _to_nd(self, state_physical: np.ndarray) -> np.ndarray:
         """
@@ -200,6 +226,39 @@ class UniversalCRTBP(IForceModel):
         
         return np.array([ax, ay, az])
     
+    def _crtbp_acceleration_physical(self, pos: np.ndarray, vel: np.ndarray) -> np.ndarray:
+        """
+        Direct computation of CRTBP acceleration in physical units.
+        This method is equivalent to the original GravityCRTBP approach.
+        
+        Args:
+            pos: Position vector [x, y, z] (m) in rotating frame
+            vel: Velocity vector [vx, vy, vz] (m/s) in rotating frame
+            
+        Returns:
+            Acceleration [ax, ay, az] (m/s²)
+        """
+        # Positions of primaries in rotating frame (physical units)
+        x1 = -self._mu * self._L
+        x2 = (1.0 - self._mu) * self._L
+        
+        # Relative distances to primaries
+        dx1 = pos[0] - x1
+        dx2 = pos[0] - x2
+        r1_3 = (dx1**2 + pos[1]**2 + pos[2]**2)**1.5
+        r2_3 = (dx2**2 + pos[1]**2 + pos[2]**2)**1.5
+        
+        # Gravitational components
+        ax = -self._gm1 * dx1 / r1_3 - self._gm2 * dx2 / r2_3
+        ay = -self._gm1 * pos[1] / r1_3 - self._gm2 * pos[1] / r2_3
+        az = -self._gm1 * pos[2] / r1_3 - self._gm2 * pos[2] / r2_3
+        
+        # Fictitious forces (Centrifugal & Coriolis)
+        ax += self._omega**2 * pos[0] + 2.0 * self._omega * vel[1]
+        ay += self._omega**2 * pos[1] - 2.0 * self._omega * vel[0]
+        
+        return np.array([ax, ay, az], dtype=np.float64)
+    
     def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
         """
         [L1 LEGACY & FALLBACK]
@@ -212,17 +271,15 @@ class UniversalCRTBP(IForceModel):
         Returns:
             Acceleration [ax, ay, az] (m/s²)
         """
-        # Convert to dimensionless
-        state_nd = self._to_nd(state)
-        
-        # Compute dimensionless acceleration
-        accel_nd = self._crtbp_acceleration_nd(state_nd)
-        
-        # Convert back to physical units
-        # a_physical = a_nd * (L * ω²)
-        accel_physical = accel_nd * (self._L * self._omega**2)
-        
-        return accel_physical
+        if self._use_numba:
+            # Use physical units with Numba acceleration
+            return self._crtbp_acceleration_physical(state[0:3], state[3:6])
+        else:
+            # Use dimensionless units (standard approach)
+            state_nd = self._to_nd(state)
+            accel_nd = self._crtbp_acceleration_nd(state_nd)
+            accel_physical = accel_nd * (self._L * self._omega**2)
+            return accel_physical
     
     def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
         """
@@ -444,3 +501,112 @@ class UniversalCRTBP(IForceModel):
                 f"  Angular velocity: {params['omega']:.3e} rad/s\n"
                 f"  Primary mass: {params['primary_mass']:.3e} kg\n"
                 f"  Secondary mass: {params['secondary_mass']:.3e} kg")
+
+
+class SunEarthCRTBP(UniversalCRTBP):
+    """
+    日地系统 CRTBP 专用实现。
+    继承自 UniversalCRTBP，使用日地系统参数初始化。
+    
+    注意：此实现替代了原有的 GravityCRTBP 类。
+    """
+    
+    # 使用 GravityCRTBP 中的精确常数
+    GM_SUN = 1.32712440018e20    # m³/s²
+    GM_EARTH = 3.986004418e14    # m³/s²
+    AU = 1.495978707e11          # m
+    
+    def __init__(self, use_numba: bool = False):
+        # 计算质量 (通过 GM = G * M)
+        sun_mass = self.GM_SUN / self.G
+        earth_mass = self.GM_EARTH / self.G
+        
+        # 调用父类初始化
+        super().__init__(
+            primary_mass=sun_mass,
+            secondary_mass=earth_mass,
+            distance=self.AU,
+            system_name='sun_earth',
+            use_numba=use_numba
+        )
+        
+        # 保留原 GravityCRTBP 的常量名以便兼容
+        self._sun_gm = self.GM_SUN
+        self._earth_gm = self.GM_EARTH
+        self._au = self.AU
+        
+    def __repr__(self) -> str:
+        return f"SunEarthCRTBP(mu={self.mu:.2e}, L={self.distance:.2e} m)"
+
+
+class EarthMoonCRTBP(UniversalCRTBP):
+    """
+    地月系统 CRTBP 专用实现。
+    继承自 UniversalCRTBP，使用地月系统参数初始化。
+    """
+    
+    GM_EARTH = 3.986004418e14    # m³/s²
+    GM_MOON = 4.9048695e12       # m³/s²
+    L_EM = 3.844e8              # m (地月平均距离)
+    
+    def __init__(self, use_numba: bool = False):
+        # 计算质量
+        earth_mass = self.GM_EARTH / self.G
+        moon_mass = self.GM_MOON / self.G
+        
+        # 调用父类初始化
+        super().__init__(
+            primary_mass=earth_mass,
+            secondary_mass=moon_mass,
+            distance=self.L_EM,
+            system_name='earth_moon',
+            use_numba=use_numba
+        )
+        
+        # 保留原常量名
+        self._earth_gm = self.GM_EARTH
+        self._moon_gm = self.GM_MOON
+        
+    def __repr__(self) -> str:
+        return f"EarthMoonCRTBP(mu={self.mu:.2e}, L={self.distance:.2e} m)"
+
+
+# 添加原 GravityCRTBP 的向后兼容别名
+# 如果现有代码引用了 GravityCRTBP，可以使用这个别名
+GravityCRTBP = SunEarthCRTBP
+
+
+def create_crtbp_system(system_type: str = 'sun_earth', use_numba: bool = False, **kwargs) -> UniversalCRTBP:
+    """
+    创建 CRTBP 系统的工厂函数。
+    
+    参数:
+        system_type: 系统类型，可选 'sun_earth', 'earth_moon', 'custom'
+        use_numba: 是否启用 Numba 加速（仅对单个航天器计算有效）
+        **kwargs: 自定义系统参数，当 system_type='custom' 时使用
+        
+    返回:
+        UniversalCRTBP 实例
+    """
+    if system_type == 'sun_earth':
+        return SunEarthCRTBP(use_numba=use_numba)
+    elif system_type == 'earth_moon':
+        return EarthMoonCRTBP(use_numba=use_numba)
+    elif system_type == 'custom':
+        required = ['primary_mass', 'secondary_mass', 'distance']
+        if not all(k in kwargs for k in required):
+            raise ValueError(f"自定义系统需要参数: {required}")
+        kwargs['use_numba'] = use_numba
+        return UniversalCRTBP(**kwargs)
+    else:
+        raise ValueError(f"未知系统类型: {system_type}")
+
+
+# 导出所有重要类和函数
+__all__ = [
+    'UniversalCRTBP',
+    'SunEarthCRTBP', 
+    'EarthMoonCRTBP',
+    'GravityCRTBP',  # 向后兼容别名
+    'create_crtbp_system'
+]
