@@ -2,92 +2,74 @@
 """
 MCPC Core Physics Models: Dual-Engine Vectorized CRTBP
 ------------------------------------------------------
-Implements the Circular Restricted Three-Body Problem (CRTBP) in SI units.
-Optimized with Numba JIT for L1 single-satellite precision and 
-NumPy vectorization for L2 multi-satellite formation performance.
+注意：此文件已过时，请使用 mission_sim.core.physics.models.gravity.universal_crtbp 中的类。
+
+此文件已废弃，仅用于向后兼容。请导入：
+    from mission_sim.core.physics.models.gravity.universal_crtbp import UniversalCRTBP
+    然后使用 UniversalCRTBP.sun_earth_system() 创建实例。
 """
 
+import warnings
 import numpy as np
 from mission_sim.core.physics.environment import IForceModel
 
-# --- Numba Optimization Guard ---
+# 发出弃用警告
+warnings.warn(
+    "gravity_crtbp.py is deprecated and will be removed in a future version. "
+    "Please use UniversalCRTBP.sun_earth_system() from mission_sim.core.physics.models.gravity.universal_crtbp instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# 从新的重力模块导入
 try:
-    from numba import jit as njit
-    _HAS_NUMBA = True
-except ImportError:
-    def njit(func): return func
-    _HAS_NUMBA = False
-
-@njit
-def _crtbp_accel_numba(pos, vel, gm1, gm2, omega, x1, x2):
-    """[L1-OPTIMIZED] Numba-accelerated single state calculation."""
-    dx1 = pos[0] - x1
-    dx2 = pos[0] - x2
-    r1_3 = (dx1**2 + pos[1]**2 + pos[2]**2)**1.5
-    r2_3 = (dx2**2 + pos[1]**2 + pos[2]**2)**1.5
+    from mission_sim.core.physics.models.gravity.universal_crtbp import UniversalCRTBP
     
-    # Gravitational components
-    ax = -gm1 * dx1 / r1_3 - gm2 * dx2 / r2_3
-    ay = -gm1 * pos[1] / r1_3 - gm2 * pos[1] / r2_3
-    az = -gm1 * pos[2] / r1_3 - gm2 * pos[2] / r2_3
-    
-    # Fictitious forces (Centrifugal & Coriolis)
-    ax += omega**2 * pos[0] + 2.0 * omega * vel[1]
-    ay += omega**2 * pos[1] - 2.0 * omega * vel[0]
-    
-    return np.array([ax, ay, az], dtype=np.float64)
-
-class GravityCRTBP(IForceModel):
-    """
-    [MCPC UNIVERSAL] CRTBP Gravity Model.
-    Supports Sun-Earth system by default using SI units.
-    """
-
-    def __init__(self):
-        # Physical Constants (SI Units: m, s, kg)
-        self.GM_SUN = 1.32712440018e20
-        self.GM_EARTH = 3.986004418e14
-        self.AU = 1.495978707e11
-        self.OMEGA = 1.990986e-7  # Mean angular velocity of Earth (rad/s)
-
-        # Pre-computed System Parameters
-        self.mu = self.GM_EARTH / (self.GM_SUN + self.GM_EARTH)
-        self._x1 = -self.mu * self.AU
-        self._x2 = (1.0 - self.mu) * self.AU
-        self._omega_sq = self.OMEGA**2
-
-    def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
-        """[L1 LEGACY] Compute acceleration for a SINGLE spacecraft using Numba."""
-        return _crtbp_accel_numba(
-            state[0:3], state[3:6], 
-            self.GM_SUN, self.GM_EARTH, self.OMEGA, 
-            self._x1, self._x2
-        )
-
-    def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+    # 创建向后兼容的适配器类，保持原有接口
+    class GravityCRTBP(IForceModel):
         """
-        [L2-SPECIFIC / PARALLELIZATION] 
-        Batch compute accelerations for N spacecraft using NumPy broadcasting.
-        O(1) Python overhead, O(N) C-backend performance.
+        向后兼容的适配器类，保持原有 GravityCRTBP 的接口。
+        实际实现使用 UniversalCRTBP 的 Sun-Earth 系统。
         """
-        # 1. Extract position and velocity matrix views
-        x, y, z = state_matrix[:, 0], state_matrix[:, 1], state_matrix[:, 2]
-        vx, vy = state_matrix[:, 3], state_matrix[:, 4]
-
-        # 2. Relative distances to primaries
-        dx1, dx2 = x - self._x1, x - self._x2
-        r1_3 = (dx1**2 + y**2 + z**2 + 1e-15)**1.5
-        r2_3 = (dx2**2 + y**2 + z**2 + 1e-15)**1.5
-
-        # 3. Summing all force components (Gravity + Centrifugal + Coriolis)
-        ax = (-self.GM_SUN * dx1 / r1_3 - self.GM_EARTH * dx2 / r2_3 + 
-              self._omega_sq * x + 2.0 * self.OMEGA * vy)
-        ay = (-self.GM_SUN * y / r1_3 - self.GM_EARTH * y / r2_3 + 
-              self._omega_sq * y - 2.0 * self.OMEGA * vx)
-        az = (-self.GM_SUN * z / r1_3 - self.GM_EARTH * z / r2_3)
-
-        # 4. Assemble result matrix (N, 3)
-        return np.column_stack((ax, ay, az))
-
-    def __repr__(self) -> str:
-        return f"GravityCRTBP(mu={self.mu:.2e}, OMEGA={self.OMEGA:.2e})"
+        def __init__(self):
+            # 创建 UniversalCRTBP 的 Sun-Earth 系统实例
+            self._universal_crtbp = UniversalCRTBP.sun_earth_system(use_numba=True)
+            
+            # 保持原 GravityCRTBP 的常量名以便兼容
+            self.GM_SUN = 1.32712440018e20    # m³/s²
+            self.GM_EARTH = 3.986004418e14    # m³/s²
+            self.AU = 1.495978707e11          # m
+            self.OMEGA = 1.990986e-7          # rad/s
+            
+            # 计算原私有属性
+            self.mu = self.GM_EARTH / (self.GM_SUN + self.GM_EARTH)
+            self._x1 = -self.mu * self.AU
+            self._x2 = (1.0 - self.mu) * self.AU
+            self._omega_sq = self.OMEGA**2
+        
+        def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
+            """[L1 LEGACY] Compute acceleration for a SINGLE spacecraft."""
+            # 使用 UniversalCRTBP 的实现
+            return self._universal_crtbp.compute_accel(state, epoch)
+        
+        def compute_vectorized_acc(self, state_matrix: np.ndarray, epoch: float) -> np.ndarray:
+            """
+            [L2-SPECIFIC / PARALLELIZATION] 
+            Batch compute accelerations for N spacecraft.
+            """
+            # 使用 UniversalCRTBP 的向量化实现
+            return self._universal_crtbp.compute_vectorized_acc(state_matrix, epoch)
+        
+        def __repr__(self) -> str:
+            # 保持原 GravityCRTBP 的字符串表示
+            return f"GravityCRTBP(mu={self.mu:.2e}, OMEGA={self.OMEGA:.2e})"
+    
+    # 导出类
+    __all__ = ['GravityCRTBP']
+    
+except ImportError as e:
+    # 如果无法导入新模块，提供更详细的错误信息
+    raise ImportError(
+        f"Cannot import UniversalCRTBP from mission_sim.core.physics.models.gravity.universal_crtbp. "
+        f"Please check if the new gravity module is properly installed. Error: {e}"
+    )
