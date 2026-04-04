@@ -15,10 +15,17 @@ Example:
         def compute_accel(self, state, epoch):
             # Your implementation
             pass
+        
+        # Optional: override for better performance
+        def compute_vectorized_acc(self, state_matrix, epoch):
+            # Vectorized implementation
+            pass
 """
 
 raise ImportError(
-    "ForceModel base class has been removed. "
+    "ForceModel base class has been removed as part of the MCPC architecture refactoring. "
     "Please update your imports to use IForceModel directly from "
-    "mission_sim.core.physics.environment"
+    "mission_sim.core.physics.environment. "
+    "All existing force models (GravityCRTBP, J2Gravity, AtmosphericDrag, CannonballSRP, UniversalCRTBP) "
+    "now directly implement IForceModel."
 )

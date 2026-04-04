@@ -44,7 +44,7 @@ def test_convenience_constructors():
     assert earth_moon.omega > 0
 
 
-def test_compute_acceleration():
+def test_compute_accel():
     """验证加速度计算功能"""
     crtbp = UniversalCRTBP.earth_moon_system()
     

@@ -244,14 +244,11 @@ def test_real_j2_gravity_parallel():
 
 def test_frame_mismatch_in_compute_accelerations(env, sample_states):
     """Test that compute_accelerations enforces frame consistency."""
-    # This method does not accept a frame argument; it assumes all states are in env.computation_frame.
-    # So there is no frame mismatch check inside compute_accelerations.
-    # The check happens when force models are called; they may have their own frame assumptions.
-    # For now, we just verify that the method runs without error when frames match.
+    # The compute_accelerations method assumes all states are in env.computation_frame.
+    # It doesn't have a frame parameter, so there's no explicit frame check in this method.
+    # However, force models may have their own frame assumptions.
+    # We just verify that the method runs without error when states are in the correct frame.
     env.compute_accelerations(sample_states)  # should not raise
-
-    # If a force model expects a different frame, it would be a model-specific issue,
-    # not caught by the environment. So we skip this test for now.
 
 
 # -----------------------------------------------------------------------------
