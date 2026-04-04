@@ -170,7 +170,7 @@ class TestCRTBPReferenceSolutions:
         # Richardson三阶近似只是初始猜测，不是精确周期解
         # 预期误差约为~500,000 km（三阶近似精度）
         # 放宽到1,000,000 km以验证测试框架正确性
-        max_position_error = 1e6  # 1,000,000 km
+        max_position_error = 1e9  # 1,000,000 km = 1e9 meters
         assert position_error < max_position_error, \
             f"Halo轨道周期闭合位置误差过大: {position_error/1e3:.2f} km"
         
