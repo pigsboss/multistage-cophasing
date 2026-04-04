@@ -203,6 +203,69 @@ def rotating_to_inertial(
 
 
 # =====================================================================
+# Earth-Moon System Specific Functions
+# =====================================================================
+
+def inertial_to_earth_moon_rotating(state_inertial: np.ndarray, t: float) -> np.ndarray:
+    """
+    Convert state from J2000_ECI to Earth-Moon rotating frame.
+    
+    Earth-Moon rotating frame definition:
+        - Origin: Earth-Moon barycenter
+        - X-axis: Points from barycenter to Earth
+        - Z-axis: Perpendicular to Earth-Moon orbital plane
+        - Y-axis: Completes right-handed system
+        - Angular velocity: ω = 2.6617e-6 rad/s
+    
+    Args:
+        state_inertial: State vector in J2000_ECI [x, y, z, vx, vy, vz] (m, m/s)
+        t: Time since J2000 epoch (s)
+        
+    Returns:
+        State vector in Earth-Moon rotating frame
+    """
+    omega_moon = 2.6617e-6  # Lunar orbital angular velocity (rad/s)
+    
+    # Note: This assumes state_inertial is already relative to Earth-Moon barycenter
+    # For precise conversion, need to subtract barycenter position/velocity
+    return inertial_to_rotating(state_inertial, t, omega_moon)
+
+
+def earth_moon_rotating_to_inertial(state_rotating: np.ndarray, t: float) -> np.ndarray:
+    """
+    Convert state from Earth-Moon rotating frame to J2000_ECI.
+    
+    Args:
+        state_rotating: State vector in Earth-Moon rotating frame [x, y, z, vx, vy, vz] (m, m/s)
+        t: Time since J2000 epoch (s)
+        
+    Returns:
+        State vector in J2000_ECI
+    """
+    omega_moon = 2.6617e-6  # Lunar orbital angular velocity (rad/s)
+    return rotating_to_inertial(state_rotating, t, omega_moon)
+
+
+def get_earth_moon_system_parameters() -> dict:
+    """
+    Get Earth-Moon system physical parameters.
+    
+    Returns:
+        Dictionary containing system parameters
+    """
+    return {
+        'mu': 0.01215,  # Mass ratio: m_moon/(m_earth + m_moon)
+        'distance': 3.844e8,  # Earth-Moon distance (m)
+        'omega': 2.6617e-6,  # Angular velocity (rad/s)
+        'period': 27.321661 * 24 * 3600,  # Sidereal period (s)
+        'earth_mass': 5.972e24,  # kg
+        'moon_mass': 7.342e22,  # kg
+        'earth_mu': 3.986004418e14,  # m³/s²
+        'moon_mu': 4.9048695e12  # m³/s²
+    }
+
+
+# =====================================================================
 # L2 Level Core: High-precision Bidirectional Transformations 
 # Between Absolute Frame and Relative Frame (LVLH)
 # =====================================================================
