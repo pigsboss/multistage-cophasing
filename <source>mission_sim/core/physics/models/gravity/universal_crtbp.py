@@ -6,11 +6,11 @@ This module provides a generic CRTBP implementation that supports any two-body s
 """
 import numpy as np
 from typing import Tuple, Dict, Any
-from mission_sim.core.physics.models.base import IForceModel
+from mission_sim.core.physics.models.base import ForceModel
 from mission_sim.utils.math_tools import inertial_to_rotating, rotating_to_inertial
 
 
-class UniversalCRTBP(IForceModel):
+class UniversalCRTBP(ForceModel):
     """
     Universal Circular Restricted Three-Body Problem (CRTBP) Dynamics Model
     
@@ -197,7 +197,7 @@ class UniversalCRTBP(IForceModel):
         
         return np.array([ax, ay, az])
     
-    def compute_acceleration(self, state: np.ndarray, epoch: float) -> np.ndarray:
+    def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
         """
         Compute CRTBP acceleration in physical units.
         
@@ -219,19 +219,6 @@ class UniversalCRTBP(IForceModel):
         accel_physical = accel_nd * (self._L * self._omega**2)
         
         return accel_physical
-    
-    def compute_accel(self, state: np.ndarray, epoch: float) -> np.ndarray:
-        """
-        Alias for compute_acceleration (IForceModel compatibility).
-        
-        Args:
-            state: Physical state [x, y, z, vx, vy, vz] (m, m/s)
-            epoch: Current time (seconds)
-            
-        Returns:
-            Acceleration [ax, ay, az] (m/s²)
-        """
-        return self.compute_acceleration(state, epoch)
     
     def jacobi_constant(self, state: np.ndarray) -> float:
         """
