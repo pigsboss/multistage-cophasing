@@ -1,6 +1,6 @@
 # 🌙 00. LUNAR-SWING 项目概览与分阶段实施框架
-...
-# 🌙 00. LUNAR-SWING 项目概览与分阶段实施框架
+
+> **项目背景与科学目标请参阅：** [README.md](README.md)
 
 ## 🎯 1. 项目定位与双重目标
 
@@ -102,27 +102,20 @@ timeline
 ## 🔗 4. 文档与成果的演进关系
 
 ```
-00_project_overview.md (本文档)
-    ├── 📄 01_concept_design.md
-    ├── 📄 02_swing_dynamics.md
-    ├── 📄 05_infrastructure_upgrade.md
-    │   └── 🧪 接口桩测试
-    │   └── 📊 模块依赖图
+00_project_overview.md (本文档)        # 总纲，指引所有后续工作
+    ├── 📄 01_concept_design.md          # 阶段一：为什么做？做什么？
+    ├── 📄 02_swing_dynamics.md          # 阶段一：理论基础是什么？
+    ├── 📄 05_infrastructure_upgrade.md  # 阶段一：框架需要什么新能力？（接口设计）
     │
-    ├── 📄 03_atmospheric_skip.md
-    ├── 📄 04_resonance_search.md
-    │   └── 🧠 UniversalCRTBP (单元测试)
-    │   └── 🎯 LunarSwingTargeter (单元/集成测试)
-    │   └── 📊 CRTBP势场图、轨道搜索动画
+    ├── 📄 03_atmospheric_skip.md        # 阶段二：关键技术1如何实现？
+    ├── 📄 04_resonance_search.md        # 阶段二：关键技术2如何实现？
+    │   └── 代码实现：`LunarSwingTargeter`, `UniversalCRTBP`
     │
-    ├── 📄 06_validation_protocol.md
-    │   └── 🚀 EarthMoonResonanceSimulation (集成/系统测试)
-    │   └── 📈 天体运行轨迹动画、长期演化动画
+    ├── 📄 06_validation_protocol.md     # 阶段三：如何确保结果可信？
+    │   └── 代码实现：`EarthMoonResonanceSimulation` 场景
     │
-    └── 📄 07_test_plan.md
-        └── ✅ 完整测试套件
-        └── 📋 测试覆盖率报告
-        └── 🏆 项目成果总览图
+    └── 📄 07_test_plan.md               # 阶段四：如何保证代码质量？
+        └── 代码实现：测试用例，代码重构与入库
 ```
 
 ## 💡 5. 下一步行动建议
