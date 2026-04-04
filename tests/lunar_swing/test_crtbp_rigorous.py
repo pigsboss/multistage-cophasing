@@ -123,8 +123,14 @@ class TestCRTBPReferenceSolutions:
         
         # 转换到物理单位
         # 无量纲长度单位 = 地月距离，无量纲时间单位 = 1/omega（角频率倒数）
-        omega = np.sqrt(crtbp.gravitational_param / crtbp.distance**3)
-        time_unit = 1.0 / omega
+        # 地月系统的平均角速度（实际物理值）
+        # 轨道周期约 27.3 天，omega = 2*pi / T
+        T_moon = 27.3217 * 86400  # 地月周期（秒）
+        omega_physical = 2 * np.pi / T_moon  # rad/s
+        
+        # 在CRTBP无量纲单位中，平均角速度为1（周期=2*pi）
+        # 所以时间转换因子是：无量纲时间1 = 物理时间 1/omega_physical
+        time_unit = 1.0 / omega_physical
         length_unit = crtbp.distance
         
         state_physical = np.array([
