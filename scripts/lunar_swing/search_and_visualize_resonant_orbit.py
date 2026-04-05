@@ -367,9 +367,11 @@ def main():
     
     # Override parameters for 1:1 resonance to ensure convergence
     if (n, m) == (1, 1):
-        if 'target_period_override' in locals():
-            search_kwargs['target_period'] = target_period_override
-            print(f"Using test-verified period: {target_period_override/86400:.2f} days")
+        # For 1:1 resonance, the period should equal the Moon's orbital period
+        T_moon = 27.321661 * 24 * 3600  # seconds
+        target_period_override = T_moon
+        search_kwargs['target_period'] = target_period_override
+        print(f"Using 1:1 resonance period: {target_period_override/86400:.2f} days")
         # Use more aggressive parameters
         search_kwargs['damping'] = 0.9
         search_kwargs['max_iter'] = 200
