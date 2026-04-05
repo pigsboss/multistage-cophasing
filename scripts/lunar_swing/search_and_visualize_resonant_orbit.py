@@ -276,13 +276,20 @@ def main():
     
     # Run search
     print(f"Searching for {n}:{m} resonant orbit...")
-    result = targeter.find_resonant_orbit(
-        resonance_ratio=(n, m),
-        initial_guess=initial_guess,
-        tol=args.tol,
-        max_iter=args.max_iter,
-        damping=args.damping
-    )
+    
+    # Allow test-verified period to override if set
+    search_kwargs = {
+        'resonance_ratio': (n, m),
+        'initial_guess': initial_guess,
+        'tol': args.tol,
+        'max_iter': args.max_iter,
+        'damping': args.damping
+    }
+    # Only pass target_period if explicitly set (test case overrides)
+    if 'target_period' in locals():
+        search_kwargs['target_period'] = target_period
+    
+    result = targeter.find_resonant_orbit(**search_kwargs)
     
     print(f"Search completed: {'Converged' if result['success'] else 'Not converged'}")
     print(f"Final residual: {result['convergence_history'][-1]['residual_norm']:.2e}")
