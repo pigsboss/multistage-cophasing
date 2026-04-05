@@ -200,6 +200,73 @@ def generate_energy_conservation(targeter, initial_state, period, output_path):
     print(f"Final energy drift: {rel_change[-1]:.2e}")
 
 
+def generate_potential_zvs_plot(targeter, converged_state, output_path):
+    """Generate CRTBP potential field + zero velocity surface plot."""
+    mu = targeter.mu
+    
+    # Create grid in x-y plane (z=0)
+    x = np.linspace(-1.5, 1.5, 200)
+    y = np.linspace(-1.5, 1.5, 200)
+    X, Y = np.meshgrid(x, y)
+    Z_plane = np.zeros_like(X)
+    
+    # Compute effective potential Ω on grid
+    r1 = np.sqrt((X + mu)**2 + Y**2 + Z_plane**2 + 1e-15)
+    r2 = np.sqrt((X + mu - 1)**2 + Y**2 + Z_plane**2 + 1e-15)
+    Omega = 0.5 * (X**2 + Y**2) + (1 - mu) / r1 + mu / r2
+    
+    # Compute Jacobi constant of converged orbit
+    x0, y0, z0, vx0, vy0, vz0 = converged_state
+    r1_0 = np.sqrt((x0 + mu)**2 + y0**2 + z0**2 + 1e-15)
+    r2_0 = np.sqrt((x0 + mu - 1)**2 + y0**2 + z0**2 + 1e-15)
+    v_sq0 = vx0**2 + vy0**2 + vz0**2
+    C = 2 * (0.5 * (x0**2 + y0**2) + (1 - mu)/r1_0 + mu/r2_0) - v_sq0
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Potential contours
+    contour = ax.contourf(X, Y, Omega, levels=50, cmap='viridis', alpha=0.7)
+    cbar = plt.colorbar(contour, label='Effective Potential Ω')
+    cbar.ax.tick_params(labelsize=10)
+    
+    # Zero velocity surface (Ω = C/2)
+    zvs_contour = ax.contour(X, Y, Omega, levels=[C/2], colors='red', 
+                              linewidths=2, linestyles='-')
+    zvs_contour.collections[0].set_label(f'ZVS (C={C:.4f})')
+    
+    # Earth, Moon
+    ax.plot([-mu], [0], 'b^', markersize=12, label='Earth')
+    ax.plot([1 - mu], [0], 'r^', markersize=10, label='Moon')
+    
+    # Lagrange points
+    # Get approximate Lagrange points
+    gamma = (mu/3)**(1/3)
+    L1 = np.array([1 - mu - gamma, 0])
+    L2 = np.array([1 - mu + gamma, 0])
+    L3 = np.array([-mu - 1 - 7*mu/12, 0])
+    L4 = np.array([0.5 - mu, np.sqrt(3)/2])
+    L5 = np.array([0.5 - mu, -np.sqrt(3)/2])
+    
+    lagrange_points = [('L1', L1), ('L2', L2), ('L3', L3), ('L4', L4), ('L5', L5)]
+    for name, lp in lagrange_points:
+        ax.plot(lp[0], lp[1], 'ko', markersize=6, label=name)
+    
+    ax.set_xlabel('X (normalized)', fontsize=12)
+    ax.set_ylabel('Y (normalized)', fontsize=12)
+    ax.set_title(f'CRTBP Potential Field & Zero Velocity Surface\nJacobi Constant C={C:.4f}', fontsize=14)
+    ax.legend(loc='upper right', fontsize=10, bbox_to_anchor=(1.15, 1))
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_aspect('equal')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Potential/ZVS plot saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Search for resonant lunar swing orbit and generate visualization plots.'
@@ -249,7 +316,9 @@ def main():
     else:
         output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
+    resonance_str = f"{n}_{m}"
     print(f"Output directory: {output_dir}")
+    print(f"Resonance: {n}:{m} (prefix: {resonance_str})")
     print()
     
     # Initial guess (adjust based on resonance)
@@ -313,31 +382,77 @@ def main():
         print(f"Residual improvement: {improvement:.1f}x")
     print()
     
+    # === Post-Convergence Validation ===
     if result['success']:
         converged_state = result['state']
         period = result['period']
+        
+        print("=" * 60)
+        print("Post-Convergence Validation")
+        print("=" * 60)
+        
+        # 1. Stability analysis
+        print("\n1. Orbit Stability Analysis:")
+        stability = targeter.analyze_stability(converged_state, period / (4.342 * 86400))
+        if not stability.get('error'):
+            print(f"   Stability status: {'✅ Stable' if stability['stable'] else '⚠️ Unstable'}")
+            print(f"   Max eigenvalue magnitude: {stability['max_magnitude']:.6f}")
+            if stability['stable']:
+                print("   Note: All eigenvalue magnitudes ≤ 1.0")
+            else:
+                print("   Note: Some eigenvalues have magnitude > 1.0")
+        else:
+            print(f"   Error in stability analysis: {stability['error']}")
+        
+        # 2. Re-integrate to verify period consistency
+        print("\n2. Period Consistency Recheck:")
+        print("   Re-integrating one full period to verify closure...")
+        try:
+            x_final, _ = targeter._stm_calc.propagate_with_stm(
+                dynamics=targeter._get_dynamics_func(),
+                initial_state=converged_state,
+                t0=0.0,
+                tf=period / (4.342 * 86400),
+                method=targeter.integrator_type,
+                num_steps=targeter.num_steps
+            )
+            recheck_residual = np.linalg.norm(x_final - converged_state)
+            print(f"   Recheck residual: {recheck_residual:.2e}")
+            if recheck_residual < args.tol * 10:
+                print("   ✅ Period consistency verified")
+            else:
+                print("   ⚠️ Period consistency check failed (residual too large)")
+        except Exception as e:
+            print(f"   Error during recheck: {e}")
+        
+        print("\n" + "=" * 60)
     else:
         converged_state = result['state']
         period = result['period']
-        print("Warning: Using best available state for visualization")
+        print("Warning: Search did not converge, using best available state for visualization")
     
     # Generate plots
-    print("Generating visualizations...")
+    print("\nGenerating visualizations...")
     print("-" * 40)
     
     generate_3d_trajectory(
         targeter, converged_state, period,
-        output_dir / "orbit_3d_trajectory.png"
+        output_dir / f"orbit_3d_trajectory_{resonance_str}.png"
     )
     
     generate_poincare_section(
         targeter, converged_state, period,
-        output_dir / "poincare_section.png"
+        output_dir / f"poincare_section_{resonance_str}.png"
     )
     
     generate_energy_conservation(
         targeter, converged_state, period,
-        output_dir / "energy_conservation.png"
+        output_dir / f"energy_conservation_{resonance_str}.png"
+    )
+    
+    generate_potential_zvs_plot(
+        targeter, converged_state,
+        output_dir / f"potential_zvs_{resonance_str}.png"
     )
     
     # Convergence history
@@ -346,19 +461,19 @@ def main():
     
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.semilogy(iterations, residuals, 'b-o', linewidth=2, markersize=6)
-    ax.set_xlabel('Iteration')
-    ax.set_ylabel('Position Residual Norm (log)')
-    ax.set_title(f'Shooting Method Convergence\n{"Converged" if result["success"] else "Not Converged"}')
+    ax.set_xlabel('Iteration', fontsize=12)
+    ax.set_ylabel('Position Residual Norm (log scale)', fontsize=12)
+    ax.set_title(f'Shooting Method Convergence\n{n}:{m} Resonance - {"Converged" if result["success"] else "Not Converged"}', fontsize=14)
     ax.grid(True, alpha=0.3)
     ax.axhline(y=args.tol, color='r', linestyle='--', 
                label=f'Convergence Threshold ({args.tol})')
-    ax.legend()
+    ax.legend(fontsize=10)
     
     plt.tight_layout()
-    plt.savefig(output_dir / "convergence_history.png", dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / f"convergence_history_{resonance_str}.png", dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"Convergence history saved to: {output_dir / 'convergence_history.png'}")
+    print(f"Convergence history saved to: {output_dir / f'convergence_history_{resonance_str}.png'}")
     print("-" * 40)
     print("Done!")
     print("=" * 60)
