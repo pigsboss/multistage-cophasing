@@ -50,28 +50,24 @@ class LunarSwingTargeter:
                            tol: float = 1e-6,
                            max_iter: int = 50,
                            damping: float = 0.5,
-                           char_period: float = None) -> Dict:
+                           char_period: float = None,
+                           adaptive_damping: bool = True) -> Dict:
         """
         使用单参数打靶法搜索共振周期轨道。
         
-        算法流程：
-        1. 固定初始状态中的 x, y, z, vx（位置完全固定，x方向速度固定）
-        2. 以 vy, vz 为设计变量（2维）
-        3. 积分一个周期，计算末端位置残差 Δr = [Δx, Δy, Δz]
-        4. 利用 STM 计算敏感度矩阵 ∂Δr/∂[vy, vz]（3×2矩阵）
-        5. 使用最小二乘求解修正量 δv = [δvy, δvz]
-        6. 迭代直至位置残差收敛
-
+        增加自适应阻尼和更好的数值稳定性处理。
+        
         Args:
             resonance_ratio: (n, m) 共振比，如 (2, 1) 表示 2:1 共振
             initial_guess: 6 维初始状态猜测 [x, y, z, vx, vy, vz]（无量纲）
             target_period: 目标周期（秒），None 则根据共振比自动计算
             tol: 位置残差收敛容差（无量纲单位）
             max_iter: 最大迭代次数
-            damping: 阻尼因子 (0-1)，防止牛顿迭代发散
+            damping: 初始阻尼因子 (0-1)
             char_period: CRTBP特征周期（秒），用于时间单位转换。
                         默认为4.342*86400（地月系统约4.342天）
-
+            adaptive_damping: 是否使用自适应阻尼，当残差增加时减少阻尼
+    
         Returns:
             字典包含：'state'（周期轨道状态）, 'period', 'convergence_history', 
                      'success', 'final_residual'
@@ -95,61 +91,71 @@ class LunarSwingTargeter:
               f"({target_period_nd:.3f} nondim units)")
         print(f"Initial guess: {initial_guess}")
 
-        # Initial state: fix position components, only optimize vy, vz in velocity
+        # 初始状态
         x0 = initial_guess.copy()
         history = []
         
-        # Design variable indices: vx=3, vy=4, vz=5
-        # For planar orbits (z=vz=0), we can vary both vx and vy to close x and y.
-        # For 3D orbits, vary vy and vz (keep vx fixed).
+        # 确定设计变量和残差索引
         is_planar = (initial_guess[2] == 0.0 and initial_guess[5] == 0.0)
         if is_planar:
             design_indices = [3, 4]   # vx, vy
             residual_indices = [0, 1] # x, y
+            num_design = 2
+            num_residual = 2
         else:
             design_indices = [4, 5]   # vy, vz
             residual_indices = [0, 1, 2]  # x, y, z
+            num_design = 2
+            num_residual = 3
 
+        current_damping = damping
+        prev_residual_norm = float('inf')
+        
         for i in range(max_iter):
-            # Use STM calculator to propagate state and compute STM simultaneously
-            # Use nondimensional time for integration
+            # 传播状态并计算STM
             x_final, stm = self._stm_calc.propagate_with_stm(
                 dynamics=self._get_dynamics_func(),
                 initial_state=x0,
                 t0=0.0,
-                tf=target_period_nd,  # Use nondimensional time
+                tf=target_period_nd,
                 method=self.integrator_type,
                 num_steps=self.num_steps
             )
             
-            # Check numerical validity
+            # 数值有效性检查
             if not np.all(np.isfinite(x_final)) or not np.all(np.isfinite(stm)):
-                print(f"✗ Numerical overflow at iteration {i+1}, stopping search")
-                return {
-                    'state': x0,
-                    'period': target_period,
-                    'convergence_history': history,
-                    'success': False,
-                    'final_residual': np.full(6, np.nan),
-                    'error': 'numerical_overflow'
-                }
+                print(f"✗ Numerical overflow at iteration {i+1}, reducing damping and restarting from previous state")
+                if i > 0:
+                    x0 = history[-1]['state'].copy()
+                    current_damping *= 0.5
+                    print(f"   Reduced damping to {current_damping:.3f}")
+                    continue
+                else:
+                    return {
+                        'state': x0,
+                        'period': target_period,
+                        'convergence_history': history,
+                        'success': False,
+                        'final_residual': np.full(6, np.nan),
+                        'error': 'numerical_overflow'
+                    }
             
-            # Compute residual: difference between final and initial state
+            # 计算位置残差
             residual = x_final - x0
-            # Focus on position residual (single-parameter shooting typically only requires position closure)
             pos_residual = residual[residual_indices]
             res_norm = la.norm(pos_residual)
-
-            # Record convergence history
+            
+            # 记录历史
             history.append({
                 'iteration': i,
                 'residual_norm': res_norm,
                 'state': x0.copy(),
                 'final_state': x_final.copy(),
-                'stm': stm.copy()
+                'stm': stm.copy(),
+                'damping': current_damping
             })
 
-            # Check convergence
+            # 检查收敛
             if res_norm < tol:
                 print(f"✓ Converged at iteration {i+1}, position residual: {res_norm:.2e}")
                 return {
@@ -160,49 +166,60 @@ class LunarSwingTargeter:
                     'final_residual': residual
                 }
 
-            # Differential correction: compute sensitivity matrix
-            # Derivative of residual w.r.t. design variables: d(x_final - x0)/d(vy0, vz0) = dx_final/d(vy0, vz0)
-            # Since x0 is fixed, dx0/d(vy0, vz0) = 0
-            # Therefore sensitivity matrix = STM[position, velocity design variables]
-            # STM structure: [dx/dx0, dx/dv0; dv/dx0, dv/dv0]
-            # We need d[x,y,z]/d[vy, vz] -> stm[0:3, 4:6]
-            sensitivity = stm[np.ix_(residual_indices, design_indices)]  # 3x2 matrix
+            # 自适应阻尼：如果残差增加，减少阻尼
+            if adaptive_damping and res_norm > prev_residual_norm * 1.1 and i > 2:
+                current_damping *= 0.7
+                if current_damping < 0.1:
+                    current_damping = 0.1
+                print(f"  Residual increased, reducing damping to {current_damping:.3f}")
             
-            # Check sensitivity matrix validity
+            prev_residual_norm = res_norm
+            
+            # 计算敏感度矩阵
+            sensitivity = stm[np.ix_(residual_indices, design_indices)]  # 3x2 or 2x2 matrix
+            
+            # 检查敏感度矩阵有效性
             if not np.all(np.isfinite(sensitivity)):
-                print(f"✗ Invalid sensitivity matrix at iteration {i+1}, stopping search")
-                return {
-                    'state': x0,
-                    'period': target_period,
-                    'convergence_history': history,
-                    'success': False,
-                    'final_residual': residual,
-                    'error': 'invalid_sensitivity_matrix'
-                }
+                print(f"  Warning: Invalid sensitivity matrix, using gradient descent")
+                # 使用梯度下降法作为备选
+                grad_descent_step = 0.01
+                delta_v_design = -grad_descent_step * pos_residual[:num_design]
+            else:
+                # 奇异值分解求伪逆，提高数值稳定性
+                U, s, Vt = la.svd(sensitivity, full_matrices=False)
+                
+                # 条件数检查
+                cond_number = s[0] / (s[-1] + 1e-12)
+                if cond_number > 1e12:
+                    print(f"  Warning: High condition number ({cond_number:.1e}), adding regularization")
+                    # 添加Tikhonov正则化
+                    reg = 1e-8 * np.eye(num_design)
+                    delta_v_design = la.solve(sensitivity.T @ sensitivity + reg, 
+                                             sensitivity.T @ (-pos_residual))
+                else:
+                    # 使用SVD伪逆
+                    s_inv = np.zeros_like(s)
+                    s_inv[s > 1e-12] = 1.0 / s[s > 1e-12]
+                    delta_v_design = Vt.T @ np.diag(s_inv) @ U.T @ (-pos_residual)
             
-            # Use least squares to solve for correction: sensitivity * dv = -pos_residual
-            # Overdetermined system, use pseudo-inverse with regularization
-            try:
-                # Add regularization for numerical stability
-                reg = 1e-10  # Regularization parameter
-                num_design = len(design_indices)
-                sensitivity_reg = sensitivity.T @ sensitivity + reg * np.eye(num_design)
-                delta_v_design = la.solve(sensitivity_reg, sensitivity.T @ (-pos_residual))
-            except la.LinAlgError:
-                print(f"Warning: Matrix singular at iteration {i+1}, using gradient descent")
-                # Fall back to gradient descent
-                delta_v_design = -0.01 * pos_residual[:len(design_indices)]
-
-            # Apply damping
-            delta_v_design *= damping
+            # 应用阻尼
+            delta_v_design *= current_damping
             
-            # Update design variables
+            # 限制修正量大小，防止过大跳跃
+            max_correction = 0.5
+            correction_norm = la.norm(delta_v_design)
+            if correction_norm > max_correction:
+                delta_v_design = delta_v_design / correction_norm * max_correction
+                print(f"  Limiting correction from {correction_norm:.3f} to {max_correction:.3f}")
+            
+            # 更新设计变量
             x0[design_indices] += delta_v_design
 
-            if i % 5 == 0 or res_norm > 1e-2:
+            # 定期输出进度
+            if i % 5 == 0 or res_norm < 1e-2 or res_norm > 10:
                 corr_str = ', '.join([f"{dv:.3e}" for dv in delta_v_design])
                 print(f"  Iter {i+1}: pos residual = {res_norm:.3e}, "
-                      f"correction = [{corr_str}]")
+                      f"correction = [{corr_str}], damping = {current_damping:.2f}")
 
         print(f"✗ Failed to converge after {max_iter} iterations, final residual: {history[-1]['residual_norm']:.2e}")
         return {

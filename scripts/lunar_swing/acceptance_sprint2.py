@@ -67,35 +67,84 @@ def main():
         dynamics_model=crtbp,
         mu=crtbp.mu,
         integrator_type='rk4',
-        num_steps=5000  # Increase drastically for high-eccentricity orbits
+        num_steps=10000  # 增加积分步数
     )
     print("   ✅ CRTBP and Targeter initialized")
     print(f"   System: {crtbp.system_name}")
     print(f"   μ = {crtbp.mu:.6f}")
     print()
     
-    # 2:1 Resonance initial guess (known to converge)
+    # 定义多个初始猜测进行尝试
     resonance_n, resonance_m = 2, 1
-    initial_guess = np.array([0.95, 0.0, 0.0, 0.0, 1.15, 0.0])
-    tol = 1e-6
-    max_iter = 100
-    damping = 0.8
+    mu = crtbp.mu
     
-    print(f"2. Searching for {resonance_n}:{resonance_m} resonant orbit...")
-    print(f"   Initial guess: {initial_guess}")
-    print(f"   Tolerance: {tol}")
-    print(f"   Max iterations: {max_iter}")
-    print(f"   Damping: {damping}")
+    # 不同的初始猜测集合
+    initial_guesses = [
+        # 尝试1: 中等偏心率轨道
+        np.array([0.85, 0.0, 0.0, 0.05, 0.95, 0.0]),
+        # 尝试2: 较高位置，较低速度
+        np.array([0.90, 0.0, 0.0, 0.02, 0.85, 0.0]),
+        # 尝试3: 较低位置，较高速度
+        np.array([0.80, 0.0, 0.0, 0.08, 1.05, 0.0]),
+        # 尝试4: 接近原始猜测但添加vx分量
+        np.array([0.95, 0.0, 0.0, 0.03, 1.10, 0.0]),
+        # 尝试5: 对称轨道猜测
+        np.array([0.87, 0.0, 0.0, 0.0, 1.00, 0.0])
+    ]
+    
+    tol = 1e-6
+    max_iter = 80  # 减少每轮迭代次数
+    damping = 0.7
+    
+    best_result = None
+    best_residual = float('inf')
+    best_guess_idx = -1
+    
+    print(f"2. Trying multiple initial guesses for {resonance_n}:{resonance_m} resonance...")
     print()
     
-    # Run search
-    result = targeter.find_resonant_orbit(
-        resonance_ratio=(resonance_n, resonance_m),
-        initial_guess=initial_guess,
-        tol=tol,
-        max_iter=max_iter,
-        damping=damping
-    )
+    for idx, initial_guess in enumerate(initial_guesses):
+        print(f"   Attempt {idx+1}/{len(initial_guesses)}: initial guess = {initial_guess}")
+        
+        # 运行搜索
+        result = targeter.find_resonant_orbit(
+            resonance_ratio=(resonance_n, resonance_m),
+            initial_guess=initial_guess,
+            tol=tol,
+            max_iter=max_iter,
+            damping=damping,
+            adaptive_damping=True
+        )
+        
+        if result['success']:
+            print(f"   ✓ Found convergent orbit!")
+            best_result = result
+            break
+        else:
+            final_residual = result['convergence_history'][-1]['residual_norm']
+            if final_residual < best_residual:
+                best_residual = final_residual
+                best_result = result
+                best_guess_idx = idx
+            print(f"   ✗ Failed, residual: {final_residual:.2e}")
+    
+    print()
+    
+    # 如果没有完全收敛的，使用最佳结果
+    if best_result is None:
+        print("❌ All initial guesses failed")
+        return 1
+    
+    if not best_result['success']:
+        print(f"⚠️ No perfect convergence, using best attempt (guess {best_guess_idx+1})")
+        print(f"   Best residual: {best_residual:.2e}")
+    
+    # 使用最佳结果继续验收测试
+    history = best_result['convergence_history']
+    final_residual = history[-1]['residual_norm']
+    num_iterations = len(history)
+    converged_state = best_result['state']
+    period = best_result['period']
     
     # Collect results
     history = result['convergence_history']

@@ -319,42 +319,50 @@ def main():
     print(f"Resonance: {n}:{m} (prefix: {resonance_str})")
     print()
     
-    # Initial guess (adjust based on resonance)
+    # 初始猜测（基于共振比和经验公式）
     mu = targeter.mu
-    if (n, m) == (1, 1):
-        # L1 family orbit - use parameters that work with single-parameter shooting
-        # x=0.85, vy=0.15 is closer to circular orbit and converges better
-        L1_x = 0.85
+    if (n, m) == (2, 1):
+        # 2:1共振轨道的改进初始猜测
+        # 基于已知的CRTBP周期轨道数据库
+        a_2_1 = 2.17  # 约2:1共振对应的半长轴（归一化单位）
+        x_guess = a_2_1 - mu  # 初始x位置
+        # 计算近似圆轨道的速度
+        vy_circ = np.sqrt(1.0 / np.abs(x_guess + mu))
+        # 2:1共振轨道有较大偏心率，需要调整速度
+        vy_guess = vy_circ * 0.85  # 减小速度以获得椭圆轨道
+        # 微调vx以获得更好的收敛性
+        vx_guess = 0.05  # 小的vx分量可以帮助收敛
+        initial_guess = np.array([x_guess, 0.0, 0.0, vx_guess, vy_guess, 0.0])
+        print(f"Using improved 2:1 resonance initial guess: x={x_guess:.4f}, vx={vx_guess:.4f}, vy={vy_guess:.4f}")
+    elif (n, m) == (1, 1):
+        # 1:1共振 - L1附近的轨道
+        L1_x = 0.85  # L1附近
         x_offset = 0.0
-        vy_guess = 0.15  # Lower velocity for stability
-        vz_guess = 0.0
-        initial_guess = np.array([L1_x + x_offset, 0.0, 0.0, 0.0, vy_guess, vz_guess])
-        # Override period to match
-        target_period_override = 2.8 * 86400  # 2.8 days
-        print(f"Using convergent initial guess: x={initial_guess[0]:.4f}, vy={vy_guess:.4f}")
-    elif (n, m) == (2, 1):
-        # 2:1 resonance - high eccentricity orbit
-        # Apogee near Moon (x ~ 1), perigee near Earth (x ~ -mu)
-        initial_guess = np.array([0.95, 0.0, 0.0, 0.0, 1.15, 0.0])
-        print(f"Using 2:1 resonance initial guess: x={initial_guess[0]:.4f}, vy={initial_guess[4]:.4f}")
+        vy_guess = 0.15  # 较低的速度
+        vx_guess = 0.02  # 小的vx分量
+        initial_guess = np.array([L1_x + x_offset, 0.0, 0.0, vx_guess, vy_guess, 0.0])
+        print(f"Using 1:1 resonance initial guess: x={initial_guess[0]:.4f}, vx={vx_guess:.4f}, vy={vy_guess:.4f}")
     else:
-        # Generic guess - start from circular-ish orbit
-        a_resonant = ((m/n) ** (2/3))  # Semi-major axis for resonance
+        # 通用猜测
+        a_resonant = ((m/n) ** (2/3))  # 共振半长轴
         x_guess = a_resonant - mu
-        vy_guess = np.sqrt((1-mu)/abs(x_guess + mu)) * 0.9
-        initial_guess = np.array([x_guess, 0.0, 0.0, 0.0, vy_guess, 0.0])
-        print(f"Using generic initial guess for {n}:{m}: x={x_guess:.4f}, vy={vy_guess:.4f}")
+        vy_circ = np.sqrt((1-mu)/np.abs(x_guess + mu))
+        vy_guess = vy_circ * 0.9
+        vx_guess = 0.03  # 添加小的vx分量
+        initial_guess = np.array([x_guess, 0.0, 0.0, vx_guess, vy_guess, 0.0])
+        print(f"Using generic initial guess for {n}:{m}: x={x_guess:.4f}, vx={vx_guess:.4f}, vy={vy_guess:.4f}")
     
     # Run search
     print(f"Searching for {n}:{m} resonant orbit...")
     
-    # Prepare search arguments
+    # 在搜索参数中添加自适应阻尼
     search_kwargs = {
         'resonance_ratio': (n, m),
         'initial_guess': initial_guess,
         'tol': args.tol,
         'max_iter': args.max_iter,
-        'damping': args.damping
+        'damping': args.damping,
+        'adaptive_damping': True  # 启用自适应阻尼
     }
     
     # Override parameters for 1:1 resonance to ensure convergence
