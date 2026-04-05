@@ -126,6 +126,14 @@ MCPC 坚持严苛的验证标准。在提交代码前，请确保全流程测试
 pytest tests/
 ```
 
+## 📋 开发规范 (Development Standards)
+
+- **编码规范**: [CODING_STANDARDS.md](docs/development/CODING_STANDARDS.md)
+  - 文件编码: UTF-8
+  - 注释/文档: 优先中文，英文也可
+  - 运行时输出 (stdout/logging/HDF5): **英文**
+  - 可视化标签: **英文**
+
 -----
 
 <div align="center">
