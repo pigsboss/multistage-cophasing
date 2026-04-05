@@ -116,9 +116,9 @@ class TestResonanceConvergence:
         
         print(f"Convergence curve saved to: {output_dir / 'convergence_curve.png'}")
         
-        # 验证至少有一定收敛（即使不完全收敛，残差也应下降）
+        # Verify some convergence (even if not fully converged, residual should decrease)
         if len(residuals) > 1:
-            assert residuals[-1] < residuals[0] * 0.9, "残差未下降，算法可能发散"
+            assert residuals[-1] < residuals[0] * 0.9, "Residual did not decrease, algorithm may be diverging"
     
     def test_2to1_resonance_search(self, targeter):
         """测试：搜索 2:1 共振轨道（简化测试，可能不收敛但验证流程）"""
