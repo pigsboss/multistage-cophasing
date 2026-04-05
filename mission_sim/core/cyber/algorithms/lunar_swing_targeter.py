@@ -179,16 +179,17 @@ class LunarSwingTargeter:
                 }
             
             # Use least squares to solve for correction: sensitivity * dv = -pos_residual
-            # Overdetermined system (3 equations, 2 unknowns), use pseudo-inverse
+            # Overdetermined system, use pseudo-inverse with regularization
             try:
                 # Add regularization for numerical stability
                 reg = 1e-10  # Regularization parameter
-                sensitivity_reg = sensitivity.T @ sensitivity + reg * np.eye(2)
+                num_design = len(design_indices)
+                sensitivity_reg = sensitivity.T @ sensitivity + reg * np.eye(num_design)
                 delta_v_design = la.solve(sensitivity_reg, sensitivity.T @ (-pos_residual))
             except la.LinAlgError:
                 print(f"Warning: Matrix singular at iteration {i+1}, using gradient descent")
                 # Fall back to gradient descent
-                delta_v_design = -0.01 * pos_residual[0:2] if len(pos_residual) >= 2 else -0.01 * pos_residual[0:1]
+                delta_v_design = -0.01 * pos_residual[:len(design_indices)]
 
             # Apply damping
             delta_v_design *= damping
