@@ -49,7 +49,8 @@ class LunarSwingTargeter:
                            target_period: float = None,
                            tol: float = 1e-6,
                            max_iter: int = 50,
-                           damping: float = 0.5) -> Dict:
+                           damping: float = 0.5,
+                           char_period: float = None) -> Dict:
         """
         使用单参数打靶法搜索共振周期轨道。
         
@@ -68,12 +69,18 @@ class LunarSwingTargeter:
             tol: 位置残差收敛容差（无量纲单位）
             max_iter: 最大迭代次数
             damping: 阻尼因子 (0-1)，防止牛顿迭代发散
+            char_period: CRTBP特征周期（秒），用于时间单位转换。
+                        默认为4.342*86400（地月系统约4.342天）
 
         Returns:
             字典包含：'state'（周期轨道状态）, 'period', 'convergence_history', 
                      'success', 'final_residual'
         """
         n, m = resonance_ratio
+        
+        # CRTBP特征周期（地月系统约4.342天）
+        if char_period is None:
+            char_period = 4.342 * 86400  # 秒
 
         # 计算目标周期（地月旋转系）
         if target_period is None:
@@ -81,7 +88,11 @@ class LunarSwingTargeter:
             T_moon = 27.321661 * 24 * 3600  # 秒
             target_period = (m / n) * T_moon
 
-        print(f"搜索 {n}:{m} 共振轨道，目标周期: {target_period/86400:.3f} 天")
+        # 转换为无量纲时间（CRTBP时间单位）
+        target_period_nd = target_period / char_period
+
+        print(f"搜索 {n}:{m} 共振轨道，目标周期: {target_period/86400:.3f} 天 "
+              f"({target_period_nd:.3f} 无量纲单位)")
         print(f"初始猜测: {initial_guess}")
 
         # 初始状态：固定位置部分，仅优化速度中的 vy, vz
@@ -95,14 +106,27 @@ class LunarSwingTargeter:
 
         for i in range(max_iter):
             # 使用STM计算器同时传播状态和计算STM
+            # 使用无量纲时间进行积分
             x_final, stm = self._stm_calc.propagate_with_stm(
                 dynamics=self._get_dynamics_func(),
                 initial_state=x0,
                 t0=0.0,
-                tf=target_period,
+                tf=target_period_nd,  # 使用无量纲时间
                 method=self.integrator_type,
                 num_steps=self.num_steps
             )
+            
+            # 检查数值有效性
+            if not np.all(np.isfinite(x_final)) or not np.all(np.isfinite(stm)):
+                print(f"✗ 第 {i+1} 次迭代出现数值溢出，停止搜索")
+                return {
+                    'state': x0,
+                    'period': target_period,
+                    'convergence_history': history,
+                    'success': False,
+                    'final_residual': np.full(6, np.nan),
+                    'error': 'numerical_overflow'
+                }
             
             # 计算残差：末端状态与初始状态的差异
             residual = x_final - x0
@@ -138,13 +162,29 @@ class LunarSwingTargeter:
             # 我们需要 ∂[x,y,z]/∂[vy, vz] -> stm[0:3, 4:6]
             sensitivity = stm[np.ix_(residual_indices, design_indices)]  # 3×2 矩阵
             
+            # 检查敏感度矩阵有效性
+            if not np.all(np.isfinite(sensitivity)):
+                print(f"✗ 第 {i+1} 次迭代敏感度矩阵无效，停止搜索")
+                return {
+                    'state': x0,
+                    'period': target_period,
+                    'convergence_history': history,
+                    'success': False,
+                    'final_residual': residual,
+                    'error': 'invalid_sensitivity_matrix'
+                }
+            
             # 使用最小二乘求解修正量：sensitivity * δv = -pos_residual
             # 超定方程组 (3方程, 2未知数)，使用伪逆求解
             try:
-                delta_v_design = la.lstsq(sensitivity, -pos_residual, rcond=None)[0]
+                # 添加正则化以提高数值稳定性
+                reg = 1e-10  # 正则化参数
+                sensitivity_reg = sensitivity.T @ sensitivity + reg * np.eye(2)
+                delta_v_design = la.solve(sensitivity_reg, sensitivity.T @ (-pos_residual))
             except la.LinAlgError:
-                print(f"警告: 第 {i+1} 次迭代矩阵奇异，尝试使用伪逆")
-                delta_v_design = la.pinv(sensitivity) @ (-pos_residual)
+                print(f"警告: 第 {i+1} 次迭代矩阵奇异，使用梯度下降")
+                # 退化到梯度下降
+                delta_v_design = -0.01 * pos_residual[0:2] if len(pos_residual) >= 2 else -0.01 * pos_residual[0:1]
 
             # 应用阻尼
             delta_v_design *= damping
@@ -167,7 +207,12 @@ class LunarSwingTargeter:
 
     def _get_dynamics_func(self) -> Callable:
         """获取适用于 STM 计算器的动力学函数 f(t, x)"""
-        if callable(self.dynamics):
+        if hasattr(self.dynamics, '_crtbp_acceleration_nd'):
+            # 使用 UniversalCRTBP 的维度加速度方法
+            def dynamics_wrapper(t, x):
+                return self.dynamics._crtbp_acceleration_nd(x)
+            return dynamics_wrapper
+        elif callable(self.dynamics):
             # 如果已经是函数形式 f(t, x)，直接使用
             def dynamics_wrapper(t, x):
                 return self.dynamics(t, x)
