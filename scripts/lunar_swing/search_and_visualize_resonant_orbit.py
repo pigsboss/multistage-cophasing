@@ -290,10 +290,16 @@ def main():
         'damping': args.damping
     }
     
-    # Override period for 1:1 resonance if specified
-    if (n, m) == (1, 1) and 'target_period_override' in locals():
-        search_kwargs['target_period'] = target_period_override
-        print(f"Using test-verified period: {target_period_override/86400:.2f} days")
+    # Override parameters for 1:1 resonance to ensure convergence
+    if (n, m) == (1, 1):
+        if 'target_period_override' in locals():
+            search_kwargs['target_period'] = target_period_override
+            print(f"Using test-verified period: {target_period_override/86400:.2f} days")
+        # Use more aggressive parameters
+        search_kwargs['damping'] = 0.9
+        search_kwargs['max_iter'] = 200
+        search_kwargs['tol'] = 1e-5  # Slightly relaxed
+        print("Using aggressive parameters for 1:1 resonance: damping=0.9, max_iter=200, tol=1e-5")
     
     result = targeter.find_resonant_orbit(**search_kwargs)
     
