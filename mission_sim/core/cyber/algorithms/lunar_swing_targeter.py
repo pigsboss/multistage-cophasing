@@ -260,35 +260,20 @@ class LunarSwingTargeter:
         x, y, z, vx, vy, vz = state
         mu = self.mu
         
-        # Clamp state components to prevent overflow in intermediate calculations
-        max_pos = 1e4
-        max_vel = 1e4
-        x = np.clip(x, -max_pos, max_pos)
-        y = np.clip(y, -max_pos, max_pos)
-        z = np.clip(z, -max_pos, max_pos)
-        vx = np.clip(vx, -max_vel, max_vel)
-        vy = np.clip(vy, -max_vel, max_vel)
-        vz = np.clip(vz, -max_vel, max_vel)
-
-        # Compute distances with overflow protection
+        # Compute distances
         dx1 = x + mu
         dx2 = x + mu - 1
         
-        # Use safe squaring to prevent overflow
-        r1_sq = min(dx1**2 + y**2 + z**2, 1e10)
-        r2_sq = min(dx2**2 + y**2 + z**2, 1e10)
+        r1_sq = dx1**2 + y**2 + z**2
+        r2_sq = dx2**2 + y**2 + z**2
         
         # Prevent division by zero
-        eps = 1e-10
+        eps = 1e-15
         r1_sq = max(r1_sq, eps)
         r2_sq = max(r2_sq, eps)
         
         r1 = np.sqrt(r1_sq)
         r2 = np.sqrt(r2_sq)
-        
-        # Clamp distances
-        r1 = min(r1, 1e5)
-        r2 = min(r2, 1e5)
         
         r1_cubed = r1**3
         r2_cubed = r2**3
