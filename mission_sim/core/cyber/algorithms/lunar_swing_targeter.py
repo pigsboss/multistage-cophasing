@@ -231,21 +231,33 @@ class LunarSwingTargeter:
             return dynamics_wrapper
 
     def _simple_crtbp_derivative(self, state: np.ndarray) -> np.ndarray:
-        """简化的 CRTBP 动力学导数（无量纲旋转系）"""
+        """Simplified CRTBP dynamics derivative (dimensionless rotating frame)"""
         x, y, z, vx, vy, vz = state
         mu = self.mu
 
         r1_sq = (x + mu)**2 + y**2 + z**2
         r2_sq = (x + mu - 1)**2 + y**2 + z**2
         
-        # 避免除以零
-        eps = 1e-15
-        r1 = np.sqrt(r1_sq + eps)
-        r2 = np.sqrt(r2_sq + eps)
+        # Prevent division by zero and overflow
+        eps = 1e-10
+        
+        # Clamp squared distances to prevent overflow
+        r1_sq = np.clip(r1_sq, eps, 1e10)
+        r2_sq = np.clip(r2_sq, eps, 1e10)
+        
+        r1 = np.sqrt(r1_sq)
+        r2 = np.sqrt(r2_sq)
+        
+        # Clamp distances to prevent overflow in cube
+        r1 = np.clip(r1, eps, 1e5)
+        r2 = np.clip(r2, eps, 1e5)
+        
+        r1_cubed = r1**3
+        r2_cubed = r2**3
 
-        ax = 2*vy + x - (1-mu)*(x+mu)/(r1**3) - mu*(x+mu-1)/(r2**3)
-        ay = -2*vx + y - (1-mu)*y/(r1**3) - mu*y/(r2**3)
-        az = -(1-mu)*z/(r1**3) - mu*z/(r2**3)
+        ax = 2*vy + x - (1-mu)*(x+mu)/r1_cubed - mu*(x+mu-1)/r2_cubed
+        ay = -2*vx + y - (1-mu)*y/r1_cubed - mu*y/r2_cubed
+        az = -(1-mu)*z/r1_cubed - mu*z/r2_cubed
 
         return np.array([vx, vy, vz, ax, ay, az])
 

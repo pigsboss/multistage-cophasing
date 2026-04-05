@@ -71,20 +71,19 @@ class STMCalculator:
     def _numerical_jacobian(dynamics: Callable, t: float, x: np.ndarray, 
                            h: float = 1e-8) -> np.ndarray:
         """
-        使用中心差分计算雅可比矩阵。
+        Compute Jacobian matrix using central differences.
         
         Args:
-            dynamics: 动力学函数 f(t, x)
-            t: 时间
-            x: 状态向量 (6维)
-            h: 差分步长
+            dynamics: Dynamics function f(t, x)
+            t: Time
+            x: State vector (6D)
+            h: Difference step size
             
         Returns:
-            6x6 雅可比矩阵 df/dx
+            6x6 Jacobian matrix df/dx
         """
         n = len(x)
         J = np.zeros((n, n))
-        fx = dynamics(t, x)
         
         for i in range(n):
             x_plus = x.copy()
@@ -92,7 +91,14 @@ class STMCalculator:
             x_plus[i] += h
             x_minus[i] -= h
             
-            J[:, i] = (dynamics(t, x_plus) - dynamics(t, x_minus)) / (2 * h)
+            f_plus = dynamics(t, x_plus)
+            f_minus = dynamics(t, x_minus)
+            
+            # Check for finite values to avoid propagation of inf/nan
+            if not np.all(np.isfinite(f_plus)) or not np.all(np.isfinite(f_minus)):
+                J[:, i] = 0.0  # Set to zero if either evaluation failed
+            else:
+                J[:, i] = (f_plus - f_minus) / (2 * h)
             
         return J
     
