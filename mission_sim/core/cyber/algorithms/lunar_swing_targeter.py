@@ -279,15 +279,30 @@ class LunarSwingTargeter:
                          orbit_state: np.ndarray,
                          period: float) -> Dict:
         """
-        分析轨道稳定性（计算单值矩阵特征值）。
+        Analyze orbit stability by computing eigenvalues of the monodromy matrix.
+
+        Args:
+            orbit_state: Initial state vector (6D)
+            period: Orbital period (seconds)
 
         Returns:
-            包含特征值、稳定性指标等信息的字典
+            Dictionary containing eigenvalues, stability indicators, etc.
         """
         stm = self.compute_stm(orbit_state, period)
+        
+        # Check for invalid STM (NaN/Inf)
+        if not np.all(np.isfinite(stm)):
+            return {
+                'eigenvalues': np.full(6, np.nan),
+                'max_magnitude': np.nan,
+                'stable': False,
+                'monodromy_matrix': stm,
+                'error': 'invalid_stm'
+            }
+        
         eigenvalues = la.eigvals(stm)
 
-        # 稳定性判据：所有特征值模长 <= 1
+        # Stability criterion: all eigenvalue magnitudes <= 1
         max_mag = np.max(np.abs(eigenvalues))
         is_stable = max_mag <= 1.0 + 1e-6
 
