@@ -88,37 +88,37 @@ class LunarSwingTargeter:
             T_moon = 27.321661 * 24 * 3600  # 秒
             target_period = (m / n) * T_moon
 
-        # 转换为无量纲时间（CRTBP时间单位）
+        # Convert to nondimensional time (CRTBP time units)
         target_period_nd = target_period / char_period
 
-        print(f"搜索 {n}:{m} 共振轨道，目标周期: {target_period/86400:.3f} 天 "
-              f"({target_period_nd:.3f} 无量纲单位)")
-        print(f"初始猜测: {initial_guess}")
+        print(f"Searching {n}:{m} resonant orbit, target period: {target_period/86400:.3f} days "
+              f"({target_period_nd:.3f} nondim units)")
+        print(f"Initial guess: {initial_guess}")
 
-        # 初始状态：固定位置部分，仅优化速度中的 vy, vz
+        # Initial state: fix position components, only optimize vy, vz in velocity
         x0 = initial_guess.copy()
         history = []
         
-        # 设计变量索引：vy=4, vz=5
+        # Design variable indices: vy=4, vz=5
         design_indices = [4, 5]
-        # 残差维度：位置残差 x, y, z (索引 0, 1, 2)
+        # Residual dimension: position residual x, y, z (indices 0, 1, 2)
         residual_indices = [0, 1, 2]
 
         for i in range(max_iter):
-            # 使用STM计算器同时传播状态和计算STM
-            # 使用无量纲时间进行积分
+            # Use STM calculator to propagate state and compute STM simultaneously
+            # Use nondimensional time for integration
             x_final, stm = self._stm_calc.propagate_with_stm(
                 dynamics=self._get_dynamics_func(),
                 initial_state=x0,
                 t0=0.0,
-                tf=target_period_nd,  # 使用无量纲时间
+                tf=target_period_nd,  # Use nondimensional time
                 method=self.integrator_type,
                 num_steps=self.num_steps
             )
             
-            # 检查数值有效性
+            # Check numerical validity
             if not np.all(np.isfinite(x_final)) or not np.all(np.isfinite(stm)):
-                print(f"✗ 第 {i+1} 次迭代出现数值溢出，停止搜索")
+                print(f"✗ Numerical overflow at iteration {i+1}, stopping search")
                 return {
                     'state': x0,
                     'period': target_period,
@@ -128,13 +128,13 @@ class LunarSwingTargeter:
                     'error': 'numerical_overflow'
                 }
             
-            # 计算残差：末端状态与初始状态的差异
+            # Compute residual: difference between final and initial state
             residual = x_final - x0
-            # 仅关注位置残差（单参数打靶法通常只要求位置闭合）
+            # Focus on position residual (single-parameter shooting typically only requires position closure)
             pos_residual = residual[residual_indices]
             res_norm = la.norm(pos_residual)
 
-            # 记录收敛历史
+            # Record convergence history
             history.append({
                 'iteration': i,
                 'residual_norm': res_norm,
@@ -143,9 +143,9 @@ class LunarSwingTargeter:
                 'stm': stm.copy()
             })
 
-            # 检查收敛
+            # Check convergence
             if res_norm < tol:
-                print(f"✓ 在第 {i+1} 次迭代收敛，位置残差范数: {res_norm:.2e}")
+                print(f"✓ Converged at iteration {i+1}, position residual: {res_norm:.2e}")
                 return {
                     'state': x0,
                     'period': target_period,
@@ -154,17 +154,17 @@ class LunarSwingTargeter:
                     'final_residual': residual
                 }
 
-            # 微分修正：计算敏感度矩阵
-            # 残差对设计变量的导数：∂(x_final - x0)/∂(vy0, vz0) = ∂x_final/∂(vy0, vz0)
-            # 由于 x0 固定，∂x0/∂(vy0, vz0) = 0
-            # 因此敏感度矩阵 = STM[位置, 速度设计变量]
-            # STM 结构: [∂x/∂x0, ∂x/∂v0; ∂v/∂x0, ∂v/∂v0]
-            # 我们需要 ∂[x,y,z]/∂[vy, vz] -> stm[0:3, 4:6]
-            sensitivity = stm[np.ix_(residual_indices, design_indices)]  # 3×2 矩阵
+            # Differential correction: compute sensitivity matrix
+            # Derivative of residual w.r.t. design variables: d(x_final - x0)/d(vy0, vz0) = dx_final/d(vy0, vz0)
+            # Since x0 is fixed, dx0/d(vy0, vz0) = 0
+            # Therefore sensitivity matrix = STM[position, velocity design variables]
+            # STM structure: [dx/dx0, dx/dv0; dv/dx0, dv/dv0]
+            # We need d[x,y,z]/d[vy, vz] -> stm[0:3, 4:6]
+            sensitivity = stm[np.ix_(residual_indices, design_indices)]  # 3x2 matrix
             
-            # 检查敏感度矩阵有效性
+            # Check sensitivity matrix validity
             if not np.all(np.isfinite(sensitivity)):
-                print(f"✗ 第 {i+1} 次迭代敏感度矩阵无效，停止搜索")
+                print(f"✗ Invalid sensitivity matrix at iteration {i+1}, stopping search")
                 return {
                     'state': x0,
                     'period': target_period,
@@ -174,29 +174,29 @@ class LunarSwingTargeter:
                     'error': 'invalid_sensitivity_matrix'
                 }
             
-            # 使用最小二乘求解修正量：sensitivity * δv = -pos_residual
-            # 超定方程组 (3方程, 2未知数)，使用伪逆求解
+            # Use least squares to solve for correction: sensitivity * dv = -pos_residual
+            # Overdetermined system (3 equations, 2 unknowns), use pseudo-inverse
             try:
-                # 添加正则化以提高数值稳定性
-                reg = 1e-10  # 正则化参数
+                # Add regularization for numerical stability
+                reg = 1e-10  # Regularization parameter
                 sensitivity_reg = sensitivity.T @ sensitivity + reg * np.eye(2)
                 delta_v_design = la.solve(sensitivity_reg, sensitivity.T @ (-pos_residual))
             except la.LinAlgError:
-                print(f"警告: 第 {i+1} 次迭代矩阵奇异，使用梯度下降")
-                # 退化到梯度下降
+                print(f"Warning: Matrix singular at iteration {i+1}, using gradient descent")
+                # Fall back to gradient descent
                 delta_v_design = -0.01 * pos_residual[0:2] if len(pos_residual) >= 2 else -0.01 * pos_residual[0:1]
 
-            # 应用阻尼
+            # Apply damping
             delta_v_design *= damping
             
-            # 修正设计变量
+            # Update design variables
             x0[design_indices] += delta_v_design
 
             if i % 5 == 0 or res_norm > 1e-2:
-                print(f"  迭代 {i+1}: 位置残差 = {res_norm:.3e}, "
-                      f"修正量 = [{delta_v_design[0]:.3e}, {delta_v_design[1]:.3e}]")
+                print(f"  Iter {i+1}: pos residual = {res_norm:.3e}, "
+                      f"correction = [{delta_v_design[0]:.3e}, {delta_v_design[1]:.3e}]")
 
-        print(f"✗ 在 {max_iter} 次迭代后未收敛，最终残差范数: {history[-1]['residual_norm']:.2e}")
+        print(f"✗ Failed to converge after {max_iter} iterations, final residual: {history[-1]['residual_norm']:.2e}")
         return {
             'state': x0,
             'period': target_period,

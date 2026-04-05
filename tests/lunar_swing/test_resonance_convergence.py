@@ -61,17 +61,17 @@ class TestResonanceConvergence:
             final_residual = history[-1]['residual_norm']
             improvement = initial_residual / final_residual if final_residual > 0 else float('inf')
             
-            print(f"\n收敛分析:")
-            print(f"  初始残差: {initial_residual:.3e}")
-            print(f"  最终残差: {final_residual:.3e}")
-            print(f"  改善倍数: {improvement:.1f}x")
-            print(f"  是否收敛: {result['success']}")
+            print(f"\nConvergence Analysis:")
+            print(f"  Initial residual: {initial_residual:.3e}")
+            print(f"  Final residual: {final_residual:.3e}")
+            print(f"  Improvement: {improvement:.1f}x")
+            print(f"  Converged: {result['success']}")
             
-            # 残差应该至少下降10倍，或达到收敛
+            # Residual should decrease at least 10x or converge
             assert result['success'] or improvement > 10, \
-                f"算法未收敛且残差改善不足: {improvement:.1f}x"
+                f"Algorithm did not converge and residual improvement insufficient: {improvement:.1f}x"
         else:
-            pytest.skip("迭代历史为空，跳过测试")
+            pytest.skip("Empty iteration history, skipping test")
     
     def test_convergence_history_plot(self, targeter, tmp_path):
         """测试：生成收敛历史图"""
@@ -99,22 +99,22 @@ class TestResonanceConvergence:
         
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.semilogy(iterations, residuals, 'b-o', linewidth=2, markersize=6)
-        ax.set_xlabel('迭代次数', fontsize=12)
-        ax.set_ylabel('位置残差范数 (log)', fontsize=12)
-        ax.set_title(f'单参数打靶法收敛曲线\n{"收敛" if result["success"] else "未收敛"}', fontsize=14)
+        ax.set_xlabel('Iteration', fontsize=12)
+        ax.set_ylabel('Position Residual Norm (log)', fontsize=12)
+        ax.set_title(f'Single-Parameter Shooting Convergence\n{"Converged" if result["success"] else "Not Converged"}', fontsize=14)
         ax.grid(True, alpha=0.3)
         
-        # 添加收敛线
-        ax.axhline(y=1e-6, color='r', linestyle='--', label='收敛阈值 (1e-6)')
+        # Add convergence threshold line
+        ax.axhline(y=1e-6, color='r', linestyle='--', label='Convergence Threshold (1e-6)')
         ax.legend()
         
-        # 保存
+        # Save
         output_dir = tmp_path / "test_outputs"
         output_dir.mkdir(exist_ok=True)
         plt.savefig(output_dir / "convergence_curve.png", dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"收敛曲线已保存至: {output_dir / 'convergence_curve.png'}")
+        print(f"Convergence curve saved to: {output_dir / 'convergence_curve.png'}")
         
         # 验证至少有一定收敛（即使不完全收敛，残差也应下降）
         if len(residuals) > 1:
@@ -144,10 +144,10 @@ class TestResonanceConvergence:
         assert 'convergence_history' in result
         assert len(result['convergence_history']) > 0
         
-        print(f"\n2:1 共振搜索 {'成功' if result['success'] else '未完成'}")
+        print(f"\n2:1 Resonance search {'succeeded' if result['success'] else 'incomplete'}")
         if not result['success']:
-            print(f"  最终残差: {result['convergence_history'][-1]['residual_norm']:.2e}")
-            print("  （可能需要更好的初始猜测或更多迭代）")
+            print(f"  Final residual: {result['convergence_history'][-1]['residual_norm']:.2e}")
+            print("  (May need better initial guess or more iterations)")
 
 
 if __name__ == "__main__":

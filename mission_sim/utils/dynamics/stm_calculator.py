@@ -161,7 +161,7 @@ class STMCalculator:
                 aug_dynamics, augmented_state, t0, tf, rtol=1e-10, atol=1e-12
             )
         else:
-            raise ValueError(f"不支持的积分方法: {method}")
+            raise ValueError(f"Unsupported integration method: {method}")
         
         # 提取最终状态和 STM
         final_state = final_augmented[:6]

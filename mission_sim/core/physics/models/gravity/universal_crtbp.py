@@ -101,7 +101,7 @@ class UniversalCRTBP(IForceModel):
                 self._accel_numba = njit(self._crtbp_acceleration_nd)
             except ImportError:
                 self._use_numba = False
-                print("警告: Numba 不可用，将使用纯 NumPy 实现")
+                print("Warning: Numba not available, using pure NumPy implementation")
     
     @classmethod
     def earth_moon_system(cls, use_numba: bool = False) -> 'UniversalCRTBP':
