@@ -14,3 +14,7 @@ numba>=0.55.0
 # --- Development & analysis ---
 tqdm>=4.64.0          # Progress bars for analysis scripts
 pyyaml>=6.0           # Configuration file parsing
+
+# --- SPICE high-precision ephemeris support ---
+spiceypy>=5.0.0       # NASA SPICE toolkit Python interface
+requests>=2.28.0      # For downloading SPICE kernels
