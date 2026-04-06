@@ -105,16 +105,25 @@ class SPICEKernelManager:
             'name': 'de440.bsp',
             'category': 'ephemeris',
             'url': 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp',
-            'description': 'DE440行星历表（1900-2050）',
-            'required': True,
+            'description': 'DE440 Planetary Ephemeris (1550-2650) - Well-established standard',
+            'required': True,  # 保持默认
             'size': 135_000_000,  # 约135MB
+            'compressed': False
+        },
+        'de442': {
+            'name': 'de442.bsp',
+            'category': 'ephemeris',
+            'url': 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de442.bsp',
+            'description': 'DE442 Planetary Ephemeris (1549-2650) - Updated Uranus barycenter with occultation data and extended Mars/Juno ranging',
+            'required': False,  # 作为可选升级
+            'size': 150_000_000,  # 约150MB
             'compressed': False
         },
         'de440_small': {
             'name': 'de440s.bsp',
             'category': 'ephemeris',
             'url': 'https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp',
-            'description': 'DE440简化版行星历表（1900-2050）',
+            'description': 'DE440 Simplified Planetary Ephemeris (1550-2650) - For storage-constrained applications',
             'required': False,
             'size': 7_000_000,  # 约7MB
             'compressed': False
@@ -699,59 +708,94 @@ class SPICEKernelManager:
         
         return True, None
     
-    def setup_for_mission(self, mission_type: str = "earth_moon") -> List[str]:
+    def setup_for_mission(self, mission_type: str = "earth_moon", 
+                         ephemeris: str = "de440") -> List[str]:
         """
-        Set up kernel files for specific mission
+        设置特定任务的内核文件
         
         Args:
-            mission_type: Mission type ('earth_moon', 'deep_space', 'mars', 'custom')
-            
+            mission_type: 任务类型 ('earth_moon', 'deep_space', 'mars', 'custom', 'lightweight')
+            ephemeris: 星历版本选择：
+                - 'de440': 【默认】DE440 (1550-2650) - 经过充分验证的稳定版本
+                - 'de442': DE442 (1549-2650) - 最新版本，特别改进天王星轨道和外行星数据
+                - 'de440_small': DE440简化版 (1550-2650) - 存储受限时使用
+        
         Returns:
-            List[str]: List of successfully downloaded kernel files
+            List[str]: 成功下载的内核文件ID列表
+        
+        建议：
+            - 新任务或外行星任务：考虑使用DE442
+            - 地球/月球任务：DE440已足够精确
+            - 天王星相关任务：必须使用DE442
+            - 存储受限环境：使用de440_small
         """
+        # 验证星历版本选择
+        valid_ephemeris = ['de440', 'de442', 'de440_small']
+        if ephemeris not in valid_ephemeris:
+            print(f"[SPICEKernelManager] Warning: Unknown ephemeris version '{ephemeris}', using 'de440'")
+            ephemeris = 'de440'
+        
+        # 根据任务类型和星历版本选择内核
         mission_kernels = {
-            'earth_moon': ['de440', 'pck00010', 'naif0012', 'earth_200101', 'moon_pa'],
-            'deep_space': ['de440', 'pck00010', 'naif0012'],
-            'mars': ['de440', 'pck00010', 'naif0012'],
-            'custom': ['de440', 'pck00010', 'naif0012'],
-            'lightweight': ['de440_small', 'pck00010', 'naif0012']
+            'earth_moon': [ephemeris, 'pck00010', 'naif0012', 'earth_200101', 'moon_pa'],
+            'deep_space': [ephemeris, 'pck00010', 'naif0012'],
+            'mars': [ephemeris, 'pck00010', 'naif0012'],
+            'custom': [ephemeris, 'pck00010', 'naif0012'],
+            'lightweight': ['de440_small', 'pck00010', 'naif0012']  # lightweight总是使用de440_small
         }
         
         if mission_type not in mission_kernels:
-            print(f"[SPICEKernelManager] Warning: Unknown mission type '{mission_type}', using default")
+            print(f"[SPICEKernelManager] Warning: Unknown mission type '{mission_type}', using 'custom'")
             mission_type = 'custom'
         
         kernel_ids = mission_kernels[mission_type]
         
         if self.verbose:
             print(f"[SPICEKernelManager] Setting up kernel files for {mission_type} mission")
+            print(f"[SPICEKernelManager] Using ephemeris: {ephemeris}")
+            
+            # 提供选择建议
+            if ephemeris == 'de442':
+                print("[SPICEKernelManager] Note: DE442 selected - includes updated Uranus barycenter and extended Mars/Juno ranging data")
+            elif ephemeris == 'de440_small':
+                print("[SPICEKernelManager] Note: DE440 small version selected - reduced size for storage-constrained applications")
         
-        # Download required kernel files
+        # 下载所需内核文件
         results = self.download_kernels(kernel_ids)
         
         successful = [kernel_id for kernel_id, success in results.items() if success]
         
         return successful
     
-    def get_kernel_paths(self, mission_type: str = "earth_moon") -> List[str]:
+    def get_kernel_paths(self, mission_type: str = "earth_moon", 
+                        ephemeris: str = "de440") -> List[str]:
         """
-        Get kernel file paths for specific mission
+        获取特定任务的内核文件路径
         
         Args:
-            mission_type: Mission type
+            mission_type: 任务类型 ('earth_moon', 'deep_space', 'mars', 'custom', 'lightweight')
+            ephemeris: 星历版本选择 ('de440', 'de442', 'de440_small')
             
         Returns:
-            List[str]: List of kernel file paths
+            List[str]: 内核文件路径列表
         """
+        # 验证星历版本选择
+        valid_ephemeris = ['de440', 'de442', 'de440_small']
+        if ephemeris not in valid_ephemeris:
+            print(f"[SPICEKernelManager] Warning: Unknown ephemeris version '{ephemeris}', using 'de440'")
+            ephemeris = 'de440'
+        
+        # 根据任务类型和星历版本选择内核
         mission_kernels = {
-            'earth_moon': ['de440', 'pck00010', 'naif0012', 'earth_200101', 'moon_pa'],
-            'deep_space': ['de440', 'pck00010', 'naif0012'],
-            'mars': ['de440', 'pck00010', 'naif0012'],
-            'custom': ['de440', 'pck00010', 'naif0012'],
-            'lightweight': ['de440_small', 'pck00010', 'naif0012']
+            'earth_moon': [ephemeris, 'pck00010', 'naif0012', 'earth_200101', 'moon_pa'],
+            'deep_space': [ephemeris, 'pck00010', 'naif0012'],
+            'mars': [ephemeris, 'pck00010', 'naif0012'],
+            'custom': [ephemeris, 'pck00010', 'naif0012'],
+            'lightweight': ['de440_small', 'pck00010', 'naif0012']  # lightweight总是使用de440_small
         }
         
         if mission_type not in mission_kernels:
+            print(f"[SPICEKernelManager] Warning: Unknown mission type '{mission_type}', using 'custom'")
             mission_type = 'custom'
         
         kernel_ids = mission_kernels[mission_type]
@@ -885,6 +929,8 @@ Examples:
                        help="Download specified kernel files (download all required if not specified)")
     parser.add_argument("--mission", choices=["earth_moon", "deep_space", "mars", "custom", "lightweight"], 
                        help="Set up kernel files for specific mission")
+    parser.add_argument("--ephemeris", choices=["de440", "de442", "de440_small"], default="de440",
+                       help="Ephemeris version (default: de440)")
     parser.add_argument("--check-updates", action="store_true", help="Check for updates")
     parser.add_argument("--force", action="store_true", help="Force re-download")
     parser.add_argument("--clean", type=int, nargs="?", metavar="DAYS", const=30, 
@@ -941,8 +987,18 @@ Examples:
     
     elif args.mission:
         print(f"Setting up kernel files for {args.mission} mission...")
-        successful = manager.setup_for_mission(args.mission)
+        successful = manager.setup_for_mission(args.mission, args.ephemeris)
         print(f"Successfully downloaded {len(successful)} kernel files: {', '.join(successful)}")
+        
+        # 显示使用的星历版本信息
+        if args.ephemeris == 'de442':
+            print("\nNote: Using DE442 ephemeris - includes:")
+            print("  • Updated Uranus barycenter for URA182 satellite ephemeris")
+            print("  • Uranus occultation data")
+            print("  • Additional Mars orbiter ranging data")
+            print("  • Additional Juno ranging data (4 more years)")
+        elif args.ephemeris == 'de440_small':
+            print("\nNote: Using DE440 small version - reduced size for storage-constrained applications")
     
     elif args.check_updates:
         updates = manager.check_updates()
