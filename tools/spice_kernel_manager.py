@@ -10,9 +10,20 @@ Features:
 3. Local caching to avoid repeated downloads
 4. Multi-threaded download support
 5. File integrity verification (MD5 checksum)
+6. HTTP proxy support for restricted networks
+
+Proxy Usage Examples:
+  1. Command line: --proxy http://proxy.example.com:8080
+  2. Environment variable: export HTTP_PROXY=http://proxy.example.com:8080
+  3. With authentication: --proxy http://username:password@proxy.example.com:8080
+
+Common Issues & Solutions:
+  1. Connection timeout: Increase timeout with --timeout 300
+  2. Proxy required: Use --proxy option or set HTTP_PROXY environment variable
+  3. Slow downloads: Use --verbose to monitor progress, consider using a faster proxy
 
 Author: MCPC Development Team
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import os
@@ -77,6 +88,8 @@ class KernelConfig:
     verbose: bool = True           # 详细输出
     use_cache: bool = True         # 使用缓存
     cache_size_mb: int = 1024      # 缓存大小(MB)
+    proxy: Optional[str] = None    # HTTP代理 (例如: http://proxy.example.com:8080)
+    proxy_auth: Optional[Tuple[str, str]] = None  # 代理认证 (用户名, 密码)
 
 
 class SPICEKernelManager:
@@ -172,6 +185,16 @@ class SPICEKernelManager:
         self.config = config or KernelConfig()
         self.kernel_dir = self.config.kernel_dir
         
+        # 检查环境变量中的代理设置
+        if not self.config.proxy:
+            # 检查常见的环境变量
+            for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
+                if env_var in os.environ:
+                    self.config.proxy = os.environ[env_var]
+                    if self.verbose:
+                        print(f"[SPICEKernelManager] Using proxy from environment variable {env_var}: {self.config.proxy}")
+                    break
+    
         # Ensure directory exists
         self.kernel_dir.mkdir(parents=True, exist_ok=True)
         
@@ -364,52 +387,84 @@ class SPICEKernelManager:
             # Create temporary file
             temp_file = dest_path.with_suffix('.downloading')
             
-            # Download with requests
+            # 配置请求参数
             headers = {'User-Agent': 'MCPC-SPICE-Kernel-Manager/1.0'}
-            response = requests.get(url, stream=True, timeout=self.config.timeout, headers=headers)
-            response.raise_for_status()
             
-            # Get file size
-            total_size = int(response.headers.get('content-length', 0))
-            
-            # Show progress bar
-            with open(temp_file, 'wb') as f:
+            # 配置代理
+            proxies = None
+            if self.config.proxy:
+                proxies = {
+                    'http': self.config.proxy,
+                    'https': self.config.proxy
+                }
                 if self.verbose:
-                    with tqdm(
-                        desc=f"Downloading {kernel_name}",
-                        total=total_size,
-                        unit='B',
-                        unit_scale=True,
-                        unit_divisor=1024
-                    ) as pbar:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                                pbar.update(len(chunk))
-                else:
+                    print(f"[SPICEKernelManager] Using proxy: {self.config.proxy}")
+        
+        # 配置认证
+        auth = None
+        if self.config.proxy_auth:
+            auth = self.config.proxy_auth
+        
+        # Download with requests
+        response = requests.get(
+            url, 
+            stream=True, 
+            timeout=self.config.timeout, 
+            headers=headers,
+            proxies=proxies,
+            auth=auth
+        )
+        response.raise_for_status()
+        
+        # Get file size
+        total_size = int(response.headers.get('content-length', 0))
+        
+        # Show progress bar
+        with open(temp_file, 'wb') as f:
+            if self.verbose:
+                with tqdm(
+                    desc=f"Downloading {kernel_name}",
+                    total=total_size,
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024
+                ) as pbar:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-            
-            # Verify file size
-            if total_size > 0:
-                actual_size = temp_file.stat().st_size
-                if actual_size != total_size:
-                    print(f"[SPICEKernelManager] Warning: File size mismatch "
-                          f"({actual_size} != {total_size})")
-                    return False
-            
-            # Move temporary file to destination
-            shutil.move(temp_file, dest_path)
-            
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            print(f"[SPICEKernelManager] Download failed {url}: {e}")
-            # Clean up temporary file
-            if 'temp_file' in locals() and temp_file.exists():
-                temp_file.unlink()
-            return False
+                            pbar.update(len(chunk))
+            else:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        
+        # Verify file size
+        if total_size > 0:
+            actual_size = temp_file.stat().st_size
+            if actual_size != total_size:
+                print(f"[SPICEKernelManager] Warning: File size mismatch "
+                      f"({actual_size} != {total_size})")
+                return False
+        
+        # Move temporary file to destination
+        shutil.move(temp_file, dest_path)
+        
+        return True
+        
+    except requests.exceptions.ProxyError as e:
+        print(f"[SPICEKernelManager] Proxy error: {e}")
+        print("Please check your proxy configuration or try without proxy")
+        return False
+    except requests.exceptions.ConnectTimeout as e:
+        print(f"[SPICEKernelManager] Connection timeout: {e}")
+        print("Consider increasing timeout with --timeout option or using a proxy")
+        return False
+    except requests.exceptions.RequestException as e:
+        print(f"[SPICEKernelManager] Download failed {url}: {e}")
+        # Clean up temporary file
+        if 'temp_file' in locals() and temp_file.exists():
+            temp_file.unlink()
+        return False
     
     def _decompress_file(self, compressed_path: Path, dest_path: Path) -> bool:
         """解压文件"""
@@ -442,6 +497,16 @@ class SPICEKernelManager:
                 print("[SPICEKernelManager] Error: Missing requests library, cannot download")
                 return False
             
+            # 检查网络连接
+            if not self.test_connection():
+                print("[SPICEKernelManager] Error: Cannot connect to NASA servers")
+                print("Possible solutions:")
+                print("  1. Check your internet connection")
+                print("  2. Use --proxy option to set up HTTP proxy")
+                print("  3. Increase timeout with --timeout option (default: 30s)")
+                print("  4. Try again later - NASA servers may be temporarily unavailable")
+                return False
+            
             kernel = self._kernels[kernel_id]
             
             # Check if file already exists
@@ -459,6 +524,8 @@ class SPICEKernelManager:
             if self.verbose:
                 print(f"[SPICEKernelManager] Starting download: {kernel.name} ({kernel_id})")
                 print(f"  URL: {kernel.url}")
+                if self.config.proxy:
+                    print(f"  Proxy: {self.config.proxy}")
             
             success = False
             for attempt in range(self.config.max_retries):
@@ -495,6 +562,12 @@ class SPICEKernelManager:
                 return True
             else:
                 print(f"[SPICEKernelManager] Download failed after {self.config.max_retries} retries")
+                print("\nTroubleshooting tips:")
+                print("  1. Check if URL is accessible in browser: " + kernel.url)
+                print("  2. Try with --proxy option: --proxy http://your-proxy:port")
+                print("  3. Increase timeout: --timeout 300")
+                print("  4. Use --verbose for detailed logs")
+                print("  5. Check firewall/proxy settings")
                 return False
     
     def download_kernels(self, kernel_ids: List[str], force: bool = False) -> Dict[str, bool]:
@@ -744,6 +817,43 @@ class SPICEKernelManager:
                 'kernel_dir': str(self.kernel_dir)
             }
     
+    def test_connection(self, url: str = "https://naif.jpl.nasa.gov/pub/naif/", timeout: int = 10) -> bool:
+        """
+        测试网络连接
+        
+        Args:
+            url: 测试URL
+            timeout: 超时时间
+            
+        Returns:
+            bool: 是否连接成功
+        """
+        try:
+            if self.verbose:
+                print(f"[SPICEKernelManager] Testing connection to {url}...")
+            
+            headers = {'User-Agent': 'MCPC-SPICE-Kernel-Manager/1.0'}
+            proxies = None
+            if self.config.proxy:
+                proxies = {
+                    'http': self.config.proxy,
+                    'https': self.config.proxy
+                }
+            
+            response = requests.get(url, timeout=timeout, headers=headers, proxies=proxies)
+            
+            if response.status_code == 200:
+                if self.verbose:
+                    print("[SPICEKernelManager] Connection test successful")
+                return True
+            else:
+                print(f"[SPICEKernelManager] Connection test failed: HTTP {response.status_code}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            print(f"[SPICEKernelManager] Connection test failed: {e}")
+            return False
+
     def __repr__(self):
         stats = self.get_stats()
         return (f"SPICEKernelManager(kernels={stats['downloaded']}/{stats['total_kernels']}, "
@@ -765,6 +875,7 @@ Examples:
   %(prog)s --mission earth_moon
   %(prog)s --check-updates
   %(prog)s --clean 30
+  %(prog)s --proxy http://proxy.example.com:8080
         """
     )
     
@@ -781,13 +892,18 @@ Examples:
                        help="Kernel directory (default: ~/.mission_sim/spice_kernels)")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--stats", action="store_true", help="Show statistics")
+    parser.add_argument("--proxy", help="HTTP proxy (e.g., http://proxy.example.com:8080)")
+    parser.add_argument("--timeout", type=int, default=30, 
+                       help="Download timeout in seconds (default: 30)")
     
     args = parser.parse_args()
     
     # Create manager
     config = KernelConfig(
         kernel_dir=Path(args.dir).expanduser(),
-        verbose=args.verbose
+        verbose=args.verbose,
+        proxy=args.proxy,
+        timeout=args.timeout
     )
     
     manager = SPICEKernelManager(config)
