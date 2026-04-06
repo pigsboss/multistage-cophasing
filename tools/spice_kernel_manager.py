@@ -400,71 +400,71 @@ class SPICEKernelManager:
                 if self.verbose:
                     print(f"[SPICEKernelManager] Using proxy: {self.config.proxy}")
         
-        # 配置认证
-        auth = None
-        if self.config.proxy_auth:
-            auth = self.config.proxy_auth
-        
-        # Download with requests
-        response = requests.get(
-            url, 
-            stream=True, 
-            timeout=self.config.timeout, 
-            headers=headers,
-            proxies=proxies,
-            auth=auth
-        )
-        response.raise_for_status()
-        
-        # Get file size
-        total_size = int(response.headers.get('content-length', 0))
-        
-        # Show progress bar
-        with open(temp_file, 'wb') as f:
-            if self.verbose:
-                with tqdm(
-                    desc=f"Downloading {kernel_name}",
-                    total=total_size,
-                    unit='B',
-                    unit_scale=True,
-                    unit_divisor=1024
-                ) as pbar:
+            # 配置认证
+            auth = None
+            if self.config.proxy_auth:
+                auth = self.config.proxy_auth
+            
+            # Download with requests
+            response = requests.get(
+                url, 
+                stream=True, 
+                timeout=self.config.timeout, 
+                headers=headers,
+                proxies=proxies,
+                auth=auth
+            )
+            response.raise_for_status()
+            
+            # Get file size
+            total_size = int(response.headers.get('content-length', 0))
+            
+            # Show progress bar
+            with open(temp_file, 'wb') as f:
+                if self.verbose:
+                    with tqdm(
+                        desc=f"Downloading {kernel_name}",
+                        total=total_size,
+                        unit='B',
+                        unit_scale=True,
+                        unit_divisor=1024
+                    ) as pbar:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                else:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-                            pbar.update(len(chunk))
-            else:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        
-        # Verify file size
-        if total_size > 0:
-            actual_size = temp_file.stat().st_size
-            if actual_size != total_size:
-                print(f"[SPICEKernelManager] Warning: File size mismatch "
-                      f"({actual_size} != {total_size})")
-                return False
-        
-        # Move temporary file to destination
-        shutil.move(temp_file, dest_path)
-        
-        return True
-        
-    except requests.exceptions.ProxyError as e:
-        print(f"[SPICEKernelManager] Proxy error: {e}")
-        print("Please check your proxy configuration or try without proxy")
-        return False
-    except requests.exceptions.ConnectTimeout as e:
-        print(f"[SPICEKernelManager] Connection timeout: {e}")
-        print("Consider increasing timeout with --timeout option or using a proxy")
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f"[SPICEKernelManager] Download failed {url}: {e}")
-        # Clean up temporary file
-        if 'temp_file' in locals() and temp_file.exists():
-            temp_file.unlink()
-        return False
+            
+            # Verify file size
+            if total_size > 0:
+                actual_size = temp_file.stat().st_size
+                if actual_size != total_size:
+                    print(f"[SPICEKernelManager] Warning: File size mismatch "
+                          f"({actual_size} != {total_size})")
+                    return False
+            
+            # Move temporary file to destination
+            shutil.move(temp_file, dest_path)
+            
+            return True
+            
+        except requests.exceptions.ProxyError as e:
+            print(f"[SPICEKernelManager] Proxy error: {e}")
+            print("Please check your proxy configuration or try without proxy")
+            return False
+        except requests.exceptions.ConnectTimeout as e:
+            print(f"[SPICEKernelManager] Connection timeout: {e}")
+            print("Consider increasing timeout with --timeout option or using a proxy")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"[SPICEKernelManager] Download failed {url}: {e}")
+            # Clean up temporary file
+            if 'temp_file' in locals() and temp_file.exists():
+                temp_file.unlink()
+            return False
     
     def _decompress_file(self, compressed_path: Path, dest_path: Path) -> bool:
         """解压文件"""
