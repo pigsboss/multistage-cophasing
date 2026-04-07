@@ -220,7 +220,13 @@ class FileTypeDetector:
             '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
             '.yaml', '.yml', '.json', '.xml', '.toml', 
             '.ini', '.cfg', '.conf', '.properties', '.env', '.rc',
-            '.html', '.htm', '.css', '.scss', '.less'
+            '.html', '.htm', '.css', '.scss', '.less',
+            # SPICE内核文件（文本格式，但包含结构化数据）
+            '.tf',      # Text Frame（参考坐标系定义）
+            '.tls',     # Text Leapseconds（闰秒表）
+            '.tpc',     # Text Planetary Constants（行星常数）
+            '.ker',     # 通用内核文件（文本格式）
+            # 注意：.bsp 和 .bc 通常是二进制格式，保留在 BINARY 中
         ],
         # 源代码（程序代码）
         FileType.SOURCE_CODE: [
@@ -552,6 +558,52 @@ class HumanReadableSummarizer:
                 character_count=0
             )
         
+        # ===== 新增：智能截断处理 =====
+        # 对于结构化数据文件（SPICE内核、CSV等），使用智能截断
+        if SmartTextProcessor.is_structured_data_file(filepath):
+            # 检查文件是否过大或明显是结构化数据
+            lines = content.split('\n')
+            is_large = len(lines) > 50
+            
+            if is_large:
+                # 使用智能处理器提取人类可读部分
+                human_content = SmartTextProcessor.extract_human_relevant_content(
+                    content, filepath, max_human_lines=50
+                )
+                
+                human_lines = human_content.split('\n')
+                
+                # 检测编码和语言（基于截断后的内容）
+                encoding = HumanReadableSummarizer._detect_encoding(human_content)
+                language = HumanReadableSummarizer._detect_language(human_content)
+                
+                # 提取标题（基于原始内容，因为标题通常在开头）
+                title = HumanReadableSummarizer._extract_title(filepath, content, lines)
+                
+                # 提取关键主题（基于截断后的内容）
+                text_metrics = HumanReadableSummarizer._analyze_text_metrics(human_content)
+                
+                return HumanReadableSummary(
+                    title=title,
+                    line_count=len(lines),  # 原始总行数
+                    word_count=text_metrics.get('word_count', len(human_content.split())),
+                    character_count=len(human_content),  # 截断后的字符数
+                    language=language,
+                    encoding=encoding,
+                    first_lines=human_lines[:20],
+                    last_lines=[],  # 结构化文件不需要末尾
+                    key_sections=[],  # 简化处理
+                    summary=f"[Intelligently Truncated] File contains structured data. "
+                           f"Original: {len(lines)} lines, preserved {len(human_lines)} lines of metadata. "
+                           f"Type: {filepath.suffix} kernel/data file.",
+                    reading_time_minutes=text_metrics.get('reading_time_minutes', 0),
+                    reading_level='technical',
+                    key_topics=text_metrics.get('key_topics', []),
+                    sentiment_score=None
+                )
+        # ===== 新增结束 =====
+        
+        # 原有的小文件处理逻辑继续执行...
         # 检测编码
         encoding = HumanReadableSummarizer._detect_encoding(content)
         
@@ -1997,6 +2049,194 @@ class SourceCodeAnalyzer:
         except Exception:
             pass
         return keys
+
+# ==================== 智能文本处理器 ====================
+
+class SmartTextProcessor:
+    """
+    智能文本处理器 - 提取人类关心的内容，截断机器数据结构
+    
+    用于处理SPICE内核、大型CSV、XML数据等文件：
+    - 保留文件头（注释、说明、元数据）
+    - 检测数据区开始（结构化列表、表格）
+    - 用统计摘要替代具体数据
+    """
+    
+    # 文件扩展名到处理策略的映射
+    STRUCTURED_EXTENSIONS = {'.tf', '.tls', '.tpc', '.ker', '.bsp', '.bc', '.csv', '.dat', '.xml'}
+    
+    @staticmethod
+    def is_structured_data_file(filepath: Path) -> bool:
+        """判断是否为结构化数据文件（需要智能截断）"""
+        return filepath.suffix.lower() in SmartTextProcessor.STRUCTURED_EXTENSIONS
+    
+    @staticmethod
+    def extract_human_relevant_content(content: str, filepath: Path, max_human_lines: int = 50) -> str:
+        """
+        从面向机器的文件中提取人类可读部分
+        
+        Args:
+            content: 文件完整内容
+            filepath: 文件路径
+            max_human_lines: 最大保留行数
+            
+        Returns:
+            截断后的人类可读内容
+        """
+        lines = content.split('\n')
+        suffix = filepath.suffix.lower()
+        
+        # 特殊处理 SPICE 内核文件
+        if suffix in ['.tf', '.tls', '.tpc', '.ker', '.bsp', '.bc']:
+            return SmartTextProcessor._extract_spice_content(lines, filepath, content)
+        
+        # 处理 CSV 文件
+        if suffix == '.csv':
+            return SmartTextProcessor._extract_csv_content(lines, filepath)
+        
+        # 处理其他结构化数据文件
+        if suffix in ['.xml', '.dat', '.json']:
+            return SmartTextProcessor._extract_generic_structured(lines, suffix)
+        
+        # 默认：返回前 N 行
+        return '\n'.join(lines[:max_human_lines])
+    
+    @staticmethod
+    def _extract_spice_content(lines: List[str], filepath: Path, full_content: str) -> str:
+        """
+        提取 SPICE 文件的人类可读部分
+        
+        SPICE 文件结构：
+        - 开头：版权声明、文件描述、版本历史（人类可读）
+        - \\begintext ... \\begindata 之间：文本注释（人类可读）
+        - \\begindata 之后：机器数据结构（应截断）
+        """
+        header_lines = []
+        in_text_block = False
+        data_started = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # 检测 SPICE 标记
+            if '\\begintext' in stripped:
+                in_text_block = True
+                header_lines.append(line)  # 保留标记行以便观察
+                continue
+            elif '\\begindata' in stripped:
+                data_started = True
+                header_lines.append(line)   # 保留标记行
+                break
+            
+            # 收集注释行（SPICE常用注释格式）
+            if (stripped.startswith('C') or 
+                stripped.startswith('*') or 
+                stripped.startswith('/*') or
+                stripped.startswith('#') or
+                stripped.startswith('CC') or
+                in_text_block):
+                header_lines.append(line)
+            elif not data_started and not stripped.startswith('\\'):
+                # 文件开头的非数据行（描述性文字）
+                # 排除纯数字行（可能是数据）
+                if not re.match(r'^\s*[\d\.\-\+eE\s]+$', stripped):
+                    header_lines.append(line)
+        
+        # 构建结果
+        result_lines = header_lines[:50]  # 限制头部行数
+        
+        # 添加数据结构摘要
+        total_lines = len(lines)
+        if data_started or len(header_lines) < total_lines:
+            result_lines.append(f"\n[DATA SECTION TRUNCATED]")
+            result_lines.append(f"File type: SPICE Kernel ({filepath.suffix})")
+            result_lines.append(f"Total lines: {total_lines}")
+            result_lines.append(f"Preserved: {len(header_lines)} lines of metadata/comments")
+            result_lines.append(f"Truncated: ~{total_lines - len(header_lines)} lines of structured data")
+            
+            # 尝试提取关键元数据
+            # 查找时间范围
+            year_pattern = r'(\d{4})[\s/-](\d{1,2})[\s/-](\d{1,2})'
+            years = re.findall(r'\b(19|20)\d{2}\b', full_content[:10000])
+            if years:
+                unique_years = sorted(set(years))
+                if len(unique_years) > 1:
+                    result_lines.append(f"Time coverage: {unique_years[0]} to {unique_years[-1]}")
+            
+            # 查找版本信息
+            version_match = re.search(r'Version\s*[:=]?\s*([\d\.]+)', full_content[:5000], re.I)
+            if version_match:
+                result_lines.append(f"Version: {version_match.group(1)}")
+            
+            # 查找NAIF ID或对象名称
+            naif_match = re.search(r'NAIF\s+(\w+)', full_content[:2000], re.I)
+            if naif_match:
+                result_lines.append(f"NAIF reference: {naif_match.group(0)}")
+        
+        return '\n'.join(result_lines)
+    
+    @staticmethod
+    def _extract_csv_content(lines: List[str], filepath: Path) -> str:
+        """提取CSV文件的头部和统计信息"""
+        if not lines:
+            return ""
+        
+        # 保留头部（列名）和前几个数据样本
+        header_lines = []
+        
+        # 第一行通常是列名
+        if lines:
+            header_lines.append(lines[0])
+            header_lines.append("")  # 空行分隔
+        
+        # 收集前5行数据作为样本
+        sample_count = 0
+        for line in lines[1:]:
+            if line.strip() and sample_count < 5:
+                header_lines.append(line)
+                sample_count += 1
+            elif sample_count >= 5:
+                break
+        
+        # 添加统计信息
+        total_rows = len([l for l in lines if l.strip()])
+        header_lines.append(f"\n[CSV DATA SUMMARY]")
+        header_lines.append(f"Total rows: ~{total_rows}")
+        header_lines.append(f"Columns: {lines[0].count(',') + 1 if lines else 'unknown'}")
+        header_lines.append(f"Displayed: 5 sample rows")
+        header_lines.append(f"Note: Full data truncated to save context window")
+        
+        return '\n'.join(header_lines)
+    
+    @staticmethod
+    def _extract_generic_structured(lines: List[str], suffix: str) -> str:
+        """通用结构化数据提取"""
+        header_lines = []
+        data_line_count = 0
+        
+        # 启发式规则：检测数据行（纯数字、重复模式等）
+        for i, line in enumerate(lines[:100]):  # 只检查前100行
+            stripped = line.strip()
+            
+            if not stripped:
+                header_lines.append(line)
+                continue
+            
+            # 检测是否为纯数据行（无字母或极少字母）
+            alpha_ratio = sum(1 for c in stripped if c.isalpha()) / len(stripped) if stripped else 0
+            
+            if alpha_ratio < 0.1 and i > 5:  # 前5行之后的高比例非文本行视为数据
+                data_line_count += 1
+                if data_line_count > 3:  # 连续3行数据则截断
+                    remaining = len(lines) - i
+                    header_lines.append(f"\n... [{remaining} lines of {suffix} data truncated] ...")
+                    break
+            else:
+                data_line_count = 0
+                header_lines.append(line)
+        
+        return '\n'.join(header_lines)
+
 
 # ==================== 格式转换器 ====================
 
