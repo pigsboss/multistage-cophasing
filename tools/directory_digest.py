@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import re
 from enum import Enum
+from collections import Counter
 
 # 依赖检测
 try:
@@ -94,6 +95,12 @@ class HumanReadableSummary:
     key_sections: List[Tuple[str, str]] = field(default_factory=list)
     summary: Optional[str] = None
     
+    # 新增字段
+    reading_time_minutes: float = 0.0  # 阅读时间（分钟）
+    reading_level: Optional[str] = None  # 阅读难度级别
+    key_topics: List[str] = field(default_factory=list)  # 关键主题
+    sentiment_score: Optional[float] = None  # 情感分析分数
+    
     def to_dict(self) -> Dict:
         return {
             "title": self.title,
@@ -105,7 +112,11 @@ class HumanReadableSummary:
             "first_lines": self.first_lines,
             "last_lines": self.last_lines,
             "key_sections": [{"title": t, "content": c[:200]} for t, c in self.key_sections],
-            "summary": self.summary
+            "summary": self.summary,
+            "reading_time_minutes": self.reading_time_minutes,
+            "reading_level": self.reading_level,
+            "key_topics": self.key_topics[:10],
+            "sentiment_score": self.sentiment_score
         }
 
 
@@ -308,11 +319,204 @@ class FileTypeDetector:
         return FileTypeDetector.detect_by_content(filepath)
 
 
+# ==================== 复杂度分析器 ====================
+
+class ComplexityAnalyzer:
+    """代码复杂度分析器"""
+    
+    @staticmethod
+    def analyze_python(content: str) -> Dict[str, Any]:
+        """分析Python代码复杂度"""
+        try:
+            import ast
+            
+            tree = ast.parse(content)
+            
+            # 统计各种复杂度指标
+            metrics = {
+                "cyclomatic_complexity": 0,
+                "function_count": 0,
+                "class_count": 0,
+                "average_function_length": 0,
+                "max_nesting_depth": 0,
+                "import_count": 0
+            }
+            
+            # 递归分析AST
+            def analyze_node(node, depth: int = 0):
+                nonlocal metrics
+                
+                # 更新最大嵌套深度
+                metrics["max_nesting_depth"] = max(metrics["max_nesting_depth"], depth)
+                
+                # 分析节点类型
+                if isinstance(node, ast.If):
+                    metrics["cyclomatic_complexity"] += 1
+                    for child in ast.iter_child_nodes(node):
+                        analyze_node(child, depth + 1)
+                elif isinstance(node, ast.While):
+                    metrics["cyclomatic_complexity"] += 1
+                    for child in ast.iter_child_nodes(node):
+                        analyze_node(child, depth + 1)
+                elif isinstance(node, ast.For):
+                    metrics["cyclomatic_complexity"] += 1
+                    for child in ast.iter_child_nodes(node):
+                        analyze_node(child, depth + 1)
+                elif isinstance(node, ast.Try):
+                    metrics["cyclomatic_complexity"] += 1
+                    for child in ast.iter_child_nodes(node):
+                        analyze_node(child, depth + 1)
+                elif isinstance(node, ast.FunctionDef):
+                    metrics["function_count"] += 1
+                    # 分析函数内的语句数量
+                    stmt_count = len([n for n in ast.walk(node) if isinstance(n, ast.stmt)])
+                    metrics["average_function_length"] += stmt_count
+                elif isinstance(node, ast.ClassDef):
+                    metrics["class_count"] += 1
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    metrics["import_count"] += 1
+                else:
+                    for child in ast.iter_child_nodes(node):
+                        analyze_node(child, depth)
+            
+            # 开始分析
+            analyze_node(tree)
+            
+            # 计算平均函数长度
+            if metrics["function_count"] > 0:
+                metrics["average_function_length"] = metrics["average_function_length"] / metrics["function_count"]
+            
+            # 评估复杂度等级
+            complexity_score = metrics["cyclomatic_complexity"]
+            if complexity_score < 10:
+                metrics["complexity_level"] = "简单"
+            elif complexity_score < 20:
+                metrics["complexity_level"] = "中等"
+            elif complexity_score < 30:
+                metrics["complexity_level"] = "复杂"
+            else:
+                metrics["complexity_level"] = "非常复杂"
+            
+            return metrics
+            
+        except SyntaxError:
+            return {
+                "cyclomatic_complexity": 0,
+                "function_count": 0,
+                "class_count": 0,
+                "average_function_length": 0,
+                "max_nesting_depth": 0,
+                "import_count": 0,
+                "complexity_level": "无法分析"
+            }
+    
+    @staticmethod
+    def analyze_generic(content: str) -> Dict[str, Any]:
+        """通用代码复杂度分析"""
+        lines = content.split('\n')
+        
+        # 简单的复杂度估算
+        metrics = {
+            "line_count": len(lines),
+            "estimated_complexity": 0
+        }
+        
+        # 基于关键词估算复杂度
+        complexity_patterns = [
+            (r'\bif\b', 1),
+            (r'\belse\b', 1),
+            (r'\bfor\b', 2),
+            (r'\bwhile\b', 2),
+            (r'\btry\b', 1),
+            (r'\bcatch\b', 1),
+            (r'\bswitch\b', 2),
+            (r'\bcase\b', 1)
+        ]
+        
+        for line in lines:
+            line_lower = line.lower()
+            for pattern, weight in complexity_patterns:
+                if re.search(pattern, line_lower):
+                    metrics["estimated_complexity"] += weight
+        
+        # 评估复杂度等级
+        if metrics["estimated_complexity"] < 10:
+            metrics["complexity_level"] = "简单"
+        elif metrics["estimated_complexity"] < 30:
+            metrics["complexity_level"] = "中等"
+        elif metrics["estimated_complexity"] < 50:
+            metrics["complexity_level"] = "复杂"
+        else:
+            metrics["complexity_level"] = "非常复杂"
+        
+        return metrics
+
 # ==================== 摘要生成器 ====================
 
 class HumanReadableSummarizer:
     """人类可读文本摘要生成器"""
     
+    @staticmethod
+    def _analyze_text_metrics(content: str) -> Dict[str, Any]:
+        """分析文本指标"""
+        # 计算阅读时间（平均阅读速度：200字/分钟）
+        words = re.findall(r'\b[\w\u4e00-\u9fff]+\b', content)
+        word_count = len(words)
+        reading_time_minutes = word_count / 200.0
+        
+        # 计算阅读难度（Flesch Reading Ease简化版）
+        sentences = re.split(r'[.!?。！？]+', content)
+        sentences = [s for s in sentences if s.strip()]
+        
+        avg_sentence_length = word_count / len(sentences) if sentences else 0
+        
+        # 简单的阅读难度评估
+        if avg_sentence_length < 15:
+            reading_level = "容易"
+        elif avg_sentence_length < 25:
+            reading_level = "中等"
+        else:
+            reading_level = "困难"
+        
+        # 提取关键主题（基于高频词）
+        from collections import Counter
+        # 过滤掉常见停用词
+        stop_words = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个',
+                     'to', 'the', 'and', 'of', 'in', 'a', 'is', 'that', 'it', 'for', 'on', 'with', 'as'}
+        
+        # 中英文分别处理
+        chinese_words = [w for w in words if re.match(r'[\u4e00-\u9fff]', w)]
+        english_words = [w.lower() for w in words if re.match(r'[a-zA-Z]', w)]
+        
+        # 计算高频词
+        chinese_freq = Counter([w for w in chinese_words if w not in stop_words]).most_common(5)
+        english_freq = Counter([w for w in english_words if w not in stop_words]).most_common(5)
+        
+        key_topics = [word for word, _ in chinese_freq + english_freq]
+        
+        # 简单的情感分析（基于积极/消极词词典）
+        positive_words = {'好', '优秀', '成功', '喜欢', '爱', '高兴', '快乐', '开心', '满意'}
+        negative_words = {'坏', '失败', '讨厌', '恨', '悲伤', '难过', '生气', '失望', '问题'}
+        
+        positive_count = sum(1 for w in words if w in positive_words)
+        negative_count = sum(1 for w in words if w in negative_words)
+        
+        total_sentiment = positive_count + negative_count
+        if total_sentiment > 0:
+            sentiment_score = (positive_count - negative_count) / total_sentiment
+        else:
+            sentiment_score = 0.0
+        
+        return {
+            "reading_time_minutes": reading_time_minutes,
+            "reading_level": reading_level,
+            "key_topics": key_topics,
+            "sentiment_score": sentiment_score,
+            "word_count": word_count,
+            "sentence_count": len(sentences),
+            "avg_sentence_length": avg_sentence_length
+        }
+
     @staticmethod
     def summarize(filepath: Path, content: str, max_lines: int = 10) -> HumanReadableSummary:
         """
@@ -358,6 +562,9 @@ class HumanReadableSummarizer:
             filepath, content, lines, max_lines
         )
         
+        # 分析文本指标
+        text_metrics = HumanReadableSummarizer._analyze_text_metrics(content)
+        
         # 提取首尾行
         first_lines = lines[:min(5, len(lines))]
         last_lines = lines[-min(3, len(lines)):] if len(lines) > 3 else []
@@ -372,7 +579,11 @@ class HumanReadableSummarizer:
             first_lines=first_lines,
             last_lines=last_lines,
             key_sections=key_sections[:10],  # 最多10个关键章节
-            summary=summary
+            summary=summary,
+            reading_time_minutes=text_metrics["reading_time_minutes"],
+            reading_level=text_metrics["reading_level"],
+            key_topics=text_metrics["key_topics"],
+            sentiment_score=text_metrics["sentiment_score"]
         )
     
     @staticmethod
@@ -899,6 +1110,55 @@ class SourceCodeAnalyzer:
         # 计算代码行数
         code_lines = total_lines - blank_lines - comment_lines
         
+        # 代码复杂度分析
+        complexity_metrics = ComplexityAnalyzer.analyze_python(content)
+        
+        # 代码风格检查（简化版）
+        style_issues = []
+        
+        # 检查行长度
+        for i, line in enumerate(lines, 1):
+            if len(line) > 100:  # PEP 8建议79字符，这里放宽到100
+                style_issues.append({
+                    "type": "行过长",
+                    "line": i,
+                    "message": f"第{i}行超过100个字符",
+                    "severity": "警告"
+                })
+        
+        # 检查导入顺序
+        import_lines = []
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('import') or stripped.startswith('from'):
+                import_lines.append((i, stripped))
+        
+        if len(import_lines) > 1:
+            # 检查是否有标准库和非标准库混排
+            std_imports = []
+            third_party_imports = []
+            
+            for line_num, import_stmt in import_lines:
+                if any(pattern in import_stmt for pattern in [
+                    'os', 'sys', 'math', 're', 'json', 'datetime'
+                ]):
+                    std_imports.append((line_num, import_stmt))
+                else:
+                    third_party_imports.append((line_num, import_stmt))
+            
+            if std_imports and third_party_imports:
+                last_std = std_imports[-1][0]
+                first_third = third_party_imports[0][0]
+                
+                if first_third < last_std:
+                    style_issues.append({
+                        "type": "导入顺序",
+                        "line": first_third,
+                        "message": "第三方导入应该在标准库导入之后",
+                        "severity": "建议"
+                    })
+        
+        # 更新返回的SourceCodeAnalysis对象，添加新增字段
         return SourceCodeAnalysis(
             language="python",
             total_lines=total_lines,
@@ -910,7 +1170,11 @@ class SourceCodeAnalyzer:
             classes=classes,
             global_vars=global_vars,
             constants=constants,
-            dependencies=SourceCodeAnalyzer._extract_python_dependencies(imports)
+            dependencies=SourceCodeAnalyzer._extract_python_dependencies(imports),
+            complexity_metrics=complexity_metrics,
+            style_issues=style_issues,
+            security_issues=[],  # 可以在此添加安全检查
+            test_coverage=None   # 可以在此添加测试覆盖率分析
         )
     
     @staticmethod
@@ -2149,6 +2413,8 @@ class DirectoryDigest:
             '*.pyc', '*.pyo', '*.so', '*.dll', '__pycache__', 
             '.git', '.svn', '.hg', '.DS_Store', '*.swp', '*.swo'
         ])
+        self.use_parallel = self.config.get('use_parallel', False)  # 新增：是否使用并行处理
+        self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)  # 新增：最大工作线程数
         
         self.file_type_detector = FileTypeDetector()
         self.human_summarizer = HumanReadableSummarizer()
@@ -2236,11 +2502,51 @@ class DirectoryDigest:
         
         return False
     
+    def _process_directory_parallel(self, structure: DirectoryStructure, mode: str):
+        """并行处理目录中的所有文件"""
+        import concurrent.futures
+        
+        # 收集所有文件
+        all_files = []
+        def collect_files(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect_files(subdir)
+        
+        collect_files(structure)
+        
+        # 使用线程池并行处理文件
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有处理任务
+            future_to_file = {
+                executor.submit(self._process_file_safe, file_digest, mode): file_digest
+                for file_digest in all_files
+            }
+            
+            # 等待所有任务完成
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_digest = future_to_file[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"警告: 并行处理文件 {file_digest.metadata.path} 时出错: {e}", file=sys.stderr)
+    
+    def _process_file_safe(self, file_digest: FileDigest, mode: str):
+        """安全的文件处理（用于并行处理）"""
+        try:
+            self._process_file(file_digest, mode)
+        except Exception as e:
+            print(f"警告: 处理文件 {file_digest.metadata.path} 时出错: {e}", file=sys.stderr)
+    
     def _process_directory(self, structure: DirectoryStructure, mode: str):
         """处理目录中的所有文件"""
-        # 处理当前目录的文件
-        for file_digest in structure.files:
-            self._process_file(file_digest, mode)
+        if self.use_parallel and len(structure.files) > 10:
+            # 使用并行处理
+            self._process_directory_parallel(structure, mode)
+        else:
+            # 串行处理
+            for file_digest in structure.files:
+                self._process_file(file_digest, mode)
         
         # 递归处理子目录
         for subdir in structure.subdirectories.values():
@@ -2453,7 +2759,7 @@ def main():
         epilog="""
 示例:
   %(prog)s /path/to/directory --mode full --output json
-  %(prog)s . --mode framework --output yaml --ignore ".git,*.pyc"
+  %(prog)s . --mode framework --output md --parallel --workers 8
         """
     )
     
@@ -2469,12 +2775,24 @@ def main():
     parser.add_argument("--save", help="输出文件路径，默认为目录名_digest.json")
     parser.add_argument("--verbose", action="store_true", help="显示详细输出")
     
+    # 新增参数
+    parser.add_argument("--parallel", action="store_true", help="启用并行处理")
+    parser.add_argument("--workers", type=int, default=0,
+                       help="并行工作线程数（默认: CPU核心数）")
+    parser.add_argument("--analyze-complexity", action="store_true", 
+                       help="分析代码复杂度")
+    parser.add_argument("--generate-charts", action="store_true",
+                       help="生成统计图表（仅HTML输出）")
+    
     args = parser.parse_args()
     
     # 配置
     config = {
         'max_file_size': args.max_size * 1024 * 1024,
-        'ignore_patterns': [p.strip() for p in args.ignore.split(',') if p.strip()]
+        'ignore_patterns': [p.strip() for p in args.ignore.split(',') if p.strip()],
+        'use_parallel': args.parallel,
+        'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4,
+        'analyze_complexity': args.analyze_complexity
     }
     
     # 创建摘要器
@@ -2484,6 +2802,8 @@ def main():
     if args.verbose:
         print(f"开始分析目录: {args.directory}")
         print(f"模式: {args.mode}, 格式: {args.output}")
+        if args.parallel:
+            print(f"并行处理: 启用, 工作线程: {config['max_workers']}")
     
     output = digest.create_digest(args.mode)
     
@@ -2493,13 +2813,16 @@ def main():
     
     # 显示统计信息
     stats = output['metadata']['statistics']
-    print(f"\n摘要统计:")
-    print(f"  总文件数: {stats['total_files']}")
-    print(f"  人类可读文本: {stats['human_readable']}")
-    print(f"  源代码文件: {stats['source_code']}")
-    print(f"  二进制文件: {stats['binary']}")
-    print(f"  总大小: {stats['total_size'] / (1024*1024):.2f} MB")
-    print(f"  处理时间: {stats['processing_time']:.2f} 秒")
+    print(f"\n📊 摘要统计:")
+    print(f"  📄 总文件数: {stats['total_files']}")
+    print(f"  📝 源代码文件: {stats['source_code']}")
+    print(f"  📖 文本文件: {stats['human_readable']}")
+    print(f"  📦 二进制文件: {stats['binary']}")
+    print(f"  💾 总大小: {stats['total_size'] / (1024*1024):.2f} MB")
+    print(f"  ⏱️ 处理时间: {stats['processing_time']:.2f} 秒")
+    
+    if args.verbose:
+        print(f"\n✅ 分析完成！报告已保存到: {saved_path}")
     
     return saved_path
 
