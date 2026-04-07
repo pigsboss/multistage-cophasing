@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-directory_digest.py - 目录知识摘要器
+directory_digest.py - 目录知识摘要器（LLM上下文优化版）
 
-将文件系统递归"消化"为LLM可理解的上下文摘要。
+将文件系统递归"消化"为LLM可理解的上下文摘要，针对128K-256K token窗口优化。
 
-三种文件分类策略：
-1. 人类可读文本文件 (HumanReadable) - .txt, .md, .rst, 配置文件等
-2. 源代码文件 (SourceCode) - .py, .java, .cpp 等编程语言文件  
-3. 二进制文件 (Binary) - 图像、压缩包、可执行文件等
+核心特性：
+1. 规则驱动的智能分类 - 支持YAML规则文件，可显式定义文件处理策略
+2. LLM上下文感知 - 动态分配token，优先重要文件，自动降级策略
+3. 多策略处理 - 全量嵌入、摘要、代码骨架、结构提取等
+4. 命令行友好 - 无GUI依赖，支持管道处理
 
-两种输出模式：
-- 全量模式 (full): 包含人类可读文本文件的完整内容
-- 框架模式 (framework): 所有文件都只输出摘要/元信息
+规则文件（--rules）支持：
+- 显式定义文件分类和策略
+- 优先级控制
+- 大小限制
+- 强制二进制标记
+
+策略枚举：
+- full_content: 全量嵌入（仅小文件）
+- summary_only: 文本摘要
+- code_skeleton: 代码骨架提取
+- structure_extract: 结构提取（配置文件）
+- header_with_stats: 头部+统计（数据文件）
+- metadata_only: 仅元数据（二进制文件）
+
+使用示例：
+  directory_digest ./project --rules .digest_rules.yaml
+  directory_digest . --context-size 64k --mode full
+  directory_digest . --mode sort | less
 """
 
 import os
@@ -21,6 +37,7 @@ import json
 import hashlib
 import mimetypes
 import ast  # Python抽象语法树解析
+import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 from dataclasses import dataclass, field
@@ -43,6 +60,78 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
     print("警告: PyYAML 库未安装，YAML文件解析功能受限", file=sys.stderr)
+
+
+# ==================== 策略枚举和配置 ====================
+
+class ProcessingStrategy(Enum):
+    """文件处理策略枚举"""
+    # 全量策略
+    FULL_CONTENT = "full_content"              # 全量嵌入（仅限小文件）
+    
+    # 摘要策略
+    SUMMARY_ONLY = "summary_only"              # 生成文本摘要
+    SUMMARY_WITH_TOC = "summary_with_toc"      # 摘要+目录结构
+    
+    # 代码相关
+    CODE_SKELETON = "code_skeleton"           # 代码骨架（函数/类/导入）
+    CODE_KEY_FUNCTIONS = "code_key_functions"  # 关键函数实现
+    
+    # 配置相关
+    STRUCTURE_EXTRACT = "structure_extract"    # 提取结构（键/节）
+    TOP_LEVEL_KEYS = "top_level_keys"         # 仅顶层键
+    
+    # 数据相关
+    HEADER_WITH_STATS = "header_with_stats"    # 头部+统计信息
+    SCHEMA_SUMMARY = "schema_summary"         # 数据模式摘要
+    
+    # 元数据
+    METADATA_ONLY = "metadata_only"           # 仅元数据
+
+
+@dataclass
+class StrategyConfig:
+    """策略配置"""
+    token_estimate: float                    # 每字符token估算
+    max_size: Optional[int] = None           # 最大适用文件大小
+    max_lines: Optional[int] = None          # 最大行数限制
+    include_metadata: bool = True            # 是否包含元数据
+    
+    # 特定策略选项
+    include_functions: bool = False
+    include_classes: bool = False
+    max_keys: Optional[int] = None
+    include_stats: bool = False
+
+
+# 策略配置映射
+STRATEGY_CONFIGS: Dict[ProcessingStrategy, StrategyConfig] = {
+    ProcessingStrategy.FULL_CONTENT: StrategyConfig(
+        token_estimate=0.25,
+        max_size=100 * 1024,  # 100KB
+    ),
+    ProcessingStrategy.SUMMARY_ONLY: StrategyConfig(
+        token_estimate=0.05,
+        max_lines=50,
+    ),
+    ProcessingStrategy.CODE_SKELETON: StrategyConfig(
+        token_estimate=0.02,
+        include_functions=True,
+        include_classes=True,
+    ),
+    ProcessingStrategy.STRUCTURE_EXTRACT: StrategyConfig(
+        token_estimate=0.03,
+        max_keys=20,
+    ),
+    ProcessingStrategy.HEADER_WITH_STATS: StrategyConfig(
+        token_estimate=0.01,
+        max_lines=10,
+        include_stats=True,
+    ),
+    ProcessingStrategy.METADATA_ONLY: StrategyConfig(
+        token_estimate=0.001,
+    ),
+}
 
 
 # ==================== 数据类型定义 ====================
@@ -343,6 +432,273 @@ class FileTypeDetector:
             return type_by_ext
         
         return FileTypeDetector.detect_by_content(filepath)
+
+
+# ==================== 规则引擎 ====================
+
+@dataclass
+class FileRule:
+    """文件规则定义"""
+    name: str
+    patterns: List[str]  # glob模式列表
+    strategy: ProcessingStrategy
+    priority: int = 50
+    force_binary: bool = False
+    max_size: Optional[int] = None
+    comment: Optional[str] = None
+    
+    def matches(self, filepath: Path) -> bool:
+        """检查文件是否匹配此规则"""
+        # 检查大小限制
+        if self.max_size:
+            try:
+                if filepath.stat().st_size > self.max_size:
+                    return False
+            except (OSError, IOError):
+                return False
+                
+        # 检查模式匹配
+        for pattern in self.patterns:
+            if fnmatch.fnmatch(filepath.name, pattern):
+                return True
+            # 也检查完整路径匹配
+            if fnmatch.fnmatch(str(filepath), pattern):
+                return True
+        return False
+
+
+class RuleEngine:
+    """规则引擎"""
+    
+    def __init__(self, rules_file: Optional[Path] = None):
+        self.rules: List[FileRule] = []
+        self.default_strategy = ProcessingStrategy.METADATA_ONLY
+        
+        if rules_file and rules_file.exists():
+            self.load_rules(rules_file)
+        else:
+            self.load_default_rules()
+        
+        # 按优先级降序排序
+        self.rules.sort(key=lambda r: r.priority, reverse=True)
+    
+    def load_default_rules(self):
+        """加载内置默认规则"""
+        default_rules = [
+            # 明确二进制（高优先级）
+            FileRule("binary_archives", ["*.gz", "*.bz2", "*.xz", "*.7z", "*.rar", "*.zip", "*.tar"], 
+                    ProcessingStrategy.METADATA_ONLY, priority=100, force_binary=True),
+            FileRule("media_files", ["*.avi", "*.mp4", "*.mov", "*.wav", "*.mp3", "*.jpg", "*.png"],
+                    ProcessingStrategy.METADATA_ONLY, priority=100, force_binary=True),
+            FileRule("scientific_binary", ["*.fits", "*.h5", "*.hdf5"],
+                    ProcessingStrategy.METADATA_ONLY, priority=100, force_binary=True),
+            FileRule("documents_binary", ["*.pdf", "*.doc", "*.docx", "*.ppt", "*.pptx"],
+                    ProcessingStrategy.METADATA_ONLY, priority=100, force_binary=True,
+                    comment="PDF等文档虽人类可读，但二进制格式不适合嵌入"),
+            
+            # 重要文档（高优先级）
+            FileRule("readme_files", ["README*", "readme*", "README.*"],
+                    ProcessingStrategy.FULL_CONTENT, priority=95, max_size=256*1024),
+            FileRule("license_files", ["LICENSE*", "COPYING*", "NOTICE*"],
+                    ProcessingStrategy.FULL_CONTENT, priority=90, max_size=128*1024),
+            
+            # 主要源代码文件
+            FileRule("main_source_files", ["main.*", "app.*", "index.*", "__main__.*"],
+                    ProcessingStrategy.CODE_SKELETON, priority=85),
+            
+            # 源代码
+            FileRule("source_code", ["*.py", "*.c", "*.cpp", "*.h", "*.java", "*.js", "*.ts", "*.go", "*.rs"],
+                    ProcessingStrategy.CODE_SKELETON, priority=80),
+            FileRule("fortran_code", ["*.f77", "*.f90", "*.f95"],
+                    ProcessingStrategy.CODE_SKELETON, priority=80),
+            
+            # 配置文件
+            FileRule("config_files", ["*.yaml", "*.yml", "*.json", "*.toml", "*.conf", "*.ini", "*.cfg"],
+                    ProcessingStrategy.STRUCTURE_EXTRACT, priority=70),
+            FileRule("config_scripts", ["*.sh", "*.bash", "*.zsh", "*.ps1", "*.bat", "*.cmd"],
+                    ProcessingStrategy.CODE_SKELETON, priority=70),
+            
+            # 纯文本文档
+            FileRule("text_documents", ["*.txt", "*.md", "*.rst"],
+                    ProcessingStrategy.SUMMARY_ONLY, priority=60, max_size=512*1024),
+            
+            # 数据文件（需要智能截断）
+            FileRule("structured_data", ["*.csv", "*.tsv", "*.xml", "*.jsonl"],
+                    ProcessingStrategy.HEADER_WITH_STATS, priority=50),
+            
+            # SPICE内核文件（特殊处理）
+            FileRule("spice_kernels", ["*.tf", "*.tls", "*.tpc", "*.ker"],
+                    ProcessingStrategy.STRUCTURE_EXTRACT, priority=45),
+            FileRule("spice_binary_kernels", ["*.bsp", "*.bc"],
+                    ProcessingStrategy.METADATA_ONLY, priority=45, force_binary=True),
+        ]
+        
+        self.rules.extend(default_rules)
+    
+    def load_rules(self, rules_file: Path):
+        """从YAML文件加载规则"""
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+        except Exception as e:
+            print(f"警告: 无法加载规则文件 {rules_file}: {e}", file=sys.stderr)
+            print("将使用内置默认规则", file=sys.stderr)
+            self.load_default_rules()
+            return
+        
+        # 解析文件分类规则
+        rule_defs = data.get('file_classifications', [])
+        if not rule_defs:
+            print("警告: 规则文件中未找到 'file_classifications' 部分", file=sys.stderr)
+            self.load_default_rules()
+            return
+        
+        for rule_def in rule_defs:
+            try:
+                # 将策略字符串转换为枚举
+                strategy_name = rule_def.get('strategy', 'metadata_only')
+                strategy = ProcessingStrategy(strategy_name)
+                
+                # 解析模式
+                patterns = rule_def.get('patterns', [])
+                if not patterns:
+                    continue
+                
+                rule = FileRule(
+                    name=rule_def.get('name', 'unnamed'),
+                    patterns=patterns,
+                    strategy=strategy,
+                    priority=rule_def.get('priority', 50),
+                    force_binary=rule_def.get('force_binary', False),
+                    max_size=rule_def.get('max_size_kb', 0) * 1024 if rule_def.get('max_size_kb') else None,
+                    comment=rule_def.get('comment')
+                )
+                self.rules.append(rule)
+            except Exception as e:
+                print(f"警告: 解析规则时出错: {rule_def.get('name', 'unnamed')} - {e}", file=sys.stderr)
+    
+    def classify_file(self, filepath: Path) -> Tuple[ProcessingStrategy, bool]:
+        """
+        分类文件并返回处理策略
+        
+        Returns:
+            (处理策略, 是否强制为二进制)
+        """
+        try:
+            stat_result = filepath.stat()
+        except (OSError, IOError):
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        # 1. 应用显式规则
+        for rule in self.rules:
+            if rule.matches(filepath):
+                return rule.strategy, rule.force_binary
+        
+        # 2. 启发式后备规则
+        file_size = stat_result.st_size
+        
+        # 大小启发式：超过1MB大概率不是纯文本
+        if file_size > 1024 * 1024:  # 1MB
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        # 扩展名启发式
+        suffix = filepath.suffix.lower()
+        
+        # 已知文本扩展名
+        if suffix in ['.txt', '.md', '.rst']:
+            if file_size < 500 * 1024:  # 500KB以下
+                return ProcessingStrategy.SUMMARY_ONLY, False
+            else:
+                return ProcessingStrategy.HEADER_WITH_STATS, False
+        
+        # 默认：仅元数据
+        return ProcessingStrategy.METADATA_ONLY, False
+    
+    def estimate_token_usage(self, filepath: Path, strategy: ProcessingStrategy) -> int:
+        """估算文件使用特定策略的token消耗"""
+        try:
+            file_size = filepath.stat().st_size
+        except (OSError, IOError):
+            return 0
+        
+        config = STRATEGY_CONFIGS.get(strategy, STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY])
+        
+        # 估算字符数（保守估计）
+        if strategy == ProcessingStrategy.METADATA_ONLY:
+            return int(config.token_estimate * 100)  # 约100字符的元数据
+        
+        # 对于内容策略，根据文件大小估算
+        if config.max_size and file_size > config.max_size:
+            # 文件太大，使用元数据策略
+            return STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY].token_estimate * 100
+        
+        # 字符数估算（保守）
+        estimated_chars = min(file_size, config.max_size or file_size)
+        return int(estimated_chars * config.token_estimate)
+
+
+# ==================== 上下文管理器 ====================
+
+class ContextManager:
+    """LLM上下文管理器"""
+    
+    def __init__(self, max_tokens: int = 128000):
+        self.max_tokens = max_tokens
+        self.reserved_tokens = 4000  # 系统提示预留
+        self.used_tokens = 0
+        self.file_records: List[Dict] = []
+        
+    @property
+    def available_tokens(self) -> int:
+        """可用token数量"""
+        return self.max_tokens - self.reserved_tokens - self.used_tokens
+    
+    def can_allocate(self, estimated_tokens: int) -> bool:
+        """检查是否能分配指定数量的token"""
+        return self.used_tokens + estimated_tokens <= self.available_tokens
+    
+    def allocate(self, estimated_tokens: int, file_record: Dict) -> bool:
+        """分配token并记录文件"""
+        if not self.can_allocate(estimated_tokens):
+            return False
+        
+        self.used_tokens += estimated_tokens
+        self.file_records.append(file_record)
+        return True
+    
+    def downgrade_strategy(self, current_strategy: ProcessingStrategy) -> ProcessingStrategy:
+        """策略降级（当token不足时）"""
+        strategy_hierarchy = [
+            ProcessingStrategy.FULL_CONTENT,
+            ProcessingStrategy.SUMMARY_WITH_TOC,
+            ProcessingStrategy.SUMMARY_ONLY,
+            ProcessingStrategy.CODE_KEY_FUNCTIONS,
+            ProcessingStrategy.CODE_SKELETON,
+            ProcessingStrategy.STRUCTURE_EXTRACT,
+            ProcessingStrategy.HEADER_WITH_STATS,
+            ProcessingStrategy.METADATA_ONLY,
+        ]
+        
+        try:
+            current_index = strategy_hierarchy.index(current_strategy)
+            # 降级一级
+            if current_index + 1 < len(strategy_hierarchy):
+                return strategy_hierarchy[current_index + 1]
+        except ValueError:
+            pass
+        
+        return ProcessingStrategy.METADATA_ONLY
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """获取上下文使用摘要"""
+        return {
+            "max_tokens": self.max_tokens,
+            "reserved_tokens": self.reserved_tokens,
+            "used_tokens": self.used_tokens,
+            "available_tokens": self.available_tokens,
+            "file_count": len(self.file_records),
+            "token_utilization": self.used_tokens / (self.max_tokens - self.reserved_tokens),
+        }
 
 
 # ==================== 复杂度分析器 ====================
@@ -2932,10 +3288,7 @@ class DirectoryDigest:
         self.config = config or {}
         
         # 默认配置
-        # 注意：命令行接口默认使用 10240 MB (10GB)，此处为程序化使用的后备值
-        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024 * 1024)  # 10GB，跳过处理超大文件
-        # 新增：全量输出模式下，超过此大小的文件不输出全文（默认32KB）
-        self.max_full_content_size = self.config.get('max_full_content_size', 32 * 1024)
+        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024 * 1024)  # 10GB
         self.ignore_patterns = self.config.get('ignore_patterns', [
             '*.pyc', '*.pyo', '*.so', '*.dll', '__pycache__', 
             '.git', '.svn', '.hg', '.DS_Store', '*.swp', '*.swo'
@@ -2943,6 +3296,13 @@ class DirectoryDigest:
         self.use_parallel = self.config.get('use_parallel', False)
         self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)
         
+        # 新配置项
+        self.rules_file = self.config.get('rules_file')
+        self.context_size = self.config.get('context_size', 128000)
+        self.rule_engine = RuleEngine(self.rules_file)
+        self.context_manager = ContextManager(self.context_size)
+        
+        # 原有分析器
         self.file_type_detector = FileTypeDetector()
         self.human_summarizer = HumanReadableSummarizer()
         self.source_analyzer = SourceCodeAnalyzer()
@@ -2953,9 +3313,10 @@ class DirectoryDigest:
             'total_files': 0,
             'human_readable': 0,
             'source_code': 0,
-            'config_script': 0,  # 新增统计项
+            'config_script': 0,
             'binary': 0,
-            'skipped_large_files': 0,  # 新增：跳过的文件统计
+            'skipped_large_files': 0,
+            'skipped_by_context': 0,  # 新增：因上下文限制跳过的文件
             'total_size': 0,
             'processing_time': 0
         }
@@ -3211,222 +3572,76 @@ class DirectoryDigest:
             self._process_directory(subdir, mode)
     
     def _process_file(self, file_digest: FileDigest, mode: str):
-        """基于扩展名优先的动态文件处理"""
+        """基于规则和上下文限制处理文件"""
         filepath = file_digest.metadata.path
         
         try:
-            # ===== 关键修复：扩展名优先检测 =====
-            ext_type = FileTypeDetector.detect_by_extension(filepath)
+            # 1. 获取处理策略
+            strategy, force_binary = self.rule_engine.classify_file(filepath)
             
-            # 如果是明确的二进制扩展名，直接处理为二进制，不尝试读取内容
-            if ext_type == FileType.BINARY:
-                file_digest.metadata.file_type = FileType.BINARY
-                self.stats['binary'] += 1
-                # 仅计算哈希，不读取内容（流式处理）
-                self._calculate_hashes(file_digest)
-                return
+            # 2. 估算token消耗
+            estimated_tokens = self.rule_engine.estimate_token_usage(filepath, strategy)
             
-            # 大小检查（仅对非二进制文件）
+            # 3. 检查文件大小限制
             if file_digest.metadata.size > self.max_file_size:
                 file_digest.metadata.file_type = FileType.BINARY
                 file_digest.human_readable_summary = HumanReadableSummary(
                     summary=f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) exceeds limit",
                     line_count=0
                 )
-                self.stats['skipped_large_files'] = self.stats.get('skipped_large_files', 0) + 1
+                self.stats['skipped_large_files'] += 1
                 self.stats['binary'] += 1
                 return
             
-            # 现在尝试读取为文本（已知不是明确的二进制扩展名）
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                raw_bytes = None
-            except UnicodeDecodeError:
-                # 解码失败，降级为二进制处理（即使扩展名未明确标记）
-                with open(filepath, 'rb') as f:
-                    raw_bytes = f.read()
-                file_digest.metadata.file_type = FileType.BINARY
-                self.stats['binary'] += 1
-                self._calculate_hashes_from_bytes(file_digest, raw_bytes)
-                return
-            
-            # 对于明确标记为文本的扩展名，如果内容看起来像二进制，降级处理
-            if ext_type == FileType.HUMAN_READABLE or ext_type == FileType.CONFIG_SCRIPT:
-                # 简单启发式：如果高比例字符不可打印，视为二进制
-                if len(content) > 0:
-                    printable_ratio = sum(1 for c in content if c.isprintable() or c in '\n\r\t') / len(content)
-                    if printable_ratio < 0.7:  # 少于70%可打印字符
-                        file_digest.metadata.file_type = FileType.BINARY
-                        self.stats['binary'] += 1
-                        self._calculate_hashes(file_digest)
-                        return
-            
-            # 3. 内容分类
-            classification = ContentAnalyzer.classify_file(content, filepath)
-            strategy = classification['strategy']
-            detected_type = classification['type']
-            
-            # 更新文件类型元数据
-            type_enum_map = {
-                'human_readable': FileType.HUMAN_READABLE,
-                'source_code': FileType.SOURCE_CODE,
-                'config_script': FileType.CONFIG_SCRIPT,
-                'tabular_data': FileType.HUMAN_READABLE,  # 文本格式但视为特殊处理
-                'mixed_document': FileType.HUMAN_READABLE,
-                'unknown_text': FileType.HUMAN_READABLE
+            # 4. 检查上下文限制
+            file_record = {
+                "path": str(filepath),
+                "strategy": strategy.value,
+                "estimated_tokens": estimated_tokens,
+                "size": file_digest.metadata.size,
             }
-            file_digest.metadata.file_type = type_enum_map.get(detected_type, FileType.BINARY)
             
-            # 更新统计
-            if detected_type == 'source_code':
-                self.stats['source_code'] += 1
-            elif detected_type == 'config_script':
-                self.stats['config_script'] = self.stats.get('config_script', 0) + 1
-                self.stats['source_code'] += 1
-            elif detected_type in ['human_readable', 'mixed_document', 'unknown_text']:
-                self.stats['human_readable'] += 1
-            elif detected_type == 'tabular_data':
-                self.stats['human_readable'] += 1  # 文本格式
+            # 尝试分配token
+            if not self.context_manager.can_allocate(estimated_tokens):
+                # 尝试降级策略
+                downgraded_strategy = self.context_manager.downgrade_strategy(strategy)
+                downgraded_tokens = self.rule_engine.estimate_token_usage(filepath, downgraded_strategy)
+                
+                if not self.context_manager.can_allocate(downgraded_tokens):
+                    # 即使降级也无法分配，跳过此文件
+                    self.stats['skipped_by_context'] += 1
+                    file_digest.metadata.file_type = FileType.UNKNOWN
+                    file_digest.human_readable_summary = HumanReadableSummary(
+                        summary=f"[SKIPPED] Exceeds context window (estimated {estimated_tokens} tokens)",
+                        line_count=0
+                    )
+                    return
+                
+                strategy = downgraded_strategy
+                estimated_tokens = downgraded_tokens
             
-            # 4. 计算哈希（流式）
-            if raw_bytes:
-                self._calculate_hashes_from_bytes(file_digest, raw_bytes)
+            # 5. 分配token
+            file_record["strategy"] = strategy.value
+            file_record["estimated_tokens"] = estimated_tokens
+            
+            if not self.context_manager.allocate(estimated_tokens, file_record):
+                self.stats['skipped_by_context'] += 1
+                return
+            
+            # 6. 根据策略处理文件
+            if force_binary or strategy == ProcessingStrategy.METADATA_ONLY:
+                self._process_as_binary(file_digest)
+            elif strategy in [ProcessingStrategy.FULL_CONTENT, ProcessingStrategy.SUMMARY_ONLY, 
+                             ProcessingStrategy.SUMMARY_WITH_TOC]:
+                self._process_as_text(file_digest, mode, strategy)
+            elif strategy in [ProcessingStrategy.CODE_SKELETON, ProcessingStrategy.CODE_KEY_FUNCTIONS]:
+                self._process_as_code(file_digest, mode, strategy)
+            elif strategy in [ProcessingStrategy.STRUCTURE_EXTRACT, ProcessingStrategy.TOP_LEVEL_KEYS]:
+                self._process_as_config(file_digest, mode, strategy)
+            elif strategy in [ProcessingStrategy.HEADER_WITH_STATS, ProcessingStrategy.SCHEMA_SUMMARY]:
+                self._process_as_data(file_digest, mode, strategy)
             else:
-                self._calculate_hashes(file_digest)
-            
-            # 5. 根据策略处理内容
-            content_status = "embedded_full"
-            truncated_reason = None
-            
-            if strategy == 'metadata_only':
-                # Binary 文件
-                content_status = "metadata_only"
-                file_digest.metadata.file_type = FileType.BINARY
-                self.stats['binary'] += 1
-                
-            elif strategy == 'header_only':
-                # Tabular Data: 仅头部
-                header = self._extract_table_header(content)
-                file_digest.human_readable_summary = HumanReadableSummary(
-                    summary=f"[Tabular Data] {len(content.split(chr(10)))} rows, header extracted",
-                    first_lines=header.split('\n')[:20],
-                    line_count=len(content.split('\n')),
-                    character_count=len(header)
-                )
-                # Full 模式也仅存储头部
-                if mode == "full":
-                    if len(header) > self.max_full_content_size:
-                        header = header[:self.max_full_content_size] + "\n[HEADER TRUNCATED]"
-                    file_digest.full_content = header + "\n\n[TABLE DATA OMITTED - Available on request]"
-                    content_status = "truncated"
-                    truncated_reason = "tabular_data_policy"
-                else:
-                    content_status = "header_only"
-                
-            elif strategy == 'extract_header':
-                # Mixed Document: 分离头部和数据
-                header = SmartTextProcessor.extract_human_relevant_content(content, filepath, 50)
-                is_truncated = len(header) < len(content)
-                
-                if mode == "framework":
-                    file_digest.human_readable_summary = HumanReadableSummary(
-                        summary=f"[Mixed Document] Natural language header + structured data",
-                        first_lines=header.split('\n')[:30],
-                        line_count=len(content.split('\n')),
-                        character_count=len(content)
-                    )
-                    content_status = "header_extracted" if is_truncated else "embedded_full"
-                else:  # full mode
-                    if len(header) > self.max_full_content_size:
-                        header = header[:self.max_full_content_size]
-                        content_status = "truncated"
-                        truncated_reason = "size_limit"
-                    else:
-                        content_status = "header_extracted"
-                    file_digest.full_content = header + "\n\n[STRUCTURED DATA SECTION OMITTED]"
-                
-            elif strategy == 'structure_summary':
-                # Config/Script: 框架模式下仅结构
-                if mode == "framework":
-                    # 提取结构而非全文
-                    analysis = self.source_analyzer.analyze(filepath, content)
-                    config_keys = self.source_analyzer._extract_config_structure(content, filepath.suffix.lower())
-                    
-                    # 构建结构摘要
-                    summary_lines = [f"[Config File] Type: {filepath.suffix}"]
-                    if config_keys:
-                        summary_lines.append(f"Top-level keys/sections: {len(config_keys)}")
-                        for key in config_keys[:10]:
-                            summary_lines.append(f"  - {key.get('name', 'unknown')}")
-                        if len(config_keys) > 10:
-                            summary_lines.append(f"  ... and {len(config_keys) - 10} more")
-                    
-                    file_digest.human_readable_summary = HumanReadableSummary(
-                        summary='\n'.join(summary_lines),
-                        line_count=len(content.split('\n')),
-                        character_count=len(content)
-                    )
-                    file_digest.source_code_analysis = analysis
-                    content_status = "structure_summary"
-                else:
-                    # Full 模式，但受大小限制
-                    self._process_config_with_limit(file_digest, content, mode)
-                    
-            elif strategy == 'skeleton_or_full':
-                # Source Code
-                if mode == "framework":
-                    # 骨架模式
-                    analysis = self.source_analyzer.analyze(filepath, content)
-                    file_digest.source_code_analysis = analysis
-                    # 生成骨架描述
-                    skeleton = self._generate_code_skeleton(analysis)
-                    file_digest.human_readable_summary = HumanReadableSummary(
-                        summary=f"[Source Code Skeleton] {analysis.language}\n{skeleton}",
-                        line_count=analysis.total_lines
-                    )
-                    content_status = "skeleton"
-                else:
-                    # Full 模式
-                    if len(content) > self.max_full_content_size:
-                        # 截断但仍保留代码结构
-                        content = content[:self.max_full_content_size]
-                        truncated_reason = "size_limit"
-                        content_status = "truncated"
-                    file_digest.full_content = content
-                    analysis = self.source_analyzer.analyze(filepath, content)
-                    file_digest.source_code_analysis = analysis
-                    
-            elif strategy == 'embed_with_limit':
-                # Natural Language
-                if mode == "framework":
-                    # 智能摘要
-                    summary = self.human_summarizer.summarize(filepath, content)
-                    file_digest.human_readable_summary = summary
-                    content_status = "summary"
-                else:
-                    # Full 模式，受限制
-                    if len(content) > self.max_full_content_size:
-                        lines = content.split('\n')
-                        # 尝试在句子边界截断
-                        truncated = content[:self.max_full_content_size]
-                        last_period = truncated.rfind('.')
-                        if last_period > self.max_full_content_size * 0.8:
-                            truncated = truncated[:last_period+1]
-                        content = truncated + f"\n\n[CONTENT TRUNCATED - Total: {len(lines)} lines]"
-                        truncated_reason = "size_limit"
-                        content_status = "truncated"
-                    file_digest.full_content = content
-                    file_digest.human_readable_summary = self.human_summarizer.summarize(filepath, content)
-            
-            # 6. 添加内容状态标记
-            if not hasattr(file_digest, 'content_metadata'):
-                file_digest.content_metadata = {}
-            file_digest.content_metadata['content_status'] = content_status
-            if truncated_reason:
-                file_digest.content_metadata['truncated_reason'] = truncated_reason
-            file_digest.content_metadata['detected_type'] = detected_type
-            file_digest.content_metadata['available_on_request'] = (truncated_reason is not None)
+                self._process_as_text(file_digest, mode, ProcessingStrategy.SUMMARY_ONLY)
             
         except Exception as e:
             print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
@@ -3434,6 +3649,150 @@ class DirectoryDigest:
             file_digest.human_readable_summary = HumanReadableSummary(
                 summary=f"[ERROR] Processing failed: {str(e)}"
             )
+
+    def _process_as_binary(self, file_digest: FileDigest):
+        """处理为二进制文件"""
+        file_digest.metadata.file_type = FileType.BINARY
+        self.stats['binary'] += 1
+        self._calculate_hashes(file_digest)
+
+    def _process_as_text(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
+        """处理为文本文件"""
+        filepath = file_digest.metadata.path
+        
+        try:
+            # 读取文件
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            # 解码失败，降级为二进制
+            self._process_as_binary(file_digest)
+            return
+        
+        # 根据策略处理内容
+        if strategy == ProcessingStrategy.FULL_CONTENT:
+            file_digest.full_content = content
+            file_digest.human_readable_summary = self.human_summarizer.summarize(filepath, content)
+        else:  # SUMMARY_ONLY 或 SUMMARY_WITH_TOC
+            summary = self.human_summarizer.summarize(filepath, content)
+            file_digest.human_readable_summary = summary
+            
+            # 如果是全量模式但使用了摘要策略，存储摘要而非全文
+            if mode == "full":
+                file_digest.full_content = summary.summary or f"[Summary] {summary.line_count} lines, {summary.word_count} words"
+        
+        file_digest.metadata.file_type = FileType.HUMAN_READABLE
+        self.stats['human_readable'] += 1
+        self._calculate_hashes(file_digest)
+
+    def _process_as_code(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
+        """处理为源代码文件"""
+        filepath = file_digest.metadata.path
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            self._process_as_binary(file_digest)
+            return
+        
+        # 分析源代码
+        analysis = self.source_analyzer.analyze(filepath, content)
+        
+        # 根据策略调整分析结果
+        if strategy == ProcessingStrategy.CODE_SKELETON:
+            # 骨架模式：只保留关键信息
+            skeleton = {
+                "language": analysis.language,
+                "total_lines": analysis.total_lines,
+                "functions": len(analysis.functions[:10]),  # 最多10个函数
+                "classes": len(analysis.classes[:10]),      # 最多10个类
+                "imports": analysis.imports[:10],           # 最多10个导入
+            }
+            # 可以添加骨架化处理...
+        
+        file_digest.source_code_analysis = analysis
+        
+        if mode == "full":
+            file_digest.full_content = content
+        
+        file_digest.metadata.file_type = FileType.SOURCE_CODE
+        self.stats['source_code'] += 1
+        self._calculate_hashes(file_digest)
+
+    def _process_as_config(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
+        """处理为配置文件"""
+        filepath = file_digest.metadata.path
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            self._process_as_binary(file_digest)
+            return
+        
+        # 尝试作为源代码分析
+        analysis = self.source_analyzer.analyze(filepath, content)
+        file_digest.source_code_analysis = analysis
+        
+        # 生成结构摘要
+        if strategy == ProcessingStrategy.STRUCTURE_EXTRACT:
+            structure = self.source_analyzer._extract_config_structure(content, filepath.suffix.lower())
+            if structure:
+                summary_lines = [f"[Config Structure] Type: {filepath.suffix}"]
+                for item in structure[:20]:  # 最多20项
+                    summary_lines.append(f"  - {item.get('name', 'unknown')}")
+                if len(structure) > 20:
+                    summary_lines.append(f"  ... and {len(structure) - 20} more")
+                
+                file_digest.human_readable_summary = HumanReadableSummary(
+                    summary='\n'.join(summary_lines),
+                    line_count=len(content.split('\n')),
+                    character_count=len(content)
+                )
+        
+        if mode == "full":
+            file_digest.full_content = content
+        
+        file_digest.metadata.file_type = FileType.CONFIG_SCRIPT
+        self.stats['config_script'] += 1
+        self._calculate_hashes(file_digest)
+
+    def _process_as_data(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
+        """处理为数据文件"""
+        filepath = file_digest.metadata.path
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            self._process_as_binary(file_digest)
+            return
+        
+        # 使用智能截断处理器
+        if SmartTextProcessor.is_structured_data_file(filepath):
+            human_content = SmartTextProcessor.extract_human_relevant_content(content, filepath)
+            
+            if mode == "full":
+                file_digest.full_content = human_content
+            else:
+                file_digest.human_readable_summary = HumanReadableSummary(
+                    summary=f"[Structured Data] Type: {filepath.suffix}",
+                    first_lines=human_content.split('\n')[:10],
+                    line_count=len(content.split('\n')),
+                    character_count=len(content)
+                )
+        else:
+            # 普通文本处理
+            summary = self.human_summarizer.summarize(filepath, content)
+            file_digest.human_readable_summary = summary
+            
+            if mode == "full":
+                file_digest.full_content = content
+        
+        file_digest.metadata.file_type = FileType.HUMAN_READABLE
+        self.stats['human_readable'] += 1
+        self._calculate_hashes(file_digest)
     
     def _calculate_hashes(self, file_digest: FileDigest):
         """计算文件的哈希值（流式处理，内存高效）"""
@@ -3730,12 +4089,33 @@ class DirectoryDigest:
                 "generated_at": datetime.now().isoformat(),
                 "root_directory": str(self.root),
                 "output_mode": mode,
-                "statistics": self.stats
+                "context_config": {
+                    "max_tokens": self.context_size,
+                    "rules_file": str(self.rules_file) if self.rules_file else None,
+                },
+                "statistics": self.stats,
+                "context_usage": self.context_manager.get_summary(),
             },
             "structure": self.structure.to_dict(mode)
         }
         
+        # 添加上下文分配信息
+        if self.context_manager.file_records:
+            output["context_allocation"] = {
+                "file_records": self.context_manager.file_records,
+                "strategy_distribution": self._analyze_strategy_distribution(),
+            }
+        
         return output
+
+    def _analyze_strategy_distribution(self) -> Dict[str, Any]:
+        """分析策略使用分布"""
+        distribution = {}
+        for record in self.context_manager.file_records:
+            strategy = record.get("strategy", "unknown")
+            distribution[strategy] = distribution.get(strategy, 0) + 1
+        
+        return distribution
     
     def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None):
         """保存输出到文件"""
@@ -3779,11 +4159,11 @@ def main():
 Directory Digest Tool - 目录知识摘要生成器
 
 将文件系统递归"消化"为LLM可理解的上下文摘要。
-自动分类：人类可读文本 | 源代码 | 配置文件/脚本 | 二进制文件
+基于规则文件智能分类：人类可读文本 | 源代码 | 配置文件/脚本 | 二进制文件
 
 三种工作模式：
   framework (默认)  生成文件结构和元数据摘要
-  full              包含完整文件内容（受 --max-content-size 限制）
+  full              包含完整文件内容（受上下文窗口限制）
   sort              按类型/大小分类列出文件，提供统计建议
         """.strip(),
         formatter_class=CustomHelpFormatter,
@@ -3792,26 +4172,23 @@ Directory Digest Tool - 目录知识摘要生成器
   # 基础使用 - 默认输出到 stdout（JSON格式）
   %(prog)s /path/to/project
   
-  # 保存到文件（三种模式都支持 --save）
-  %(prog)s . --mode full --save report.json
-  %(prog)s . --mode sort --save structure.md
-  %(prog)s . --mode framework --save overview.yaml
+  # 使用规则文件
+  %(prog)s . --rules .digest_rules.yaml --save report.json
   
-  # 强制输出到 stdout（即使使用 --save）
-  %(prog)s . --mode full --save - | jq '.structure'
+  # 自定义上下文大小
+  %(prog)s . --context-size 64k --mode full
   
-  # 管道处理（sort 模式查看分类，full 模式内容搜索）
+  # 排序模式查看分类
   %(prog)s . --mode sort | less
+  
+  # 全量模式，管道处理
   %(prog)s . --mode full | grep -A 5 "class Controller"
   
-  # 全量模式，但限制大文件不输出全文（超过64KB的文件显示摘要）
-  %(prog)s . --mode full --max-content-size 64 --save output.json
+  # 分析超大项目，启用并行处理
+  %(prog)s /data --parallel --workers 8 --save report.json
   
-  # 分析超大项目（默认跳过大于10GB的文件）
-  %(prog)s /data --parallel --save report.json
-  
-  # 严格模式：跳过大于100MB的文件，且全文输出限制为16KB
-  %(prog)s . --max-size 100 --max-content-size 16 --mode full
+  # 严格模式：跳过大于100MB的文件
+  %(prog)s . --max-size 100
   
   # 自定义忽略规则，输出YAML到stdout
   %(prog)s . --ignore "*.log,*.tmp,cache,*.min.js" --output yaml
@@ -3834,6 +4211,33 @@ Directory Digest Tool - 目录知识摘要生成器
         default="framework",
         metavar="MODE",
         help="工作模式 (默认: %(default)s)"
+    )
+    
+    # ===== 规则和上下文控制 =====
+    rule_group = parser.add_argument_group(
+        "规则和上下文控制", 
+        "控制文件分类和LLM上下文优化"
+    )
+    rule_group.add_argument(
+        "-r", "--rules", 
+        metavar="FILE",
+        help="""
+        指定规则文件路径（YAML格式）。
+        规则文件定义文件分类和处理策略。
+        如果不提供，使用内置的启发式规则。
+        """
+    )
+    rule_group.add_argument(
+        "--context-size", 
+        type=str,
+        default="128k",
+        metavar="SIZE",
+        help="""
+        目标LLM上下文大小（tokens）。
+        支持格式: "64k", "128k", "256k" 或具体数字。
+        用于优化token分配。
+        (默认: %(default)s)
+        """
     )
     
     # ===== 输出控制组 =====
@@ -3865,10 +4269,10 @@ Directory Digest Tool - 目录知识摘要生成器
         help="显示详细处理信息（包括每个文件的处理状态）"
     )
     
-    # ===== 大小限制组（关键改进） =====
+    # ===== 大小限制组 =====
     size_group = parser.add_argument_group(
         "大小限制",
-        "控制文件处理的阈值。注意：--max-size 决定是否处理文件，--max-content-size 仅影响 full 模式下的内容输出"
+        "控制文件处理的阈值"
     )
     size_group.add_argument(
         "--max-size", 
@@ -3880,18 +4284,6 @@ Directory Digest Tool - 目录知识摘要生成器
         不计算checksum，不分析内容，仅保留路径和大小元数据。
         适用于排除超大日志、虚拟机镜像、数据集、媒体文件。
         (默认: %(default)s MB = 10 GB)
-        """
-    )
-    size_group.add_argument(
-        "--max-content-size", 
-        type=int, 
-        default=32,
-        metavar="KB",
-        help="""
-        全文输出大小阈值(KB)。**仅在 --mode full 时生效**：
-        超过此大小的文件不会输出完整内容，而是输出结构化摘要和前50行预览。
-        用于防止LLM上下文窗口（通常256K tokens）被单个文件占满。
-        (默认: %(default)s KB ≈ 32,768 bytes / ~8K-16K tokens)
         """
     )
     
@@ -3924,26 +4316,57 @@ Directory Digest Tool - 目录知识摘要生成器
     
     args = parser.parse_args()
     
-    # 配置转换（单位转换：MB→Bytes, KB→Bytes）
+    # 解析上下文大小
+    def parse_context_size(size_str: str) -> int:
+        """解析上下文大小字符串"""
+        size_str = size_str.lower().strip()
+        
+        # 移除后缀 'k' 或 'tokens'
+        if size_str.endswith('k'):
+            multiplier = 1000
+            size_str = size_str[:-1]
+        elif size_str.endswith('tokens'):
+            multiplier = 1
+            size_str = size_str[:-6].strip()
+        else:
+            multiplier = 1
+        
+        try:
+            # 解析数字
+            if '.' in size_str:
+                base_value = float(size_str)
+            else:
+                base_value = int(size_str)
+            
+            return int(base_value * multiplier)
+        except ValueError:
+            print(f"警告: 无法解析上下文大小 '{args.context_size}'，使用默认值 128000", file=sys.stderr)
+            return 128000
+    
+    context_size = parse_context_size(args.context_size)
+    
+    # 配置转换
     config = {
-        'max_file_size': args.max_size * 1024 * 1024,        # MB 转 Bytes
-        'max_full_content_size': args.max_content_size * 1024, # KB 转 Bytes
+        'max_file_size': args.max_size * 1024 * 1024,  # MB 转 Bytes
         'ignore_patterns': [p.strip() for p in args.ignore.split(',') if p.strip()],
         'use_parallel': args.parallel,
-        'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4
+        'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4,
+        'rules_file': Path(args.rules) if args.rules else None,
+        'context_size': context_size,
     }
     
     # 创建摘要器
     digest = DirectoryDigest(args.directory, config)
     
     if args.verbose:
-        print(f"Analyzing directory: {args.directory}")
-        print(f"Mode: {args.mode}, Format: {args.output}")
-        print(f"Skip files larger than: {args.max_size} MB ({args.max_size/1024:.1f} GB)")
-        if args.mode == "full":
-            print(f"Full content limit: {args.max_content_size} KB")
+        print(f"Analyzing directory: {args.directory}", file=sys.stderr)
+        print(f"Mode: {args.mode}, Format: {args.output}", file=sys.stderr)
+        print(f"Skip files larger than: {args.max_size} MB ({args.max_size/1024:.1f} GB)", file=sys.stderr)
+        print(f"Context window: {context_size:,} tokens", file=sys.stderr)
+        if args.rules:
+            print(f"Rules file: {args.rules}", file=sys.stderr)
         if args.parallel:
-            print(f"Parallel processing enabled with {config['max_workers']} workers")
+            print(f"Parallel processing enabled with {config['max_workers']} workers", file=sys.stderr)
     
     # 生成摘要
     output = digest.create_digest(args.mode)
@@ -3954,7 +4377,6 @@ Directory Digest Tool - 目录知识摘要生成器
     if output_to_stdout:
         # 输出到标准输出（支持管道处理）
         try:
-            # 传递 mode 参数以便 sort 模式使用特殊格式
             content = FormatConverter.convert(output, args.output, mode=args.mode)
             sys.stdout.write(content)
             if not content.endswith('\n'):
@@ -3964,19 +4386,26 @@ Directory Digest Tool - 目录知识摘要生成器
             # 忽略管道中断错误（如输出被 head/tail 截断）
             pass
         
-        # 统计信息输出到 stderr，避免污染 stdout（特别是 JSON/YAML 输出）
+        # 统计信息输出到 stderr
         if args.verbose or args.mode == "sort":
             stats = output['metadata']['statistics']
+            ctx_usage = output['metadata']['context_usage']
+            
             print(f"\n[Summary] Files: {stats['total_files']}, "
                   f"Source: {stats.get('source_code', 0)}, "
                   f"Config: {stats.get('config_script', 0)}, "
                   f"Text: {stats.get('human_readable', 0)}, "
-                  f"Binary: {stats.get('binary', 0)}, "
-                  f"Skipped: {stats.get('skipped_large_files', 0)}", 
+                  f"Binary: {stats.get('binary', 0)}", 
                   file=sys.stderr)
-            print(f"[Time] {stats['processing_time']:.2f}s, "
-                  f"Total: {stats['total_size'] / (1024*1024*1024):.2f} GB",
-                  file=sys.stderr)
+            
+            if stats.get('skipped_large_files', 0) > 0:
+                print(f"         Skipped (size): {stats['skipped_large_files']}", file=sys.stderr)
+            
+            if stats.get('skipped_by_context', 0) > 0:
+                print(f"         Skipped (context): {stats['skipped_by_context']}", file=sys.stderr)
+            
+            print(f"[Context] Used: {ctx_usage['used_tokens']:,}/{ctx_usage['max_tokens']:,} tokens "
+                  f"({ctx_usage['token_utilization']:.1%})", file=sys.stderr)
             
             if args.mode == "sort" and "recommendations" in output:
                 for rec in output["recommendations"]:
@@ -3987,15 +4416,12 @@ Directory Digest Tool - 目录知识摘要生成器
     else:
         # 写入指定文件
         output_path = Path(args.save)
-        # 保存输出时也需要传递 mode 参数
-        # 注意：save_output 方法内部调用 FormatConverter.convert，需要修改它来接受 mode 参数
-        # 但 save_output 方法目前没有 mode 参数，我们需要修改它
-        # 暂时使用一个变通方法：修改 save_output 方法
-        # 这里先调用一个修改后的版本
         saved_path = digest.save_output(output, args.output, output_path, args.mode)
         
         # 显示处理结果（到 stderr，避免与文件内容混淆）
         stats = output['metadata']['statistics']
+        ctx_usage = output['metadata']['context_usage']
+        
         print(f"\n{'='*50}", file=sys.stderr)
         print(f"Directory Digest Summary", file=sys.stderr)
         print(f"{'='*50}", file=sys.stderr)
@@ -4004,7 +4430,14 @@ Directory Digest Tool - 目录知识摘要生成器
         print(f"  ├── Config/Scripts:    {stats.get('config_script', 0)}", file=sys.stderr)
         print(f"  ├── Human readable:    {stats.get('human_readable', 0)}", file=sys.stderr)
         print(f"  ├── Binary:            {stats.get('binary', 0)}", file=sys.stderr)
-        print(f"  └── Skipped (>limit):  {stats.get('skipped_large_files', 0)}", file=sys.stderr)
+        if stats.get('skipped_large_files', 0) > 0:
+            print(f"  ├── Skipped (size):    {stats['skipped_large_files']}", file=sys.stderr)
+        if stats.get('skipped_by_context', 0) > 0:
+            print(f"  └── Skipped (context): {stats['skipped_by_context']}", file=sys.stderr)
+        
+        print(f"Context window:          {ctx_usage['max_tokens']:,} tokens", file=sys.stderr)
+        print(f"Context used:            {ctx_usage['used_tokens']:,} tokens "
+              f"({ctx_usage['token_utilization']:.1%})", file=sys.stderr)
         print(f"Processing time:         {stats['processing_time']:.2f} s", file=sys.stderr)
         print(f"Output saved to:         {saved_path}", file=sys.stderr)
         print(f"{'='*50}", file=sys.stderr)
