@@ -3046,25 +3046,34 @@ Directory Digest Tool - 目录知识摘要生成器
         formatter_class=CustomHelpFormatter,
         epilog="""
 示例:
-  # 基础使用 - 生成框架摘要 (JSON格式)
+  # 基础使用 - 默认输出到 stdout（JSON格式）
   %(prog)s /path/to/project
   
+  # 保存到文件（三种模式都支持 --save）
+  %(prog)s . --mode full --save report.json
+  %(prog)s . --mode sort --save structure.md
+  %(prog)s . --mode framework --save overview.yaml
+  
+  # 强制输出到 stdout（即使使用 --save）
+  %(prog)s . --mode full --save - | jq '.structure'
+  
+  # 管道处理（sort 模式查看分类，full 模式内容搜索）
+  %(prog)s . --mode sort | less
+  %(prog)s . --mode full | grep -A 5 "class Controller"
+  
   # 全量模式，但限制大文件不输出全文（超过64KB的文件显示摘要）
-  %(prog)s . --mode full --max-content-size 64
+  %(prog)s . --mode full --max-content-size 64 --save output.json
   
   # 分析超大项目（默认跳过大于10GB的文件）
-  %(prog)s /data --parallel
+  %(prog)s /data --parallel --save report.json
   
   # 严格模式：跳过大于100MB的文件，且全文输出限制为16KB
   %(prog)s . --max-size 100 --max-content-size 16 --mode full
   
-  # 查看文件分类统计（不输出详细内容）
-  %(prog)s . --mode sort --output md
-  
-  # 自定义忽略规则，输出YAML格式
+  # 自定义忽略规则，输出YAML到stdout
   %(prog)s . --ignore "*.log,*.tmp,cache,*.min.js" --output yaml
   
-  # 生成HTML报告并指定保存路径
+  # 生成HTML报告
   %(prog)s /code --mode full --output html --save report.html
         """
     )
@@ -3099,7 +3108,13 @@ Directory Digest Tool - 目录知识摘要生成器
     output_group.add_argument(
         "-s", "--save", 
         metavar="FILE",
-        help="指定输出文件路径 (默认: 自动生成 目录/directory_digest_时间戳.扩展名)"
+        help="""
+        指定输出文件路径。特殊情况：
+          - 不提供此选项：输出到标准输出（stdout，适合管道处理）
+          - 使用 "-": 强制输出到标准输出（即使提供此选项）
+          - 其他路径: 写入指定文件（自动创建目录）
+        (默认: 输出到 stdout)
+        """
     )
     output_group.add_argument(
         "-v", "--verbose", 
@@ -3190,32 +3205,68 @@ Directory Digest Tool - 目录知识摘要生成器
     # 生成摘要
     output = digest.create_digest(args.mode)
     
-    # 保存输出
-    output_path = Path(args.save) if args.save else None
-    saved_path = digest.save_output(output, args.output, output_path)
+    # 处理输出：默认 stdout，--save 指定文件路径，--save - 强制 stdout
+    output_to_stdout = (args.save is None or args.save == '-')
     
-    # 显示统计信息（增强版）
-    stats = output['metadata']['statistics']
-    print(f"\n{'='*50}")
-    print(f"Directory Digest Summary")
-    print(f"{'='*50}")
-    print(f"Total files scanned:     {stats['total_files']}")
-    print(f"  ├── Source code:       {stats.get('source_code', 0)}")
-    print(f"  ├── Config/scripts:    {stats.get('config_script', 0)}")
-    print(f"  ├── Human readable:    {stats.get('human_readable', 0)}")
-    print(f"  ├── Binary:            {stats.get('binary', 0)}")
-    print(f"  └── Skipped (>10GB):   {stats.get('skipped_large_files', 0)}")
-    print(f"Total size:              {stats['total_size'] / (1024*1024*1024):.2f} GB")
-    print(f"Processing time:         {stats['processing_time']:.2f} s")
-    print(f"Output saved to:         {saved_path}")
-    print(f"{'='*50}")
-    
-    if args.mode == "sort" and "recommendations" in output:
-        print(f"\nRecommendations:")
-        for rec in output["recommendations"]:
-            print(f"  • {rec}")
-    
-    return saved_path
+    if output_to_stdout:
+        # 输出到标准输出（支持管道处理）
+        try:
+            content = FormatConverter.convert(output, args.output)
+            sys.stdout.write(content)
+            if not content.endswith('\n'):
+                sys.stdout.write('\n')
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # 忽略管道中断错误（如输出被 head/tail 截断）
+            pass
+        
+        # 统计信息输出到 stderr，避免污染 stdout（特别是 JSON/YAML 输出）
+        if args.verbose or args.mode == "sort":
+            stats = output['metadata']['statistics']
+            print(f"\n[Summary] Files: {stats['total_files']}, "
+                  f"Source: {stats.get('source_code', 0)}, "
+                  f"Config: {stats.get('config_script', 0)}, "
+                  f"Text: {stats.get('human_readable', 0)}, "
+                  f"Binary: {stats.get('binary', 0)}, "
+                  f"Skipped: {stats.get('skipped_large_files', 0)}", 
+                  file=sys.stderr)
+            print(f"[Time] {stats['processing_time']:.2f}s, "
+                  f"Total: {stats['total_size'] / (1024*1024*1024):.2f} GB",
+                  file=sys.stderr)
+            
+            if args.mode == "sort" and "recommendations" in output:
+                for rec in output["recommendations"]:
+                    print(f"[Tip] {rec}", file=sys.stderr)
+        
+        return None  # stdout 模式返回 None
+        
+    else:
+        # 写入指定文件
+        output_path = Path(args.save)
+        saved_path = digest.save_output(output, args.output, output_path)
+        
+        # 显示处理结果（到 stderr，避免与文件内容混淆）
+        stats = output['metadata']['statistics']
+        print(f"\n{'='*50}", file=sys.stderr)
+        print(f"Directory Digest Summary", file=sys.stderr)
+        print(f"{'='*50}", file=sys.stderr)
+        print(f"Total files scanned:     {stats['total_files']}", file=sys.stderr)
+        print(f"  ├── Source code:       {stats.get('source_code', 0)}", file=sys.stderr)
+        print(f"  ├── Config/scripts:    {stats.get('config_script', 0)}", file=sys.stderr)
+        print(f"  ├── Human readable:    {stats.get('human_readable', 0)}", file=sys.stderr)
+        print(f"  ├── Binary:            {stats.get('binary', 0)}", file=sys.stderr)
+        print(f"  └── Skipped (>10GB):   {stats.get('skipped_large_files', 0)}", file=sys.stderr)
+        print(f"Total size:              {stats['total_size'] / (1024*1024*1024):.2f} GB", file=sys.stderr)
+        print(f"Processing time:         {stats['processing_time']:.2f} s", file=sys.stderr)
+        print(f"Output saved to:         {saved_path}", file=sys.stderr)
+        print(f"{'='*50}", file=sys.stderr)
+        
+        if args.mode == "sort" and "recommendations" in output:
+            print(f"\nRecommendations:", file=sys.stderr)
+            for rec in output["recommendations"]:
+                print(f"  • {rec}", file=sys.stderr)
+        
+        return saved_path
 
 
 if __name__ == "__main__":
