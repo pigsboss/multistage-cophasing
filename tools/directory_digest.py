@@ -2478,6 +2478,7 @@ class DirectoryDigest:
             'source_code': 0,
             'config_script': 0,  # 新增统计项
             'binary': 0,
+            'skipped_large_files': 0,  # 新增：跳过的文件统计
             'total_size': 0,
             'processing_time': 0
         }
@@ -2738,11 +2739,27 @@ class DirectoryDigest:
         filepath = file_digest.metadata.path
         
         try:
-            # 1. 检测文件类型
+            # 1. 检查文件大小是否超过限制
+            if file_digest.metadata.size > self.max_file_size:
+                # 超过限制，只保留基本元数据，跳过详细处理
+                file_digest.metadata.file_type = FileType.BINARY  # 标记为二进制
+                
+                # 设置跳过原因
+                file_digest.human_readable_summary = HumanReadableSummary(
+                    summary=f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) "
+                           f"exceeds max_file_size ({self.max_file_size / (1024*1024):.2f} MB)"
+                )
+                
+                # 更新统计（新增统计项）
+                self.stats['skipped_large_files'] = self.stats.get('skipped_large_files', 0) + 1
+                self.stats['binary'] += 1  # 同时计入二进制文件统计
+                return  # 直接返回，不计算哈希，不进行内容分析
+            
+            # 2. 检测文件类型（仅对未超过大小的文件）
             file_type = self.file_type_detector.detect(filepath)
             file_digest.metadata.file_type = file_type
             
-            # 更新统计
+            # 3. 更新统计（正常文件）
             if file_type == FileType.HUMAN_READABLE:
                 self.stats['human_readable'] += 1
             elif file_type == FileType.CONFIG_SCRIPT:
@@ -2755,10 +2772,10 @@ class DirectoryDigest:
             elif file_type == FileType.BINARY:
                 self.stats['binary'] += 1
             
-            # 2. 计算哈希值
+            # 4. 计算哈希值（仅对未超过大小的文件）
             self._calculate_hashes(file_digest)
             
-            # 3. 根据文件类型处理内容
+            # 5. 根据文件类型处理内容
             if file_type == FileType.CONFIG_SCRIPT:
                 self._process_config_script(file_digest, mode)
             elif file_type == FileType.HUMAN_READABLE:
@@ -2770,21 +2787,38 @@ class DirectoryDigest:
         except Exception as e:
             print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
             file_digest.metadata.file_type = FileType.BINARY
+            # 设置错误摘要
+            file_digest.human_readable_summary = HumanReadableSummary(
+                summary=f"[ERROR] Failed to process file: {str(e)}"
+            )
     
     def _calculate_hashes(self, file_digest: FileDigest):
-        """计算文件的哈希值"""
+        """计算文件的哈希值（流式处理，内存高效）"""
         filepath = file_digest.metadata.path
         
         try:
+            md5_hash = hashlib.md5()
+            sha256_hash = hashlib.sha256()
+            
             with open(filepath, 'rb') as f:
-                content = f.read()
-                
-                # MD5
-                md5_hash = hashlib.md5(content).hexdigest()
-                file_digest.metadata.md5_hash = md5_hash
-                
-        except Exception:
-            pass
+                # 使用64KB缓冲区流式读取
+                for chunk in iter(lambda: f.read(65536), b''):
+                    md5_hash.update(chunk)
+                    sha256_hash.update(chunk)
+            
+            file_digest.metadata.md5_hash = md5_hash.hexdigest()
+            file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
+            
+        except (OSError, IOError) as e:
+            # 权限问题、文件不存在等
+            print(f"Warning: Could not read file for hash calculation: {filepath} - {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "read_error"
+            file_digest.metadata.sha256_hash = "read_error"
+        except Exception as e:
+            # 其他意外错误
+            print(f"Warning: Hash calculation failed for {filepath}: {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "hash_error"
+            file_digest.metadata.sha256_hash = "hash_error"
     
     def _process_human_readable(self, file_digest: FileDigest, mode: str):
         """处理人类可读文本文件"""
@@ -3052,6 +3086,7 @@ Examples:
     print(f"  Config/scripts: {stats.get('config_script', 0)}")
     print(f"  Human readable: {stats.get('human_readable', 0)}")
     print(f"  Binary: {stats.get('binary', 0)}")
+    print(f"  Skipped (large files): {stats.get('skipped_large_files', 0)}")
     print(f"  Total size: {stats['total_size'] / (1024*1024):.2f} MB")
     print(f"  Processing time: {stats['processing_time']:.2f} s")
     
