@@ -2456,7 +2456,8 @@ class DirectoryDigest:
         self.config = config or {}
         
         # 默认配置
-        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024)  # 10MB，跳过处理
+        # 注意：命令行接口默认使用 10240 MB (10GB)，此处为程序化使用的后备值
+        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024 * 1024)  # 10GB，跳过处理超大文件
         # 新增：全量输出模式下，超过此大小的文件不输出全文（默认32KB）
         self.max_full_content_size = self.config.get('max_full_content_size', 32 * 1024)
         self.ignore_patterns = self.config.get('ignore_patterns', [
@@ -3023,40 +3024,152 @@ def main():
     """命令行入口点"""
     import argparse
     
+    # 自定义帮助格式化器，保留换行和格式
+    class CustomHelpFormatter(argparse.RawDescriptionHelpFormatter):
+        def _format_action(self, action):
+            # 保持父类的格式化行为，但确保帮助文本正确缩进
+            return super()._format_action(action)
+    
     parser = argparse.ArgumentParser(
-        description="Directory Digest Tool - Recursive directory summarizer for LLM context",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="directory_digest",
+        description="""
+Directory Digest Tool - 目录知识摘要生成器
+
+将文件系统递归"消化"为LLM可理解的上下文摘要。
+自动分类：人类可读文本 | 源代码 | 配置文件/脚本 | 二进制文件
+
+三种工作模式：
+  framework (默认)  生成文件结构和元数据摘要
+  full              包含完整文件内容（受 --max-content-size 限制）
+  sort              按类型/大小分类列出文件，提供统计建议
+        """.strip(),
+        formatter_class=CustomHelpFormatter,
         epilog="""
-Examples:
-  %(prog)s /path/to/directory --mode full --output json
-  %(prog)s . --mode sort --output md                    # List files by category
-  %(prog)s . --mode full --max-content-size 64          # Limit full content to 64KB
+示例:
+  # 基础使用 - 生成框架摘要 (JSON格式)
+  %(prog)s /path/to/project
+  
+  # 全量模式，但限制大文件不输出全文（超过64KB的文件显示摘要）
+  %(prog)s . --mode full --max-content-size 64
+  
+  # 分析超大项目（默认跳过大于10GB的文件）
+  %(prog)s /data --parallel
+  
+  # 严格模式：跳过大于100MB的文件，且全文输出限制为16KB
+  %(prog)s . --max-size 100 --max-content-size 16 --mode full
+  
+  # 查看文件分类统计（不输出详细内容）
+  %(prog)s . --mode sort --output md
+  
+  # 自定义忽略规则，输出YAML格式
+  %(prog)s . --ignore "*.log,*.tmp,cache,*.min.js" --output yaml
+  
+  # 生成HTML报告并指定保存路径
+  %(prog)s /code --mode full --output html --save report.html
         """
     )
     
-    parser.add_argument("directory", help="Directory to analyze")
-    parser.add_argument("--mode", choices=["full", "framework", "sort"], default="framework",
-                       help="Output mode: full, framework, or sort (classification)")
-    parser.add_argument("--output", choices=["json", "yaml", "md", "html", "toml", "txt"], 
-                       default="json", help="Output format")
-    parser.add_argument("--ignore", default=".git,__pycache__,*.pyc,*.pyo,node_modules,.venv,venv",
-                       help="Ignore patterns, comma-separated")
-    parser.add_argument("--max-size", type=int, default=10,
-                       help="Max file size(MB) to process, larger files are skipped")
-    parser.add_argument("--max-content-size", type=int, default=32,
-                       help="Max file size(KB) for full content output in 'full' mode (default: 32)")
-    parser.add_argument("--save", help="Output file path")
-    parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--parallel", action="store_true", help="Enable parallel processing")
-    parser.add_argument("--workers", type=int, default=0,
-                       help="Number of worker threads (default: CPU count)")
+    # ===== 核心选项组 =====
+    core_group = parser.add_argument_group("核心选项", "指定输入目录和工作模式")
+    core_group.add_argument(
+        "directory", 
+        metavar="PATH",
+        help="要分析的目录路径"
+    )
+    core_group.add_argument(
+        "-m", "--mode", 
+        choices=["full", "framework", "sort"], 
+        default="framework",
+        metavar="MODE",
+        help="工作模式 (默认: %(default)s)"
+    )
+    
+    # ===== 输出控制组 =====
+    output_group = parser.add_argument_group(
+        "输出控制", 
+        "控制输出格式、保存位置和内容详细程度"
+    )
+    output_group.add_argument(
+        "-o", "--output", 
+        choices=["json", "yaml", "md", "html", "toml", "txt"], 
+        default="json",
+        metavar="FORMAT",
+        help="输出格式 (默认: %(default)s)"
+    )
+    output_group.add_argument(
+        "-s", "--save", 
+        metavar="FILE",
+        help="指定输出文件路径 (默认: 自动生成 目录/directory_digest_时间戳.扩展名)"
+    )
+    output_group.add_argument(
+        "-v", "--verbose", 
+        action="store_true",
+        help="显示详细处理信息（包括每个文件的处理状态）"
+    )
+    
+    # ===== 大小限制组（关键改进） =====
+    size_group = parser.add_argument_group(
+        "大小限制",
+        "控制文件处理的阈值。注意：--max-size 决定是否处理文件，--max-content-size 仅影响 full 模式下的内容输出"
+    )
+    size_group.add_argument(
+        "--max-size", 
+        type=int, 
+        default=10240,  # 10GB = 10 * 1024 MB
+        metavar="MB",
+        help="""
+        文件大小阈值(MB)。超过此大小的文件将被**完全跳过**：
+        不计算checksum，不分析内容，仅保留路径和大小元数据。
+        适用于排除超大日志、虚拟机镜像、数据集、媒体文件。
+        (默认: %(default)s MB = 10 GB)
+        """
+    )
+    size_group.add_argument(
+        "--max-content-size", 
+        type=int, 
+        default=32,
+        metavar="KB",
+        help="""
+        全文输出大小阈值(KB)。**仅在 --mode full 时生效**：
+        超过此大小的文件不会输出完整内容，而是输出结构化摘要和前50行预览。
+        用于防止LLM上下文窗口（通常256K tokens）被单个文件占满。
+        (默认: %(default)s KB ≈ 32,768 bytes / ~8K-16K tokens)
+        """
+    )
+    
+    # ===== 处理选项组 =====
+    proc_group = parser.add_argument_group("处理选项", "控制并行处理和文件过滤规则")
+    proc_group.add_argument(
+        "--ignore", 
+        default=".git,__pycache__,*.pyc,*.pyo,node_modules,.venv,venv,*.min.js,*.map",
+        metavar="PATTERNS",
+        help="""
+        忽略规则，逗号分隔的glob模式。
+        默认忽略版本控制、缓存、依赖目录和压缩文件: %(default)s
+        """
+    )
+    proc_group.add_argument(
+        "-p", "--parallel", 
+        action="store_true",
+        help="启用并行处理（推荐用于包含>1000个文件的大型项目）"
+    )
+    proc_group.add_argument(
+        "-w", "--workers", 
+        type=int, 
+        default=0,
+        metavar="N",
+        help="""
+        并行工作线程数。
+        0 表示自动检测 CPU 核心数 (默认: %(default)s → 实际使用 %(const)s 线程)
+        """ % {'default': 0, 'const': os.cpu_count() or 4}
+    )
     
     args = parser.parse_args()
     
-    # 配置
+    # 配置转换（单位转换：MB→Bytes, KB→Bytes）
     config = {
-        'max_file_size': args.max_size * 1024 * 1024,
-        'max_full_content_size': args.max_content_size * 1024,  # KB to bytes
+        'max_file_size': args.max_size * 1024 * 1024,        # MB 转 Bytes
+        'max_full_content_size': args.max_content_size * 1024, # KB 转 Bytes
         'ignore_patterns': [p.strip() for p in args.ignore.split(',') if p.strip()],
         'use_parallel': args.parallel,
         'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4
@@ -3068,8 +3181,11 @@ Examples:
     if args.verbose:
         print(f"Analyzing directory: {args.directory}")
         print(f"Mode: {args.mode}, Format: {args.output}")
+        print(f"Skip files larger than: {args.max_size} MB ({args.max_size/1024:.1f} GB)")
         if args.mode == "full":
-            print(f"Full content size limit: {args.max_content_size} KB")
+            print(f"Full content limit: {args.max_content_size} KB")
+        if args.parallel:
+            print(f"Parallel processing enabled with {config['max_workers']} workers")
     
     # 生成摘要
     output = digest.create_digest(args.mode)
@@ -3078,22 +3194,26 @@ Examples:
     output_path = Path(args.save) if args.save else None
     saved_path = digest.save_output(output, args.output, output_path)
     
-    # 显示统计信息
+    # 显示统计信息（增强版）
     stats = output['metadata']['statistics']
-    print(f"\nSummary Statistics:")
-    print(f"  Total files: {stats['total_files']}")
-    print(f"  Source code: {stats.get('source_code', 0)}")
-    print(f"  Config/scripts: {stats.get('config_script', 0)}")
-    print(f"  Human readable: {stats.get('human_readable', 0)}")
-    print(f"  Binary: {stats.get('binary', 0)}")
-    print(f"  Skipped (large files): {stats.get('skipped_large_files', 0)}")
-    print(f"  Total size: {stats['total_size'] / (1024*1024):.2f} MB")
-    print(f"  Processing time: {stats['processing_time']:.2f} s")
+    print(f"\n{'='*50}")
+    print(f"Directory Digest Summary")
+    print(f"{'='*50}")
+    print(f"Total files scanned:     {stats['total_files']}")
+    print(f"  ├── Source code:       {stats.get('source_code', 0)}")
+    print(f"  ├── Config/scripts:    {stats.get('config_script', 0)}")
+    print(f"  ├── Human readable:    {stats.get('human_readable', 0)}")
+    print(f"  ├── Binary:            {stats.get('binary', 0)}")
+    print(f"  └── Skipped (>10GB):   {stats.get('skipped_large_files', 0)}")
+    print(f"Total size:              {stats['total_size'] / (1024*1024*1024):.2f} GB")
+    print(f"Processing time:         {stats['processing_time']:.2f} s")
+    print(f"Output saved to:         {saved_path}")
+    print(f"{'='*50}")
     
     if args.mode == "sort" and "recommendations" in output:
         print(f"\nRecommendations:")
         for rec in output["recommendations"]:
-            print(f"  * {rec}")
+            print(f"  • {rec}")
     
     return saved_path
 
