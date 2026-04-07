@@ -51,6 +51,7 @@ class FileType(Enum):
     """文件类型枚举"""
     HUMAN_READABLE = "human_readable"    # 人类可读文本
     SOURCE_CODE = "source_code"          # 源代码
+    CONFIG_SCRIPT = "config_script"      # 配置文件/脚本（既是源代码又是人类可读）
     BINARY = "binary"                    # 二进制文件
     UNKNOWN = "unknown"                  # 未知类型
 
@@ -209,27 +210,31 @@ class FileTypeDetector:
     
     # 扩展名到类型的映射（优先级1）
     EXTENSION_MAPPING = {
-        # 人类可读文本
+        # 人类可读文本（纯文档）
         FileType.HUMAN_READABLE: [
             '.txt', '.md', '.markdown', '.rst', '.tex', '.latex',
-            '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv',
-            '.ini', '.cfg', '.conf', '.toml', '.properties',
-            '.log', '.out', '.err'
+            '.log', '.out', '.err', '.csv'
         ],
-        # 源代码
+        # 配置文件/脚本（面向人类的源代码）
+        FileType.CONFIG_SCRIPT: [
+            '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+            '.yaml', '.yml', '.json', '.xml', '.toml', 
+            '.ini', '.cfg', '.conf', '.properties', '.env', '.rc',
+            '.html', '.htm', '.css', '.scss', '.less'
+        ],
+        # 源代码（程序代码）
         FileType.SOURCE_CODE: [
             '.py', '.java', '.cpp', '.c', '.h', '.hpp', '.cc',
             '.js', '.ts', '.jsx', '.tsx', '.vue',
             '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala',
             '.m', '.mm', '.cs', '.fs', '.vb',
-            '.sh', '.bash', '.zsh', '.fish', '.ps1',
-            '.sql', '.pl', '.pm', '.r', '.lua', '.dart'
+            '.pl', '.pm', '.r', '.lua', '.dart', '.sql'
         ],
-        # 二进制文件（部分常见）
+        # 二进制文件
         FileType.BINARY: [
             '.exe', '.dll', '.so', '.dylib', '.a', '.lib',
             '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.ico',
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.ico', '.svg',
             '.mp3', '.mp4', '.avi', '.mkv', '.mov', '.wav',
             '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
             '.bin', '.dat', '.db', '.sqlite', '.sqlite3'
@@ -1960,6 +1965,39 @@ class SourceCodeAnalyzer:
         )
 
 
+    def _extract_config_structure(self, content: str, suffix: str) -> List[Dict]:
+        """从配置文件中提取结构信息"""
+        keys = []
+        try:
+            if suffix in ['.yaml', '.yml'] and YAML_AVAILABLE:
+                import yaml
+                data = yaml.safe_load(content)
+                if isinstance(data, dict):
+                    for i, key in enumerate(list(data.keys())[:20]):
+                        keys.append({"name": f"key:{key}", "line": i+1, "type": "config_key"})
+            elif suffix == '.json':
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for i, key in enumerate(list(data.keys())[:20]):
+                        keys.append({"name": f"json:{key}", "line": i+1, "type": "config_key"})
+            elif suffix in ['.ini', '.cfg', '.conf', '.env', '.rc']:
+                for i, line in enumerate(content.split('\n')[:50]):
+                    line = line.strip()
+                    if line and not line.startswith('#') and not line.startswith(';'):
+                        match = re.match(r'^\s*([^=;#\s]+)\s*=', line)
+                        if match:
+                            keys.append({"name": match.group(1).strip(), "line": i+1, "type": "config_key"})
+            elif suffix in ['.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd']:
+                # 提取函数定义
+                func_pattern = r'^\s*(?:function\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\)'
+                for i, line in enumerate(content.split('\n')):
+                    match = re.match(func_pattern, line)
+                    if match:
+                        keys.append({"name": match.group(1), "line": i+1, "type": "function"})
+        except Exception:
+            pass
+        return keys
+
 # ==================== 格式转换器 ====================
 
 class OutputFormats(Enum):
@@ -2418,13 +2456,15 @@ class DirectoryDigest:
         self.config = config or {}
         
         # 默认配置
-        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024)
+        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024)  # 10MB，跳过处理
+        # 新增：全量输出模式下，超过此大小的文件不输出全文（默认32KB）
+        self.max_full_content_size = self.config.get('max_full_content_size', 32 * 1024)
         self.ignore_patterns = self.config.get('ignore_patterns', [
             '*.pyc', '*.pyo', '*.so', '*.dll', '__pycache__', 
             '.git', '.svn', '.hg', '.DS_Store', '*.swp', '*.swo'
         ])
-        self.use_parallel = self.config.get('use_parallel', False)  # 新增：是否使用并行处理
-        self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)  # 新增：最大工作线程数
+        self.use_parallel = self.config.get('use_parallel', False)
+        self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)
         
         self.file_type_detector = FileTypeDetector()
         self.human_summarizer = HumanReadableSummarizer()
@@ -2436,20 +2476,148 @@ class DirectoryDigest:
             'total_files': 0,
             'human_readable': 0,
             'source_code': 0,
+            'config_script': 0,  # 新增统计项
             'binary': 0,
             'total_size': 0,
             'processing_time': 0
         }
     
+    def _generate_sort_output(self) -> Dict:
+        """生成分类排序输出"""
+        all_files = self._collect_all_files_flat()
+        
+        # 按类型分组
+        by_type = {
+            FileType.HUMAN_READABLE.value: [],
+            FileType.SOURCE_CODE.value: [],
+            FileType.CONFIG_SCRIPT.value: [],
+            FileType.BINARY.value: [],
+            FileType.UNKNOWN.value: []
+        }
+        
+        # 按大小分组
+        large_files = []      # > 1MB
+        medium_files = []     # 100KB - 1MB
+        small_files = []      # < 100KB
+        
+        for f in all_files:
+            file_type = f.metadata.file_type.value
+            if file_type in by_type:
+                by_type[file_type].append(f)
+            else:
+                by_type[FileType.UNKNOWN.value].append(f)
+            
+            # 按大小分组
+            size = f.metadata.size
+            if size > 1024 * 1024:
+                large_files.append(f)
+            elif size > 100 * 1024:
+                medium_files.append(f)
+            else:
+                small_files.append(f)
+        
+        # 构建报告
+        sort_report = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "root_directory": str(self.root),
+                "output_mode": "sort",
+                "statistics": self.stats
+            },
+            "classification": {},
+            "by_size": {
+                "large_files": [
+                    {"path": str(f.metadata.path.relative_to(self.root)), 
+                     "size_bytes": f.metadata.size,
+                     "size_formatted": self._format_bytes(f.metadata.size)} 
+                    for f in large_files
+                ],
+                "medium_files": [
+                    {"path": str(f.metadata.path.relative_to(self.root)), 
+                     "size_bytes": f.metadata.size,
+                     "size_formatted": self._format_bytes(f.metadata.size)} 
+                    for f in medium_files
+                ],
+                "small_files": [
+                    {"path": str(f.metadata.path.relative_to(self.root)), 
+                     "size_bytes": f.metadata.size,
+                     "size_formatted": self._format_bytes(f.metadata.size)} 
+                    for f in small_files
+                ]
+            }
+        }
+        
+        # 为每种类型生成详细信息
+        for type_name, files in by_type.items():
+            if not files:
+                continue
+                
+            # 按扩展名分组
+            by_ext = {}
+            for f in files:
+                ext = f.metadata.path.suffix.lower() or "(no extension)"
+                if ext not in by_ext:
+                    by_ext[ext] = []
+                by_ext[ext].append(str(f.metadata.path.relative_to(self.root)))
+            
+            # 计算总大小
+            total_size = sum(f.metadata.size for f in files)
+            
+            sort_report["classification"][type_name] = {
+                "count": len(files),
+                "total_size_bytes": total_size,
+                "total_size_formatted": self._format_bytes(total_size),
+                "extensions": {
+                    ext: {
+                        "count": len(paths),
+                        "files": sorted(paths)[:10],  # 只显示前10个
+                        "truncated": len(paths) > 10,
+                        "total_count": len(paths)
+                    }
+                    for ext, paths in sorted(by_ext.items(), key=lambda x: len(x[1]), reverse=True)
+                }
+            }
+        
+        # 添加建议
+        recommendations = []
+        if large_files:
+            recommendations.append(
+                f"Found {len(large_files)} large files (>1MB). "
+                f"In 'full' mode, use --max-content-size to limit full content output."
+            )
+        if by_type.get(FileType.CONFIG_SCRIPT.value):
+            count = len(by_type[FileType.CONFIG_SCRIPT.value])
+            recommendations.append(
+                f"Found {count} config/script files treated as both human-readable and source code."
+            )
+        if by_type.get(FileType.UNKNOWN.value, []):
+            count = len(by_type[FileType.UNKNOWN.value])
+            if count > 5:
+                recommendations.append(
+                    f"Found {count} unknown type files. Consider reviewing or adding to ignore patterns."
+                )
+        
+        sort_report["recommendations"] = recommendations
+        
+        return sort_report
+
+    def _format_bytes(self, size_bytes: int) -> str:
+        """格式化字节大小为人类可读"""
+        if size_bytes == 0:
+            return "0 B"
+        import math
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {units[i]}"
+
     def create_digest(self, mode: str = "framework") -> Dict:
         """
         创建目录摘要
         
         Args:
-            mode: 输出模式，"framework"（框架）或 "full"（全量）
-            
-        Returns:
-            摘要字典
+            mode: 输出模式，"framework"（框架）、"full"（全量）或 "sort"（分类排序）
         """
         import time
         start_time = time.time()
@@ -2463,8 +2631,11 @@ class DirectoryDigest:
         # 更新统计信息
         self.stats['processing_time'] = time.time() - start_time
         
-        # 生成最终输出
-        return self._generate_output(mode)
+        # 根据模式生成输出
+        if mode == "sort":
+            return self._generate_sort_output()
+        else:
+            return self._generate_output(mode)
     
     def _build_directory_structure(self, path: Path) -> DirectoryStructure:
         """递归构建目录结构"""
@@ -2574,6 +2745,11 @@ class DirectoryDigest:
             # 更新统计
             if file_type == FileType.HUMAN_READABLE:
                 self.stats['human_readable'] += 1
+            elif file_type == FileType.CONFIG_SCRIPT:
+                self.stats['config_script'] += 1
+                # 同时计入两类以便统计
+                self.stats['human_readable'] += 1
+                self.stats['source_code'] += 1
             elif file_type == FileType.SOURCE_CODE:
                 self.stats['source_code'] += 1
             elif file_type == FileType.BINARY:
@@ -2583,14 +2759,16 @@ class DirectoryDigest:
             self._calculate_hashes(file_digest)
             
             # 3. 根据文件类型处理内容
-            if file_type == FileType.HUMAN_READABLE:
+            if file_type == FileType.CONFIG_SCRIPT:
+                self._process_config_script(file_digest, mode)
+            elif file_type == FileType.HUMAN_READABLE:
                 self._process_human_readable(file_digest, mode)
             elif file_type == FileType.SOURCE_CODE:
                 self._process_source_code(file_digest, mode)
             # 二进制文件不需要额外处理
             
         except Exception as e:
-            print(f"警告: 处理文件 {filepath} 时出错: {e}", file=sys.stderr)
+            print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
             file_digest.metadata.file_type = FileType.BINARY
     
     def _calculate_hashes(self, file_digest: FileDigest):
@@ -2613,16 +2791,13 @@ class DirectoryDigest:
         filepath = file_digest.metadata.path
         
         try:
-            # 尝试以UTF-8读取
+            # 读取文件（编码处理逻辑保持不变）
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
             except UnicodeDecodeError:
-                # 如果UTF-8失败，尝试其他编码
                 with open(filepath, 'rb') as f:
                     raw_content = f.read()
-                    
-                    # 如果没有chardet，尝试常见编码
                     if not CHARDET_AVAILABLE:
                         encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
                         for encoding in encodings_to_try:
@@ -2632,37 +2807,75 @@ class DirectoryDigest:
                             except UnicodeDecodeError:
                                 continue
                         else:
-                            # 所有编码都失败，使用latin-1并忽略错误
                             content = raw_content.decode('latin-1', errors='ignore')
                     else:
-                        # 使用chardet检测编码
                         result = chardet.detect(raw_content)
                         encoding = result['encoding'] if result['encoding'] else 'latin-1'
-                        # 尝试解码
-                        try:
-                            content = raw_content.decode(encoding, errors='ignore')
-                        except Exception:
-                            # 如果还是失败，使用latin-1并忽略错误
-                            content = raw_content.decode('latin-1', errors='ignore')
+                        content = raw_content.decode(encoding, errors='ignore')
             
-            # 全量模式存储完整内容
+            # 全量模式检查：仅当文件大小不超过阈值时才存储全文
             if mode == "full":
-                file_digest.full_content = content
+                if file_digest.metadata.size <= self.max_full_content_size:
+                    file_digest.full_content = content
+                else:
+                    # 超过阈值，生成摘要说明而非全文
+                    lines = content.split('\n')
+                    preview_lines = lines[:50]  # 前50行预览
+                    preview = '\n'.join(preview_lines)
+                    
+                    file_digest.full_content = (
+                        f"[FILE TOO LARGE - FULL CONTENT OMITTED]\n"
+                        f"File size: {file_digest.metadata.size / 1024:.2f} KB\n"
+                        f"Size limit: {self.max_full_content_size / 1024:.2f} KB\n"
+                        f"Total lines: {len(lines)}\n"
+                        f"Characters: {len(content)}\n"
+                        f"\n--- PREVIEW (first {len(preview_lines)} lines) ---\n"
+                        f"{preview}\n"
+                        f"\n--- END PREVIEW ---"
+                    )
             
-            # 生成摘要
+            # 生成摘要（始终生成）
             summary = self.human_summarizer.summarize(filepath, content)
             file_digest.human_readable_summary = summary
             
         except Exception as e:
-            print(f"警告: 处理人类可读文件 {filepath} 时出错: {e}", file=sys.stderr)
-            # 创建基本摘要
+            print(f"Warning: Error processing human readable file {filepath}: {e}", file=sys.stderr)
             file_digest.human_readable_summary = HumanReadableSummary(
-                line_count=0,
-                word_count=0,
-                character_count=0,
-                summary=f"无法读取文件内容: {str(e)}"
+                line_count=0, word_count=0, character_count=0,
+                summary=f"Failed to read file content: {str(e)}"
             )
     
+    def _process_config_script(self, file_digest: FileDigest, mode: str):
+        """处理配置文件/脚本（既是源代码又是人类可读）"""
+        # 首先作为人类可读文件处理（生成摘要和可能的完整内容）
+        self._process_human_readable(file_digest, mode)
+        
+        filepath = file_digest.metadata.path
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 获取源代码分析（复用现有分析器）
+            analysis = self.source_analyzer.analyze(filepath, content)
+            
+            # 标记为配置文件/脚本类型
+            if analysis.language == "unknown":
+                analysis.language = f"config/{filepath.suffix.lstrip('.')}"
+            else:
+                analysis.language = f"config_script/{analysis.language}"
+            
+            # 提取配置结构（键名、函数等）
+            config_structure = self._extract_config_structure(content, filepath.suffix.lower())
+            if config_structure:
+                # 合并到函数列表中（或作为单独字段）
+                analysis.functions = config_structure + analysis.functions
+            
+            file_digest.source_code_analysis = analysis
+            
+        except Exception as e:
+            print(f"Warning: Error analyzing config file {filepath}: {e}", file=sys.stderr)
+
     def _process_source_code(self, file_digest: FileDigest, mode: str):
         """处理源代码文件"""
         filepath = file_digest.metadata.path
@@ -2719,6 +2932,19 @@ class DirectoryDigest:
                 blank_lines=0
             )
     
+    def _collect_all_files_flat(self) -> List[FileDigest]:
+        """扁平化收集所有文件"""
+        all_files = []
+        
+        def collect(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect(subdir)
+        
+        if self.structure:
+            collect(self.structure)
+        return all_files
+
     def _generate_output(self, mode: str) -> Dict:
         """生成最终输出"""
         if not self.structure:
@@ -2764,57 +2990,54 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="目录知识摘要器 - 将文件系统递归消化为LLM可理解的上下文摘要",
+        description="Directory Digest Tool - Recursive directory summarizer for LLM context",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
+Examples:
   %(prog)s /path/to/directory --mode full --output json
-  %(prog)s . --mode framework --output md --parallel --workers 8
+  %(prog)s . --mode sort --output md                    # List files by category
+  %(prog)s . --mode full --max-content-size 64          # Limit full content to 64KB
         """
     )
     
-    parser.add_argument("directory", help="要分析的目录路径")
-    parser.add_argument("--mode", choices=["full", "framework"], default="framework",
-                       help="输出模式: full(全量) 或 framework(框架)")
+    parser.add_argument("directory", help="Directory to analyze")
+    parser.add_argument("--mode", choices=["full", "framework", "sort"], default="framework",
+                       help="Output mode: full, framework, or sort (classification)")
     parser.add_argument("--output", choices=["json", "yaml", "md", "html", "toml", "txt"], 
-                       default="json", help="输出格式")
-    parser.add_argument("--ignore", default=".git,__pycache__,*.pyc,*.pyo",
-                       help="忽略的模式，用逗号分隔")
+                       default="json", help="Output format")
+    parser.add_argument("--ignore", default=".git,__pycache__,*.pyc,*.pyo,node_modules,.venv,venv",
+                       help="Ignore patterns, comma-separated")
     parser.add_argument("--max-size", type=int, default=10,
-                       help="最大文件大小(MB)，超过此大小的文件只分析元信息")
-    parser.add_argument("--save", help="输出文件路径，默认为目录名_digest.json")
-    parser.add_argument("--verbose", action="store_true", help="显示详细输出")
-    
-    # 新增参数
-    parser.add_argument("--parallel", action="store_true", help="启用并行处理")
+                       help="Max file size(MB) to process, larger files are skipped")
+    parser.add_argument("--max-content-size", type=int, default=32,
+                       help="Max file size(KB) for full content output in 'full' mode (default: 32)")
+    parser.add_argument("--save", help="Output file path")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--parallel", action="store_true", help="Enable parallel processing")
     parser.add_argument("--workers", type=int, default=0,
-                       help="并行工作线程数（默认: CPU核心数）")
-    parser.add_argument("--analyze-complexity", action="store_true", 
-                       help="分析代码复杂度")
-    parser.add_argument("--generate-charts", action="store_true",
-                       help="生成统计图表（仅HTML输出）")
+                       help="Number of worker threads (default: CPU count)")
     
     args = parser.parse_args()
     
     # 配置
     config = {
         'max_file_size': args.max_size * 1024 * 1024,
+        'max_full_content_size': args.max_content_size * 1024,  # KB to bytes
         'ignore_patterns': [p.strip() for p in args.ignore.split(',') if p.strip()],
         'use_parallel': args.parallel,
-        'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4,
-        'analyze_complexity': args.analyze_complexity
+        'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4
     }
     
     # 创建摘要器
     digest = DirectoryDigest(args.directory, config)
     
-    # 生成摘要
     if args.verbose:
-        print(f"开始分析目录: {args.directory}")
-        print(f"模式: {args.mode}, 格式: {args.output}")
-        if args.parallel:
-            print(f"并行处理: 启用, 工作线程: {config['max_workers']}")
+        print(f"Analyzing directory: {args.directory}")
+        print(f"Mode: {args.mode}, Format: {args.output}")
+        if args.mode == "full":
+            print(f"Full content size limit: {args.max_content_size} KB")
     
+    # 生成摘要
     output = digest.create_digest(args.mode)
     
     # 保存输出
@@ -2823,16 +3046,19 @@ def main():
     
     # 显示统计信息
     stats = output['metadata']['statistics']
-    print(f"\n📊 摘要统计:")
-    print(f"  📄 总文件数: {stats['total_files']}")
-    print(f"  📝 源代码文件: {stats['source_code']}")
-    print(f"  📖 文本文件: {stats['human_readable']}")
-    print(f"  📦 二进制文件: {stats['binary']}")
-    print(f"  💾 总大小: {stats['total_size'] / (1024*1024):.2f} MB")
-    print(f"  ⏱️ 处理时间: {stats['processing_time']:.2f} 秒")
+    print(f"\nSummary Statistics:")
+    print(f"  Total files: {stats['total_files']}")
+    print(f"  Source code: {stats.get('source_code', 0)}")
+    print(f"  Config/scripts: {stats.get('config_script', 0)}")
+    print(f"  Human readable: {stats.get('human_readable', 0)}")
+    print(f"  Binary: {stats.get('binary', 0)}")
+    print(f"  Total size: {stats['total_size'] / (1024*1024):.2f} MB")
+    print(f"  Processing time: {stats['processing_time']:.2f} s")
     
-    if args.verbose:
-        print(f"\n✅ 分析完成！报告已保存到: {saved_path}")
+    if args.mode == "sort" and "recommendations" in output:
+        print(f"\nRecommendations:")
+        for rec in output["recommendations"]:
+            print(f"  * {rec}")
     
     return saved_path
 
