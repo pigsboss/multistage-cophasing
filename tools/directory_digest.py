@@ -27,6 +27,21 @@ from datetime import datetime
 import re
 from enum import Enum
 
+# 依赖检测
+try:
+    import chardet
+    CHARDET_AVAILABLE = True
+except ImportError:
+    CHARDET_AVAILABLE = False
+    print("警告: chardet 库未安装，将使用简化的编码检测", file=sys.stderr)
+
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    print("警告: PyYAML 库未安装，YAML文件解析功能受限", file=sys.stderr)
+
 
 # ==================== 数据类型定义 ====================
 
@@ -299,18 +314,440 @@ class HumanReadableSummarizer:
     
     @staticmethod
     def summarize(filepath: Path, content: str, max_lines: int = 10) -> HumanReadableSummary:
-        """生成人类可读文本摘要"""
-        # 待实现
+        """
+        生成人类可读文本摘要
+        
+        Args:
+            filepath: 文件路径
+            content: 文件内容
+            max_lines: 提取的最大行数
+            
+        Returns:
+            人类可读文本摘要对象
+        """
+        if not content:
+            return HumanReadableSummary(
+                line_count=0,
+                word_count=0,
+                character_count=0
+            )
+        
+        # 检测编码
+        encoding = HumanReadableSummarizer._detect_encoding(content)
+        
+        # 分割行
+        lines = content.split('\n')
+        line_count = len(lines)
+        
+        # 统计基本信息
+        words = re.findall(r'\b[\w\u4e00-\u9fff]+\b', content)
+        word_count = len(words)
+        
+        # 提取标题
+        title = HumanReadableSummarizer._extract_title(filepath, content, lines)
+        
+        # 检测语言
+        language = HumanReadableSummarizer._detect_language(content)
+        
+        # 提取关键章节
+        key_sections = HumanReadableSummarizer._extract_key_sections(filepath, content, lines)
+        
+        # 生成文本摘要
+        summary = HumanReadableSummarizer._generate_text_summary(
+            filepath, content, lines, max_lines
+        )
+        
+        # 提取首尾行
+        first_lines = lines[:min(5, len(lines))]
+        last_lines = lines[-min(3, len(lines)):] if len(lines) > 3 else []
+        
         return HumanReadableSummary(
-            line_count=len(content.split('\n')),
-            word_count=len(re.findall(r'\b\w+\b', content)),
-            character_count=len(content)
+            title=title,
+            line_count=line_count,
+            word_count=word_count,
+            character_count=len(content),
+            language=language,
+            encoding=encoding,
+            first_lines=first_lines,
+            last_lines=last_lines,
+            key_sections=key_sections[:10],  # 最多10个关键章节
+            summary=summary
         )
     
     @staticmethod
-    def _detect_language(content: str) -> Optional[str]:
-        """简单检测文本语言"""
+    def _detect_encoding(content: str) -> str:
+        """检测文本编码"""
+        try:
+            # 尝试UTF-8
+            content.encode('utf-8')
+            return 'utf-8'
+        except UnicodeEncodeError:
+            # 如果没有chardet，使用简化检测
+            if not CHARDET_AVAILABLE:
+                return 'unknown'
+            
+            try:
+                # 使用chardet检测
+                if isinstance(content, str):
+                    byte_content = content.encode('latin-1', errors='ignore')
+                else:
+                    byte_content = content
+                
+                detection = chardet.detect(byte_content)
+                return detection.get('encoding', 'unknown')
+            except Exception:
+                return 'unknown'
+    
+    @staticmethod
+    def _extract_title(filepath: Path, content: str, lines: List[str]) -> Optional[str]:
+        """提取标题"""
+        # 1. 从文件名提取（去除扩展名）
+        filename = filepath.stem
+        if filename and filename != filepath.name:
+            # 简单的文件名清理
+            cleaned = filename.replace('_', ' ').replace('-', ' ').title()
+            if len(cleaned) > 3 and len(cleaned) < 50:
+                return cleaned
+        
+        # 2. 从内容中提取标题
+        # 检查前几行是否有明显的标题模式
+        title_patterns = [
+            # Markdown标题
+            (r'^#\s+(.+)$', 1),        # # 标题
+            (r'^##\s+(.+)$', 1),       # ## 标题
+            (r'^###\s+(.+)$', 1),      # ### 标题
+            # 下划线标题
+            (r'^(.+)\n=+$', 1),        # 标题\n=====
+            (r'^(.+)\n-+$', 1),        # 标题\n-----
+            # HTML标题
+            (r'^<h1[^>]*>(.+?)</h1>', 1),
+            (r'^<title[^>]*>(.+?)</title>', 1),
+            # 配置文件的标题部分
+            (r'^\[(.+)\]$', 1),        # [section]
+            # 文档标题行（通常以大写字母开头且较短）
+            (r'^([A-Z][A-Za-z\s]{5,40})$', 1),
+            # 中文标题行（通常没有特殊符号，长度适中）
+            (r'^([\u4e00-\u9fff\s]{4,30})$', 1),
+        ]
+        
+        # 检查前10行
+        for i in range(min(10, len(lines))):
+            line = lines[i].strip()
+            if not line:
+                continue
+            
+            for pattern, group_idx in title_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    title_candidate = match.group(group_idx).strip()
+                    if 3 <= len(title_candidate) <= 100:
+                        return title_candidate
+        
+        # 3. 如果还没有找到，使用第一行非空行
+        for line in lines:
+            line = line.strip()
+            if line and len(line) < 80:
+                return line[:80]
+        
         return None
+    
+    @staticmethod
+    def _detect_language(content: str) -> Optional[str]:
+        """检测文本语言"""
+        # 统计中文字符
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]', content)
+        chinese_count = len(chinese_chars)
+        
+        # 统计英文字符和单词
+        english_words = re.findall(r'\b[a-zA-Z]{3,}\b', content)
+        english_count = len(english_words)
+        
+        # 计算比例
+        total_meaningful = chinese_count + english_count
+        if total_meaningful == 0:
+            return None
+        
+        chinese_ratio = chinese_count / total_meaningful
+        
+        if chinese_ratio > 0.7:
+            return "zh"  # 中文为主
+        elif chinese_ratio < 0.3:
+            return "en"  # 英文为主
+        else:
+            return "mixed"  # 混合
+    
+    @staticmethod
+    def _extract_key_sections(filepath: Path, content: str, lines: List[str]) -> List[Tuple[str, str]]:
+        """提取关键章节"""
+        key_sections = []
+        suffix = filepath.suffix.lower()
+        
+        # 根据文件类型使用不同的章节提取策略
+        if suffix in ['.md', '.markdown', '.rst']:
+            # Markdown/RST文档
+            key_sections = HumanReadableSummarizer._extract_markdown_sections(lines)
+        elif suffix in ['.json', '.yaml', '.yml']:
+            # 结构化数据文件
+            key_sections = HumanReadableSummarizer._extract_structured_sections(content, suffix)
+        elif suffix in ['.ini', '.cfg', '.conf', '.toml', '.properties']:
+            # 配置文件
+            key_sections = HumanReadableSummarizer._extract_config_sections(lines)
+        elif suffix in ['.xml', '.html', '.htm']:
+            # XML/HTML文件
+            key_sections = HumanReadableSummarizer._extract_xml_sections(content)
+        else:
+            # 通用文本文件
+            key_sections = HumanReadableSummarizer._extract_general_sections(lines)
+        
+        return key_sections
+    
+    @staticmethod
+    def _extract_markdown_sections(lines: List[str]) -> List[Tuple[str, str]]:
+        """提取Markdown文档的章节"""
+        sections = []
+        current_section = None
+        current_content = []
+        
+        for line in lines:
+            # 检测Markdown标题
+            match = re.match(r'^(#{1,6})\s+(.+)$', line.strip())
+            if match:
+                # 保存前一章节
+                if current_section and current_content:
+                    sections.append((current_section, '\n'.join(current_content[:5])))
+                
+                # 开始新章节
+                level = len(match.group(1))
+                title = match.group(2).strip()
+                current_section = f"{'#' * level} {title}"
+                current_content = []
+            elif current_section:
+                current_content.append(line)
+        
+        # 保存最后一个章节
+        if current_section and current_content:
+            sections.append((current_section, '\n'.join(current_content[:5])))
+        
+        return sections
+    
+    @staticmethod
+    def _extract_structured_sections(content: str, suffix: str) -> List[Tuple[str, str]]:
+        """提取结构化数据文件的章节"""
+        sections = []
+        
+        try:
+            if suffix == '.json':
+                # JSON文件：提取顶层键
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for key in list(data.keys())[:10]:  # 最多10个键
+                        value = data[key]
+                        if isinstance(value, (dict, list)):
+                            sections.append((f"Key: {key}", f"Type: {type(value).__name__}"))
+                        else:
+                            sections.append((f"Key: {key}", f"Value: {str(value)[:100]}"))
+            
+            elif suffix in ['.yaml', '.yml']:
+                # YAML文件：提取顶层键
+                if not YAML_AVAILABLE:
+                    # 如果没有yaml库，尝试简单的文本解析
+                    lines = content.split('\n')
+                    for line in lines[:20]:  # 只检查前20行
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            # 简单的键值对检测
+                            if ':' in line:
+                                key = line.split(':', 1)[0].strip()
+                                sections.append((f"YAML Key: {key}", "..."))
+                    return sections
+                
+                # 如果有yaml库，使用它解析
+                import yaml
+                data = yaml.safe_load(content)
+                if isinstance(data, dict):
+                    for key in list(data.keys())[:10]:
+                        value = data[key]
+                        if isinstance(value, (dict, list)):
+                            sections.append((f"Key: {key}", f"Type: {type(value).__name__}"))
+                        else:
+                            sections.append((f"Key: {key}", f"Value: {str(value)[:100]}"))
+        
+        except Exception:
+            # 解析失败时返回空列表
+            pass
+        
+        return sections
+    
+    @staticmethod
+    def _extract_config_sections(lines: List[str]) -> List[Tuple[str, str]]:
+        """提取配置文件的章节"""
+        sections = []
+        current_section = None
+        current_content = []
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # 检测INI格式的章节 [section]
+            ini_match = re.match(r'^\[(.+)\]$', line_stripped)
+            if ini_match:
+                # 保存前一章节
+                if current_section and current_content:
+                    sections.append((current_section, '\n'.join(current_content[:5])))
+                
+                # 开始新章节
+                current_section = f"[{ini_match.group(1)}]"
+                current_content = []
+            
+            # 检测TOML格式的章节 [section]
+            elif line_stripped.startswith('[') and ']' in line_stripped:
+                # 保存前一章节
+                if current_section and current_content:
+                    sections.append((current_section, '\n'.join(current_content[:5])))
+                
+                # 开始新章节
+                current_section = line_stripped
+                current_content = []
+            
+            elif current_section:
+                # 添加键值对到当前章节
+                if '=' in line and not line.startswith('#') and not line.startswith(';'):
+                    current_content.append(line.strip())
+        
+        # 保存最后一个章节
+        if current_section and current_content:
+            sections.append((current_section, '\n'.join(current_content[:5])))
+        
+        return sections
+    
+    @staticmethod
+    def _extract_xml_sections(content: str) -> List[Tuple[str, str]]:
+        """提取XML/HTML文件的章节"""
+        sections = []
+        
+        # 简单正则匹配XML标签
+        # 匹配形如 <tag attr="value">content</tag> 的结构
+        xml_patterns = [
+            r'<(\w+)[^>]*>.*?</\1>',  # 普通标签
+            r'<([a-zA-Z][a-zA-Z0-9]*)[^>]*/>',  # 自闭合标签
+            r'<!--(.*?)-->',  # 注释
+        ]
+        
+        for pattern in xml_patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches[:10]:  # 最多10个匹配
+                if isinstance(match, tuple):
+                    tag = match[0] if match else "Unknown"
+                    sections.append((f"XML Tag: {tag}", "..."))
+                else:
+                    sections.append((f"XML Element", str(match)[:100]))
+        
+        return sections
+    
+    @staticmethod
+    def _extract_general_sections(lines: List[str]) -> List[Tuple[str, str]]:
+        """提取通用文本文件的章节"""
+        sections = []
+        
+        # 检测常见的章节标题模式
+        section_patterns = [
+            # 带有编号的章节
+            (r'^(第[一二三四五六七八九十]+章|[0-9]+(\.[0-9]+)*\s+[^\s].*)$', 1),
+            # 大写字母开头的行（可能是标题）
+            (r'^[A-Z][A-Za-z\s]{10,80}$', 0),
+            # 中文标题（无特殊符号，长度适中）
+            (r'^[\u4e00-\u9fff\s]{4,50}$', 0),
+            # 下划线分隔的标题
+            (r'^(.+)\n[-=]{3,}$', 1),
+        ]
+        
+        for i in range(min(50, len(lines))):  # 只检查前50行
+            line = lines[i].strip()
+            if not line or len(line) < 5:
+                continue
+            
+            for pattern, group_idx in section_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    if group_idx == 0:
+                        title = line
+                    else:
+                        title = match.group(group_idx)
+                    
+                    # 收集接下来的几行作为内容
+                    content_lines = []
+                    for j in range(i+1, min(i+6, len(lines))):
+                        if lines[j].strip():
+                            content_lines.append(lines[j].strip()[:100])
+                    
+                    if content_lines:
+                        sections.append((title, ' '.join(content_lines)[:200]))
+                    break
+        
+        return sections
+    
+    @staticmethod
+    def _generate_text_summary(filepath: Path, content: str, lines: List[str], max_lines: int) -> Optional[str]:
+        """生成文本摘要"""
+        if not content:
+            return None
+        
+        suffix = filepath.suffix.lower()
+        line_count = len(lines)
+        
+        # 生成基础摘要
+        summary_parts = []
+        
+        # 1. 基本信息
+        summary_parts.append(f"文件类型: {suffix[1:] if suffix else '文本文件'}")
+        summary_parts.append(f"总行数: {line_count}")
+        summary_parts.append(f"总字数: {len(re.findall(r'\b[\w\u4e00-\u9fff]+\b', content))}")
+        
+        # 2. 根据文件类型添加特定信息
+        if suffix in ['.md', '.markdown', '.rst']:
+            # 文档文件：统计标题数量
+            heading_count = sum(1 for line in lines if re.match(r'^#{1,6}\s+', line.strip()))
+            summary_parts.append(f"标题数量: {heading_count}")
+        
+        elif suffix == '.json':
+            # JSON文件：结构信息
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    summary_parts.append(f"顶层键数量: {len(data)}")
+                    keys = list(data.keys())[:5]
+                    summary_parts.append(f"主要键: {', '.join(keys)}")
+            except Exception:
+                summary_parts.append("JSON结构: 无效或无法解析")
+        
+        elif suffix in ['.yaml', '.yml']:
+            # YAML文件：结构信息
+            if not YAML_AVAILABLE:
+                summary_parts.append("YAML结构: 未安装PyYAML，跳过详细解析")
+            else:
+                try:
+                    import yaml
+                    data = yaml.safe_load(content)
+                    if isinstance(data, dict):
+                        summary_parts.append(f"顶层键数量: {len(data)}")
+                        keys = list(data.keys())[:5]
+                        summary_parts.append(f"主要键: {', '.join(keys)}")
+                except Exception:
+                    summary_parts.append("YAML结构: 无效或无法解析")
+        
+        # 3. 内容摘要（前几行和后几行）
+        if line_count > max_lines * 2:
+            first_part = '\n'.join(lines[:max_lines])
+            last_part = '\n'.join(lines[-max_lines:])
+            summary_parts.append(f"\n开头部分（前{max_lines}行）：")
+            summary_parts.append(first_part)
+            summary_parts.append(f"\n结尾部分（后{max_lines}行）：")
+            summary_parts.append(last_part)
+        else:
+            summary_parts.append("\n完整内容：")
+            summary_parts.append(content[:500] + ("..." if len(content) > 500 else ""))
+        
+        return '\n'.join(summary_parts)
 
 
 class SourceCodeAnalyzer:
@@ -566,24 +1003,55 @@ class DirectoryDigest:
         filepath = file_digest.metadata.path
         
         try:
-            # 读取文件内容
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
+            # 尝试以UTF-8读取
             try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                # 如果UTF-8失败，尝试其他编码
                 with open(filepath, 'rb') as f:
                     raw_content = f.read()
-                    content = raw_content.decode('latin-1', errors='ignore')
-            except Exception:
-                content = ""
-        
-        # 全量模式存储完整内容
-        if mode == "full":
-            file_digest.full_content = content
-        
-        # 生成摘要
-        summary = self.human_summarizer.summarize(filepath, content)
-        file_digest.human_readable_summary = summary
+                    
+                    # 如果没有chardet，尝试常见编码
+                    if not CHARDET_AVAILABLE:
+                        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                        for encoding in encodings_to_try:
+                            try:
+                                content = raw_content.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        else:
+                            # 所有编码都失败，使用latin-1并忽略错误
+                            content = raw_content.decode('latin-1', errors='ignore')
+                    else:
+                        # 使用chardet检测编码
+                        result = chardet.detect(raw_content)
+                        encoding = result['encoding'] if result['encoding'] else 'latin-1'
+                        # 尝试解码
+                        try:
+                            content = raw_content.decode(encoding, errors='ignore')
+                        except Exception:
+                            # 如果还是失败，使用latin-1并忽略错误
+                            content = raw_content.decode('latin-1', errors='ignore')
+            
+            # 全量模式存储完整内容
+            if mode == "full":
+                file_digest.full_content = content
+            
+            # 生成摘要
+            summary = self.human_summarizer.summarize(filepath, content)
+            file_digest.human_readable_summary = summary
+            
+        except Exception as e:
+            print(f"警告: 处理人类可读文件 {filepath} 时出错: {e}", file=sys.stderr)
+            # 创建基本摘要
+            file_digest.human_readable_summary = HumanReadableSummary(
+                line_count=0,
+                word_count=0,
+                character_count=0,
+                summary=f"无法读取文件内容: {str(e)}"
+            )
     
     def _process_source_code(self, file_digest: FileDigest, mode: str):
         """处理源代码文件"""
