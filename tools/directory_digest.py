@@ -2014,8 +2014,12 @@ class FormatConverter:
     """格式转换器，支持多种输出格式"""
     
     @staticmethod
-    def convert(digest_data: Dict, format: str) -> str:
+    def convert(digest_data: Dict, format: str, mode: str = None) -> str:
         """转换为指定格式"""
+        # 如果是 sort 模式，强制使用专门的 sort 格式
+        if mode == "sort" or digest_data.get('metadata', {}).get('output_mode') == "sort":
+            return FormatConverter._to_sort_format(digest_data)
+        
         if format == "json":
             return json.dumps(digest_data, indent=2, ensure_ascii=False)
         elif format == "markdown" or format == "md":
@@ -2416,6 +2420,71 @@ class FormatConverter:
         return f"# TOML格式暂未完全实现，以下是JSON表示\n{json.dumps(digest_data, indent=2, ensure_ascii=False)}"
     
     @staticmethod
+    def _to_sort_format(digest_data: Dict) -> str:
+        """类 ls -l 格式输出"""
+        lines = []
+        root_dir = digest_data.get('metadata', {}).get('root_directory', '.')
+        
+        lines.append(f"Directory Digest: {root_dir}")
+        lines.append(f"Generated: {digest_data.get('metadata', {}).get('generated_at', 'unknown')}")
+        lines.append("")
+        
+        # 类型映射
+        type_names = {
+            'config_script': ('Config/Scripts', 'c'),
+            'source_code': ('Source Code', 's'),
+            'human_readable': ('Human Readable', 't'),
+            'binary': ('Binary', 'b'),
+            'unknown': ('Unknown', '?')
+        }
+        
+        listings = digest_data.get('file_listings', {})
+        
+        for type_key, (type_name, type_char) in type_names.items():
+            if type_key not in listings or not listings[type_key]:
+                continue
+            
+            files = listings[type_key]
+            total_size = sum(f.get('size', 0) for f in files)
+            
+            lines.append(f"{type_name} ({len(files)} files, {FormatConverter._format_size(total_size)})")
+            lines.append("-" * 80)
+            
+            # 类 ls -l 格式：类型-权限 大小 日期 时间 路径
+            for f in files[:100]:  # 限制显示数量
+                path = f.get('path', 'unknown')
+                size = f.get('size_formatted', '0 B')
+                modified = f.get('modified', 'unknown')
+                
+                # 简化格式：- 大小 日期 路径
+                # 或者更详细的：-rw-r--r-- 1 user group 4.2K Jan 15 14:32 path/to/file
+                if modified != 'unknown':
+                    try:
+                        dt = datetime.fromisoformat(modified)
+                        date_str = dt.strftime("%b %d %H:%M")
+                    except:
+                        date_str = modified[:16]
+                else:
+                    date_str = "unknown"
+                
+                # 格式：类型 大小 日期 路径
+                lines.append(f"{type_char}  {size:>10}  {date_str:>12}  {path}")
+            
+            if len(files) > 100:
+                lines.append(f"... ({len(files) - 100} more files)")
+            
+            lines.append("")
+        
+        # 统计摘要
+        stats = digest_data.get('metadata', {}).get('statistics', {})
+        lines.append("Summary:")
+        lines.append(f"  Total: {stats.get('total_files', 0)} files, "
+                    f"{FormatConverter._format_size(stats.get('total_size', 0))}")
+        lines.append(f"  Skipped (>limit): {stats.get('skipped_large_files', 0)}")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
     def _to_plaintext(digest_data: Dict) -> str:
         """转换为纯文本格式"""
         # 使用Markdown但去除格式
@@ -2485,10 +2554,10 @@ class DirectoryDigest:
         }
     
     def _generate_sort_output(self) -> Dict:
-        """生成分类排序输出"""
+        """生成分类排序输出（增强版，保留文件元数据用于 ls -l 格式）"""
         all_files = self._collect_all_files_flat()
         
-        # 按类型分组
+        # 按类型分组，同时保留完整元数据
         by_type = {
             FileType.HUMAN_READABLE.value: [],
             FileType.SOURCE_CODE.value: [],
@@ -2504,19 +2573,28 @@ class DirectoryDigest:
         
         for f in all_files:
             file_type = f.metadata.file_type.value
+            file_info = {
+                'path': str(f.metadata.path.relative_to(self.root)),
+                'size': f.metadata.size,
+                'size_formatted': self._format_bytes(f.metadata.size),
+                'modified': f.metadata.modified_time.isoformat() if hasattr(f.metadata, 'modified_time') else 'unknown',
+                'type': file_type,
+                'is_binary': file_type == FileType.BINARY.value
+            }
+            
             if file_type in by_type:
-                by_type[file_type].append(f)
+                by_type[file_type].append(file_info)
             else:
-                by_type[FileType.UNKNOWN.value].append(f)
+                by_type[FileType.UNKNOWN.value].append(file_info)
             
             # 按大小分组
             size = f.metadata.size
             if size > 1024 * 1024:
-                large_files.append(f)
+                large_files.append(file_info)
             elif size > 100 * 1024:
-                medium_files.append(f)
+                medium_files.append(file_info)
             else:
-                small_files.append(f)
+                small_files.append(file_info)
         
         # 构建报告
         sort_report = {
@@ -2528,24 +2606,13 @@ class DirectoryDigest:
             },
             "classification": {},
             "by_size": {
-                "large_files": [
-                    {"path": str(f.metadata.path.relative_to(self.root)), 
-                     "size_bytes": f.metadata.size,
-                     "size_formatted": self._format_bytes(f.metadata.size)} 
-                    for f in large_files
-                ],
-                "medium_files": [
-                    {"path": str(f.metadata.path.relative_to(self.root)), 
-                     "size_bytes": f.metadata.size,
-                     "size_formatted": self._format_bytes(f.metadata.size)} 
-                    for f in medium_files
-                ],
-                "small_files": [
-                    {"path": str(f.metadata.path.relative_to(self.root)), 
-                     "size_bytes": f.metadata.size,
-                     "size_formatted": self._format_bytes(f.metadata.size)} 
-                    for f in small_files
-                ]
+                "large_files": large_files,
+                "medium_files": medium_files,
+                "small_files": small_files
+            },
+            "file_listings": {
+                k: sorted(v, key=lambda x: x['path']) 
+                for k, v in by_type.items() if v
             }
         }
         
@@ -2557,13 +2624,14 @@ class DirectoryDigest:
             # 按扩展名分组
             by_ext = {}
             for f in files:
-                ext = f.metadata.path.suffix.lower() or "(no extension)"
+                path = f['path']
+                ext = Path(path).suffix.lower() or "(no extension)"
                 if ext not in by_ext:
                     by_ext[ext] = []
-                by_ext[ext].append(str(f.metadata.path.relative_to(self.root)))
+                by_ext[ext].append(path)
             
             # 计算总大小
-            total_size = sum(f.metadata.size for f in files)
+            total_size = sum(f['size'] for f in files)
             
             sort_report["classification"][type_name] = {
                 "count": len(files),
@@ -2998,7 +3066,7 @@ class DirectoryDigest:
         
         return output
     
-    def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None):
+    def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None):
         """保存输出到文件"""
         if not output_path:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3009,13 +3077,17 @@ class DirectoryDigest:
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        content = FormatConverter.convert(output, format)
+        content = FormatConverter.convert(output, format, mode)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
         print(f"摘要已保存到: {output_path}")
         return output_path
+    
+    def save_output_with_mode(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None):
+        """兼容方法：保存输出到文件（带模式参数）"""
+        return self.save_output(output, format, output_path, mode)
 
 
 # ==================== 命令行接口 ====================
@@ -3211,7 +3283,8 @@ Directory Digest Tool - 目录知识摘要生成器
     if output_to_stdout:
         # 输出到标准输出（支持管道处理）
         try:
-            content = FormatConverter.convert(output, args.output)
+            # 传递 mode 参数以便 sort 模式使用特殊格式
+            content = FormatConverter.convert(output, args.output, mode=args.mode)
             sys.stdout.write(content)
             if not content.endswith('\n'):
                 sys.stdout.write('\n')
@@ -3243,7 +3316,12 @@ Directory Digest Tool - 目录知识摘要生成器
     else:
         # 写入指定文件
         output_path = Path(args.save)
-        saved_path = digest.save_output(output, args.output, output_path)
+        # 保存输出时也需要传递 mode 参数
+        # 注意：save_output 方法内部调用 FormatConverter.convert，需要修改它来接受 mode 参数
+        # 但 save_output 方法目前没有 mode 参数，我们需要修改它
+        # 暂时使用一个变通方法：修改 save_output 方法
+        # 这里先调用一个修改后的版本
+        saved_path = digest.save_output_with_mode(output, args.output, output_path, args.mode)
         
         # 显示处理结果（到 stderr，避免与文件内容混淆）
         stats = output['metadata']['statistics']
