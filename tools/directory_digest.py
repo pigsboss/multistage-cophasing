@@ -2050,6 +2050,168 @@ class SourceCodeAnalyzer:
             pass
         return keys
 
+# ==================== 内容分析器 ====================
+
+class ContentAnalyzer:
+    """基于内容特征的动态分类器"""
+    
+    @staticmethod
+    def calculate_entropy(content: str) -> float:
+        """计算香农熵"""
+        if not content:
+            return 0.0
+        from collections import Counter
+        import math
+        
+        char_counts = Counter(content)
+        total = len(content)
+        entropy = 0.0
+        
+        for count in char_counts.values():
+            p = count / total
+            entropy -= p * math.log2(p) if p > 0 else 0
+        
+        return entropy
+    
+    @staticmethod
+    def detect_structure(content: str) -> Dict[str, Any]:
+        """
+        检测内容结构特征
+        返回: {
+            'is_tabular': bool,
+            'is_natural_language': bool,
+            'is_code': bool,
+            'tabular_ratio': float,
+            'natural_language_ratio': float,
+            'structure_type': str,  # 'natural_language', 'tabular_data', 'mixed', 'code', 'config'
+            'entropy': float
+        }
+        """
+        lines = content.split('\n')
+        total_lines = len(lines)
+        if total_lines == 0:
+            return {'is_tabular': False, 'is_natural_language': False, 'is_code': False,
+                   'structure_type': 'empty', 'entropy': 0}
+        
+        sample = content[:10000]  # 限制分析范围提高性能
+        sample_lines = lines[:min(100, total_lines)]
+        
+        # 1. Tabular Data 检测
+        delimiter_pattern = re.compile(r'[,;\t|]{2,}')
+        numeric_pattern = re.compile(r'^[\s\d\.\-\+eE,;\t|]+$')
+        delimiter_lines = 0
+        numeric_lines = 0
+        
+        for line in sample_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if delimiter_pattern.search(stripped) or stripped.count(',') > 3:
+                delimiter_lines += 1
+            if numeric_pattern.match(stripped) and len(stripped) > 5:
+                numeric_lines += 1
+        
+        tabular_ratio = (delimiter_lines + numeric_lines) / max(len(sample_lines), 1)
+        is_tabular = tabular_ratio > 0.3
+        
+        # 2. Natural Language 检测
+        words = re.findall(r'\b[a-zA-Z]{2,}\b', sample.lower())
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', sample))
+        
+        word_diversity = 0
+        stop_words_found = 0
+        if words:
+            unique = len(set(words))
+            word_diversity = unique / len(words)
+            stop_words = {'the', 'and', 'is', 'of', 'to', 'in', 'that', 'have', 'it', 
+                         '的', '了', '是', '在', '有', '和', '就', '不', '人'}
+            stop_words_found = sum(1 for w in words if w in stop_words)
+        
+        sentence_endings = sample.count('.') + sample.count('?') + sample.count('!') + \
+                          sample.count('。') + sample.count('？') + sample.count('！')
+        
+        is_natural_language = (
+            (sentence_endings > 3 and word_diversity > 0.1 and stop_words_found > 5) or
+            (chinese_chars > 50 and sentence_endings > 0)
+        )
+        nl_ratio = min(1.0, (sentence_endings / max(len(sample_lines), 1)) * 2)
+        
+        # 3. Code 检测
+        code_patterns = [
+            r'\b(def|class|function|if|for|while|return|import|from|#include|package|public|private)\b',
+            r'[{}\[\]()]+',
+            r'^(\s{4}|\t)',  # 缩进
+        ]
+        code_matches = sum(1 for p in code_patterns if re.search(p, sample[:2000], re.M))
+        is_code = code_matches > 3
+        
+        # 4. Config 检测（键值对结构）
+        config_patterns = [
+            r'^[a-zA-Z_][a-zA-Z0-9_]*\s*[=:]\s*.+$',  # key = value
+            r'^[^:]+:\s+.+$',  # YAML风格
+        ]
+        config_lines = sum(1 for line in sample_lines if any(re.match(p, line.strip()) for p in config_patterns))
+        is_config = (config_lines / max(len(sample_lines), 1)) > 0.3 and not is_code
+        
+        # 5. 确定结构类型
+        if is_tabular and is_natural_language:
+            structure_type = 'mixed'
+        elif is_tabular:
+            structure_type = 'tabular_data'
+        elif is_code:
+            structure_type = 'code'
+        elif is_config:
+            structure_type = 'config'
+        elif is_natural_language:
+            structure_type = 'natural_language'
+        else:
+            structure_type = 'unknown'
+        
+        return {
+            'is_tabular': is_tabular,
+            'is_natural_language': is_natural_language,
+            'is_code': is_code,
+            'tabular_ratio': tabular_ratio,
+            'natural_language_ratio': nl_ratio,
+            'structure_type': structure_type,
+            'entropy': ContentAnalyzer.calculate_entropy(content)
+        }
+    
+    @staticmethod
+    def classify_file(content: str, filepath: Path) -> Dict[str, Any]:
+        """完整文件分类"""
+        # 首先尝试解码
+        try:
+            if isinstance(content, bytes):
+                content = content.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                content = content.decode('latin-1', errors='ignore')
+            except:
+                return {'type': 'binary', 'strategy': 'metadata_only', 'reason': 'undecodable'}
+        
+        analysis = ContentAnalyzer.detect_structure(content)
+        
+        # 决策映射
+        type_mapping = {
+            'natural_language': ('human_readable', 'embed_with_limit'),
+            'code': ('source_code', 'skeleton_or_full'),
+            'config': ('config_script', 'structure_summary'),
+            'tabular_data': ('tabular_data', 'header_only'),
+            'mixed': ('mixed_document', 'extract_header'),
+            'unknown': ('unknown_text', 'first_lines')
+        }
+        
+        file_type, strategy = type_mapping.get(analysis['structure_type'], ('unknown', 'first_lines'))
+        
+        return {
+            'type': file_type,
+            'strategy': strategy,
+            'structure_type': analysis['structure_type'],
+            'entropy': analysis['entropy'],
+            'metrics': analysis
+        }
+
 # ==================== 智能文本处理器 ====================
 
 class SmartTextProcessor:
@@ -3044,61 +3206,202 @@ class DirectoryDigest:
             self._process_directory(subdir, mode)
     
     def _process_file(self, file_digest: FileDigest, mode: str):
-        """处理单个文件"""
+        """基于内容特征的动态文件处理"""
         filepath = file_digest.metadata.path
         
         try:
-            # 1. 检查文件大小是否超过限制
+            # 1. 大小检查（硬性限制）
             if file_digest.metadata.size > self.max_file_size:
-                # 超过限制，只保留基本元数据，跳过详细处理
-                file_digest.metadata.file_type = FileType.BINARY  # 标记为二进制
-                
-                # 设置跳过原因
+                file_digest.metadata.file_type = FileType.BINARY
                 file_digest.human_readable_summary = HumanReadableSummary(
-                    summary=f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) "
-                           f"exceeds max_file_size ({self.max_file_size / (1024*1024):.2f} MB)"
+                    summary=f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) exceeds limit",
+                    line_count=0
                 )
-                
-                # 更新统计（新增统计项）
                 self.stats['skipped_large_files'] = self.stats.get('skipped_large_files', 0) + 1
-                self.stats['binary'] += 1  # 同时计入二进制文件统计
-                return  # 直接返回，不计算哈希，不进行内容分析
-            
-            # 2. 检测文件类型（仅对未超过大小的文件）
-            file_type = self.file_type_detector.detect(filepath)
-            file_digest.metadata.file_type = file_type
-            
-            # 3. 更新统计（正常文件）
-            if file_type == FileType.HUMAN_READABLE:
-                self.stats['human_readable'] += 1
-            elif file_type == FileType.CONFIG_SCRIPT:
-                self.stats['config_script'] += 1
-                # 同时计入两类以便统计
-                self.stats['human_readable'] += 1
-                self.stats['source_code'] += 1
-            elif file_type == FileType.SOURCE_CODE:
-                self.stats['source_code'] += 1
-            elif file_type == FileType.BINARY:
                 self.stats['binary'] += 1
+                return
             
-            # 4. 计算哈希值（仅对未超过大小的文件）
-            self._calculate_hashes(file_digest)
+            # 2. 读取并分类内容
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                raw_bytes = None
+            except UnicodeDecodeError:
+                with open(filepath, 'rb') as f:
+                    raw_bytes = f.read()
+                    content = raw_bytes.decode('latin-1', errors='ignore')
             
-            # 5. 根据文件类型处理内容
-            if file_type == FileType.CONFIG_SCRIPT:
-                self._process_config_script(file_digest, mode)
-            elif file_type == FileType.HUMAN_READABLE:
-                self._process_human_readable(file_digest, mode)
-            elif file_type == FileType.SOURCE_CODE:
-                self._process_source_code(file_digest, mode)
-            # 二进制文件不需要额外处理
+            # 3. 内容分类
+            classification = ContentAnalyzer.classify_file(content, filepath)
+            strategy = classification['strategy']
+            detected_type = classification['type']
+            
+            # 更新文件类型元数据
+            type_enum_map = {
+                'human_readable': FileType.HUMAN_READABLE,
+                'source_code': FileType.SOURCE_CODE,
+                'config_script': FileType.CONFIG_SCRIPT,
+                'tabular_data': FileType.HUMAN_READABLE,  # 文本格式但视为特殊处理
+                'mixed_document': FileType.HUMAN_READABLE,
+                'unknown_text': FileType.HUMAN_READABLE
+            }
+            file_digest.metadata.file_type = type_enum_map.get(detected_type, FileType.BINARY)
+            
+            # 更新统计
+            if detected_type == 'source_code':
+                self.stats['source_code'] += 1
+            elif detected_type == 'config_script':
+                self.stats['config_script'] = self.stats.get('config_script', 0) + 1
+                self.stats['source_code'] += 1
+            elif detected_type in ['human_readable', 'mixed_document', 'unknown_text']:
+                self.stats['human_readable'] += 1
+            elif detected_type == 'tabular_data':
+                self.stats['human_readable'] += 1  # 文本格式
+            
+            # 4. 计算哈希（流式）
+            if raw_bytes:
+                self._calculate_hashes_from_bytes(file_digest, raw_bytes)
+            else:
+                self._calculate_hashes(file_digest)
+            
+            # 5. 根据策略处理内容
+            content_status = "embedded_full"
+            truncated_reason = None
+            
+            if strategy == 'metadata_only':
+                # Binary 文件
+                content_status = "metadata_only"
+                file_digest.metadata.file_type = FileType.BINARY
+                self.stats['binary'] += 1
+                
+            elif strategy == 'header_only':
+                # Tabular Data: 仅头部
+                header = self._extract_table_header(content)
+                file_digest.human_readable_summary = HumanReadableSummary(
+                    summary=f"[Tabular Data] {len(content.split(chr(10)))} rows, header extracted",
+                    first_lines=header.split('\n')[:20],
+                    line_count=len(content.split('\n')),
+                    character_count=len(header)
+                )
+                # Full 模式也仅存储头部
+                if mode == "full":
+                    if len(header) > self.max_full_content_size:
+                        header = header[:self.max_full_content_size] + "\n[HEADER TRUNCATED]"
+                    file_digest.full_content = header + "\n\n[TABLE DATA OMITTED - Available on request]"
+                    content_status = "truncated"
+                    truncated_reason = "tabular_data_policy"
+                else:
+                    content_status = "header_only"
+                
+            elif strategy == 'extract_header':
+                # Mixed Document: 分离头部和数据
+                header = SmartTextProcessor.extract_human_relevant_content(content, filepath, 50)
+                is_truncated = len(header) < len(content)
+                
+                if mode == "framework":
+                    file_digest.human_readable_summary = HumanReadableSummary(
+                        summary=f"[Mixed Document] Natural language header + structured data",
+                        first_lines=header.split('\n')[:30],
+                        line_count=len(content.split('\n')),
+                        character_count=len(content)
+                    )
+                    content_status = "header_extracted" if is_truncated else "embedded_full"
+                else:  # full mode
+                    if len(header) > self.max_full_content_size:
+                        header = header[:self.max_full_content_size]
+                        content_status = "truncated"
+                        truncated_reason = "size_limit"
+                    else:
+                        content_status = "header_extracted"
+                    file_digest.full_content = header + "\n\n[STRUCTURED DATA SECTION OMITTED]"
+                
+            elif strategy == 'structure_summary':
+                # Config/Script: 框架模式下仅结构
+                if mode == "framework":
+                    # 提取结构而非全文
+                    analysis = self.source_analyzer.analyze(filepath, content)
+                    config_keys = self.source_analyzer._extract_config_structure(content, filepath.suffix.lower())
+                    
+                    # 构建结构摘要
+                    summary_lines = [f"[Config File] Type: {filepath.suffix}"]
+                    if config_keys:
+                        summary_lines.append(f"Top-level keys/sections: {len(config_keys)}")
+                        for key in config_keys[:10]:
+                            summary_lines.append(f"  - {key.get('name', 'unknown')}")
+                        if len(config_keys) > 10:
+                            summary_lines.append(f"  ... and {len(config_keys) - 10} more")
+                    
+                    file_digest.human_readable_summary = HumanReadableSummary(
+                        summary='\n'.join(summary_lines),
+                        line_count=len(content.split('\n')),
+                        character_count=len(content)
+                    )
+                    file_digest.source_code_analysis = analysis
+                    content_status = "structure_summary"
+                else:
+                    # Full 模式，但受大小限制
+                    self._process_config_with_limit(file_digest, content, mode)
+                    
+            elif strategy == 'skeleton_or_full':
+                # Source Code
+                if mode == "framework":
+                    # 骨架模式
+                    analysis = self.source_analyzer.analyze(filepath, content)
+                    file_digest.source_code_analysis = analysis
+                    # 生成骨架描述
+                    skeleton = self._generate_code_skeleton(analysis)
+                    file_digest.human_readable_summary = HumanReadableSummary(
+                        summary=f"[Source Code Skeleton] {analysis.language}\n{skeleton}",
+                        line_count=analysis.total_lines
+                    )
+                    content_status = "skeleton"
+                else:
+                    # Full 模式
+                    if len(content) > self.max_full_content_size:
+                        # 截断但仍保留代码结构
+                        content = content[:self.max_full_content_size]
+                        truncated_reason = "size_limit"
+                        content_status = "truncated"
+                    file_digest.full_content = content
+                    analysis = self.source_analyzer.analyze(filepath, content)
+                    file_digest.source_code_analysis = analysis
+                    
+            elif strategy == 'embed_with_limit':
+                # Natural Language
+                if mode == "framework":
+                    # 智能摘要
+                    summary = self.human_summarizer.summarize(filepath, content)
+                    file_digest.human_readable_summary = summary
+                    content_status = "summary"
+                else:
+                    # Full 模式，受限制
+                    if len(content) > self.max_full_content_size:
+                        lines = content.split('\n')
+                        # 尝试在句子边界截断
+                        truncated = content[:self.max_full_content_size]
+                        last_period = truncated.rfind('.')
+                        if last_period > self.max_full_content_size * 0.8:
+                            truncated = truncated[:last_period+1]
+                        content = truncated + f"\n\n[CONTENT TRUNCATED - Total: {len(lines)} lines]"
+                        truncated_reason = "size_limit"
+                        content_status = "truncated"
+                    file_digest.full_content = content
+                    file_digest.human_readable_summary = self.human_summarizer.summarize(filepath, content)
+            
+            # 6. 添加内容状态标记
+            if not hasattr(file_digest, 'content_metadata'):
+                file_digest.content_metadata = {}
+            file_digest.content_metadata['content_status'] = content_status
+            if truncated_reason:
+                file_digest.content_metadata['truncated_reason'] = truncated_reason
+            file_digest.content_metadata['detected_type'] = detected_type
+            file_digest.content_metadata['available_on_request'] = (truncated_reason is not None)
             
         except Exception as e:
             print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
-            file_digest.metadata.file_type = FileType.BINARY
-            # 设置错误摘要
+            file_digest.metadata.file_type = FileType.UNKNOWN
             file_digest.human_readable_summary = HumanReadableSummary(
-                summary=f"[ERROR] Failed to process file: {str(e)}"
+                summary=f"[ERROR] Processing failed: {str(e)}"
             )
     
     def _calculate_hashes(self, file_digest: FileDigest):
@@ -3128,6 +3431,103 @@ class DirectoryDigest:
             print(f"Warning: Hash calculation failed for {filepath}: {e}", file=sys.stderr)
             file_digest.metadata.md5_hash = "hash_error"
             file_digest.metadata.sha256_hash = "hash_error"
+    
+    def _calculate_hashes_from_bytes(self, file_digest: FileDigest, raw_bytes: bytes):
+        """从字节数据计算哈希值"""
+        try:
+            md5_hash = hashlib.md5()
+            sha256_hash = hashlib.sha256()
+            
+            # 处理大文件时使用分块
+            chunk_size = 65536
+            for i in range(0, len(raw_bytes), chunk_size):
+                chunk = raw_bytes[i:i+chunk_size]
+                md5_hash.update(chunk)
+                sha256_hash.update(chunk)
+            
+            file_digest.metadata.md5_hash = md5_hash.hexdigest()
+            file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
+            
+        except Exception as e:
+            print(f"Warning: Hash calculation from bytes failed: {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "hash_error"
+            file_digest.metadata.sha256_hash = "hash_error"
+    
+    def _extract_table_header(self, content: str) -> str:
+        """从数据表中提取头部（列名、注释等）"""
+        lines = content.split('\n')
+        header_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # 空行且已有内容，视为头部结束
+            if not stripped and header_lines:
+                break
+            
+            # 注释行保留
+            if stripped.startswith(('#', '//', '/*', '*', 'C', 'CC', '!')):
+                header_lines.append(line)
+                continue
+            
+            # 列名行（字母开头，含分隔符但非纯数字）
+            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_\s,;:|]*$', stripped) and len(stripped) < 200:
+                header_lines.append(line)
+                continue
+            
+            # 检测到数据行特征则停止
+            if re.match(r'^[\d\.,;\s\t|]+$', stripped) and len(stripped) > 10:
+                break
+            
+            header_lines.append(line)
+            
+            if len(header_lines) >= 50:  # 限制头部行数
+                break
+        
+        return '\n'.join(header_lines)
+    
+    def _generate_code_skeleton(self, analysis: SourceCodeAnalysis) -> str:
+        """生成代码骨架描述"""
+        lines = []
+        if analysis.classes:
+            lines.append(f"Classes: {len(analysis.classes)}")
+            for cls in analysis.classes[:5]:
+                base = f"({', '.join(cls.get('bases', []))})" if cls.get('bases') else ""
+                lines.append(f"  class {cls.get('name', 'Unknown')}{base}")
+        if analysis.functions:
+            lines.append(f"Functions: {len(analysis.functions)}")
+            for func in analysis.functions[:10]:
+                lines.append(f"  def {func.get('name', 'unknown')}()")
+        if analysis.imports:
+            lines.append(f"Imports: {len(analysis.imports)}")
+            for imp in analysis.imports[:5]:
+                lines.append(f"  import {imp}")
+        return '\n'.join(lines)
+    
+    def _process_config_with_limit(self, file_digest: FileDigest, content: str, mode: str):
+        """处理配置文件，应用大小限制"""
+        if len(content) > self.max_full_content_size:
+            # 截断但保留结构完整性（尝试在键值对边界截断）
+            truncated = content[:self.max_full_content_size]
+            # 找最后一个完整的行
+            last_newline = truncated.rfind('\n')
+            if last_newline > 0:
+                truncated = truncated[:last_newline]
+            content = truncated + "\n\n[CONFIG TRUNCATED]"
+            truncated_flag = True
+        else:
+            truncated_flag = False
+        
+        file_digest.full_content = content
+        analysis = self.source_analyzer.analyze(file_digest.metadata.path, content)
+        file_digest.source_code_analysis = analysis
+        
+        if truncated_flag:
+            if not hasattr(file_digest, 'content_metadata'):
+                file_digest.content_metadata = {}
+            file_digest.content_metadata['content_status'] = 'truncated'
+            file_digest.content_metadata['truncated_reason'] = 'size_limit'
+            file_digest.content_metadata['available_on_request'] = True
     
     def _process_human_readable(self, file_digest: FileDigest, mode: str):
         """处理人类可读文本文件"""
@@ -3570,11 +3970,10 @@ Directory Digest Tool - 目录知识摘要生成器
         print(f"{'='*50}", file=sys.stderr)
         print(f"Total files scanned:     {stats['total_files']}", file=sys.stderr)
         print(f"  ├── Source code:       {stats.get('source_code', 0)}", file=sys.stderr)
-        print(f"  ├── Config/scripts:    {stats.get('config_script', 0)}", file=sys.stderr)
+        print(f"  ├── Config/Scripts:    {stats.get('config_script', 0)}", file=sys.stderr)
         print(f"  ├── Human readable:    {stats.get('human_readable', 0)}", file=sys.stderr)
         print(f"  ├── Binary:            {stats.get('binary', 0)}", file=sys.stderr)
-        print(f"  └── Skipped (>10GB):   {stats.get('skipped_large_files', 0)}", file=sys.stderr)
-        print(f"Total size:              {stats['total_size'] / (1024*1024*1024):.2f} GB", file=sys.stderr)
+        print(f"  └── Skipped (>limit):  {stats.get('skipped_large_files', 0)}", file=sys.stderr)
         print(f"Processing time:         {stats['processing_time']:.2f} s", file=sys.stderr)
         print(f"Output saved to:         {saved_path}", file=sys.stderr)
         print(f"{'='*50}", file=sys.stderr)
