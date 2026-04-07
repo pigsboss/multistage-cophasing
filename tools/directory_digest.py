@@ -135,6 +135,12 @@ class SourceCodeAnalysis:
     constants: List[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
     
+    # 新增字段
+    complexity_metrics: Dict[str, Any] = field(default_factory=dict)  # 复杂度指标
+    style_issues: List[Dict] = field(default_factory=list)            # 代码风格问题
+    security_issues: List[Dict] = field(default_factory=list)         # 安全问题
+    test_coverage: Optional[float] = None                             # 测试覆盖率
+    
     def to_dict(self) -> Dict:
         return {
             "language": self.language,
@@ -147,7 +153,11 @@ class SourceCodeAnalysis:
             "classes": self.classes[:20],      # 限制数量
             "global_vars": self.global_vars[:20],
             "constants": self.constants[:20],
-            "dependencies": self.dependencies[:20]
+            "dependencies": self.dependencies[:20],
+            "complexity_metrics": self.complexity_metrics,
+            "style_issues": self.style_issues[:10],
+            "security_issues": self.security_issues[:10],
+            "test_coverage": self.test_coverage
         }
 
 
