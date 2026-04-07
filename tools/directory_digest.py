@@ -3321,7 +3321,7 @@ Directory Digest Tool - 目录知识摘要生成器
         # 但 save_output 方法目前没有 mode 参数，我们需要修改它
         # 暂时使用一个变通方法：修改 save_output 方法
         # 这里先调用一个修改后的版本
-        saved_path = digest.save_output_with_mode(output, args.output, output_path, args.mode)
+        saved_path = digest.save_output(output, args.output, output_path, args.mode)
         
         # 显示处理结果（到 stderr，避免与文件内容混淆）
         stats = output['metadata']['statistics']
