@@ -1159,7 +1159,8 @@ class SourceCodeAnalyzer:
                                 # 尝试获取值（简化的常量检测）
                                 try:
                                     # 如果是简单的常量（Python 3.8+ 使用 ast.Constant）
-                                    if isinstance(node.value, ast.Constant):
+                                    # 为了向后兼容，也检查 ast.Num 和 ast.Str
+                                    if isinstance(node.value, (ast.Constant, ast.Num, ast.Str)):
                                         constants.append(var_name)
                                     else:
                                         global_vars.append(var_name)
