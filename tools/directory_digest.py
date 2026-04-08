@@ -3366,14 +3366,13 @@ class DirectoryDigest:
             # 6. 根据策略处理文件
             if force_binary or strategy == ProcessingStrategy.METADATA_ONLY:
                 self._process_as_binary(file_digest)
-            elif strategy in [ProcessingStrategy.FULL_CONTENT, ProcessingStrategy.SUMMARY_ONLY, 
-                             ProcessingStrategy.SUMMARY_WITH_TOC]:
+            elif strategy in [ProcessingStrategy.FULL_CONTENT, ProcessingStrategy.SUMMARY_ONLY]:
                 self._process_as_text(file_digest, mode, strategy)
-            elif strategy in [ProcessingStrategy.CODE_SKELETON, ProcessingStrategy.CODE_KEY_FUNCTIONS]:
+            elif strategy == ProcessingStrategy.CODE_SKELETON:
                 self._process_as_code(file_digest, mode, strategy)
-            elif strategy in [ProcessingStrategy.STRUCTURE_EXTRACT, ProcessingStrategy.TOP_LEVEL_KEYS]:
+            elif strategy == ProcessingStrategy.STRUCTURE_EXTRACT:
                 self._process_as_config(file_digest, mode, strategy)
-            elif strategy in [ProcessingStrategy.HEADER_WITH_STATS, ProcessingStrategy.SCHEMA_SUMMARY]:
+            elif strategy == ProcessingStrategy.HEADER_WITH_STATS:
                 self._process_as_data(file_digest, mode, strategy)
             else:
                 self._process_as_text(file_digest, mode, ProcessingStrategy.SUMMARY_ONLY)
