@@ -3476,7 +3476,7 @@ class DirectoryDigest:
                 'size_formatted': self._format_bytes(f.metadata.size),
                 'modified': f.metadata.modified_time.isoformat() if hasattr(f.metadata, 'modified_time') else 'unknown',
                 'type': file_type,
-                'is_binary': file_type == FileType.BINARY.value
+                'is_binary': file_type == FileType.BINARY_FILES.value
             }
             
             if file_type in by_type:
