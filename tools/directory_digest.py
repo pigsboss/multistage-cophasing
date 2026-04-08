@@ -66,26 +66,12 @@ except ImportError:
 
 class ProcessingStrategy(Enum):
     """文件处理策略枚举"""
-    # 全量策略
+    # 主要策略
     FULL_CONTENT = "full_content"              # 全量嵌入（仅限小文件）
-    
-    # 摘要策略
     SUMMARY_ONLY = "summary_only"              # 生成文本摘要
-    SUMMARY_WITH_TOC = "summary_with_toc"      # 摘要+目录结构
-    
-    # 代码相关
     CODE_SKELETON = "code_skeleton"           # 代码骨架（函数/类/导入）
-    CODE_KEY_FUNCTIONS = "code_key_functions"  # 关键函数实现
-    
-    # 配置相关
     STRUCTURE_EXTRACT = "structure_extract"    # 提取结构（键/节）
-    TOP_LEVEL_KEYS = "top_level_keys"         # 仅顶层键
-    
-    # 数据相关
     HEADER_WITH_STATS = "header_with_stats"    # 头部+统计信息
-    SCHEMA_SUMMARY = "schema_summary"         # 数据模式摘要
-    
-    # 元数据
     METADATA_ONLY = "metadata_only"           # 仅元数据
 
 
@@ -302,35 +288,32 @@ class FileTypeDetector:
     EXTENSION_MAPPING = {
         # 参考文档
         FileType.REFERENCE_DOCS: [
-            '.md', '.markdown', '.rst', '.tex', '.latex',
-            '.html', '.htm'
+            '.md', '.markdown', '.rst', '.html', '.htm'
         ],
         # 源代码（包括脚本）
         FileType.SOURCE_CODE: [
-            '.py', '.java', '.cpp', '.c', '.h', '.hpp', '.cc',
-            '.js', '.ts', '.jsx', '.tsx', '.vue',
-            '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala',
-            '.m', '.mm', '.cs', '.fs', '.vb',
-            '.pl', '.pm', '.r', '.lua', '.dart', '.sql',
-            '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+            '.py', '.java', '.cpp', '.c', '.h', '.hpp',
+            '.js', '.ts', '.jsx', '.tsx',
+            '.go', '.rs', '.rb', '.php', '.swift',
+            '.sh', '.bash', '.ps1', '.bat', '.cmd',
             '.css', '.scss', '.less'
         ],
         # 文本数据（配置文件、数据文件、日志等）
         FileType.TEXT_DATA: [
-            '.txt', '.log', '.out', '.err', '.csv', '.tsv',
+            '.txt', '.log', '.csv', '.tsv',
             '.yaml', '.yml', '.json', '.xml', '.toml', 
-            '.ini', '.cfg', '.conf', '.properties', '.env', '.rc',
+            '.ini', '.cfg', '.conf', '.env',
             '.tf', '.tls', '.tpc', '.ker', '.cmt'
         ],
         # 二进制文件
         FileType.BINARY_FILES: [
-            '.exe', '.dll', '.so', '.dylib', '.a', '.lib',
+            '.exe', '.dll', '.so', '.dylib',
             '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.ico',
-            '.mp3', '.mp4', '.avi', '.mkv', '.mov', '.wav',
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+            '.mp3', '.mp4', '.avi', '.mkv',
             '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-            '.bin', '.dat', '.db', '.sqlite', '.sqlite3',
-            '.bsp', '.bc', '.Z', '.h5', '.hdf5', '.fits'
+            '.bin', '.dat', '.db', '.sqlite',
+            '.h5', '.hdf5', '.fits'
         ]
     }
     
@@ -701,9 +684,7 @@ class ContextManager:
         """策略降级（当token不足时）"""
         strategy_hierarchy = [
             ProcessingStrategy.FULL_CONTENT,
-            ProcessingStrategy.SUMMARY_WITH_TOC,
             ProcessingStrategy.SUMMARY_ONLY,
-            ProcessingStrategy.CODE_KEY_FUNCTIONS,
             ProcessingStrategy.CODE_SKELETON,
             ProcessingStrategy.STRUCTURE_EXTRACT,
             ProcessingStrategy.HEADER_WITH_STATS,
@@ -1507,18 +1488,9 @@ class SourceCodeAnalyzer:
             return SourceCodeAnalyzer._analyze_c_family(content, suffix)
         elif suffix in ['.js', '.ts', '.jsx', '.tsx']:
             return SourceCodeAnalyzer._analyze_javascript(content, suffix)
-        elif suffix in ['.go']:
-            return SourceCodeAnalyzer._analyze_go(content)
-        elif suffix in ['.rs']:
-            return SourceCodeAnalyzer._analyze_rust(content)
-        elif suffix in ['.rb']:
-            return SourceCodeAnalyzer._analyze_ruby(content)
-        elif suffix in ['.php']:
-            return SourceCodeAnalyzer._analyze_php(content)
-        elif suffix in ['.sh', '.bash', '.zsh']:
-            return SourceCodeAnalyzer._analyze_shell(content)
-        elif suffix in ['.sql']:
-            return SourceCodeAnalyzer._analyze_sql(content)
+        elif suffix in ['.go', '.rs', '.rb', '.php', '.sh', '.bash', '.zsh', '.sql']:
+            # 对于这些语言，使用通用分析
+            return SourceCodeAnalyzer._analyze_generic(content, suffix)
         else:
             # 通用源代码分析
             return SourceCodeAnalyzer._analyze_generic(content, suffix)
@@ -1996,399 +1968,6 @@ class SourceCodeAnalyzer:
             dependencies=[]
         )
     
-    @staticmethod
-    def _analyze_go(content: str) -> SourceCodeAnalysis:
-        """分析Go代码"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                blank_lines += 1
-            elif stripped.startswith('//'):
-                comment_lines += 1
-        
-        # 提取导入语句
-        imports = []
-        import_section = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith('import'):
-                import_section = True
-                if '(' in stripped:
-                    continue  # 多行导入开始
-                else:
-                    # 单行导入
-                    match = re.search(r'import\s+"([^"]+)"', stripped)
-                    if match:
-                        imports.append(match.group(1))
-            elif import_section:
-                if stripped == ')':
-                    import_section = False
-                else:
-                    match = re.search(r'"([^"]+)"', stripped)
-                    if match:
-                        imports.append(match.group(1))
-        
-        # 提取函数定义
-        functions = []
-        func_pattern = r'^func\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?)\s*\('
-        
-        for i, line in enumerate(lines):
-            match = re.search(func_pattern, line.strip())
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="go",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=imports,
-            functions=functions,
-            classes=[],  # Go没有类，只有结构体
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
-    
-    @staticmethod
-    def _analyze_rust(content: str) -> SourceCodeAnalysis:
-        """分析Rust代码"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                blank_lines += 1
-            elif stripped.startswith('//'):
-                comment_lines += 1
-        
-        # 提取导入语句
-        imports = []
-        use_pattern = r'^use\s+([a-zA-Z0-9_:]+)'
-        
-        for line in lines:
-            match = re.search(use_pattern, line.strip())
-            if match:
-                imports.append(match.group(1))
-        
-        # 提取函数定义
-        functions = []
-        func_pattern = r'^\s*(?:pub\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(func_pattern, line.strip())
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        # 提取结构体定义
-        classes = []
-        struct_pattern = r'^\s*(?:pub\s+)?struct\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(struct_pattern, line.strip())
-            if match:
-                classes.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="rust",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=imports,
-            functions=functions,
-            classes=classes,
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
-    
-    @staticmethod
-    def _analyze_ruby(content: str) -> SourceCodeAnalysis:
-        """分析Ruby代码"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                blank_lines += 1
-            elif stripped.startswith('#'):
-                comment_lines += 1
-        
-        # 提取require/load语句
-        imports = []
-        import_patterns = [
-            r'^require\s+["\']([^"\']+)["\']',
-            r'^load\s+["\']([^"\']+)["\']',
-            r'^require_relative\s+["\']([^"\']+)["\']'
-        ]
-        
-        for line in lines:
-            for pattern in import_patterns:
-                match = re.search(pattern, line.strip())
-                if match:
-                    imports.append(match.group(1))
-                    break
-        
-        # 提取方法定义
-        functions = []
-        func_pattern = r'^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\?|!)?)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(func_pattern, line.strip())
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        # 提取类定义
-        classes = []
-        class_pattern = r'^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(class_pattern, line.strip())
-            if match:
-                classes.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="ruby",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=imports,
-            functions=functions,
-            classes=classes,
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
-    
-    @staticmethod
-    def _analyze_php(content: str) -> SourceCodeAnalysis:
-        """分析PHP代码"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        in_block_comment = False
-        
-        for line in lines:
-            stripped = line.strip()
-            
-            if not stripped:
-                blank_lines += 1
-                continue
-            
-            # 处理块注释
-            if in_block_comment:
-                comment_lines += 1
-                if '*/' in stripped:
-                    in_block_comment = False
-                continue
-            
-            if stripped.startswith('//') or stripped.startswith('#'):
-                comment_lines += 1
-            elif stripped.startswith('/*'):
-                comment_lines += 1
-                in_block_comment = True
-                if '*/' in stripped and stripped.index('*/') > stripped.index('/*'):
-                    in_block_comment = False
-        
-        # 提取include/require语句
-        imports = []
-        import_pattern = r'^(?:include|require)(?:_once)?\s+(?:[\'"]([^\'"]+)[\'"]|\([\'"]([^\'"]+)[\'"]\))'
-        
-        for line in lines:
-            match = re.search(import_pattern, line.strip())
-            if match:
-                imp = match.group(1) or match.group(2)
-                if imp:
-                    imports.append(imp)
-        
-        # 提取函数定义
-        functions = []
-        func_pattern = r'^\s*(?:public|private|protected)?\s*function\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(func_pattern, line.strip())
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        # 提取类定义
-        classes = []
-        class_pattern = r'^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(class_pattern, line.strip())
-            if match:
-                classes.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="php",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=imports,
-            functions=functions,
-            classes=classes,
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
-    
-    @staticmethod
-    def _analyze_shell(content: str) -> SourceCodeAnalysis:
-        """分析Shell脚本"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                blank_lines += 1
-            elif stripped.startswith('#'):
-                comment_lines += 1
-        
-        # 提取函数定义
-        functions = []
-        func_pattern = r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\)\s*{'
-        
-        for i, line in enumerate(lines):
-            match = re.search(func_pattern, line.strip())
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="shell",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=[],  # Shell通常没有明确的导入
-            functions=functions,
-            classes=[],
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
-    
-    @staticmethod
-    def _analyze_sql(content: str) -> SourceCodeAnalysis:
-        """分析SQL代码"""
-        lines = content.split('\n')
-        total_lines = len(lines)
-        
-        # 统计行数
-        blank_lines = 0
-        comment_lines = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                blank_lines += 1
-            elif stripped.startswith('--'):
-                comment_lines += 1
-        
-        # 提取表创建语句
-        classes = []  # 这里用classes存储表定义
-        table_pattern = r'^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(table_pattern, line.strip(), re.IGNORECASE)
-            if match:
-                classes.append({
-                    "name": match.group(1),
-                    "line": i + 1,
-                    "type": "table"
-                })
-        
-        # 提取存储过程/函数
-        functions = []
-        proc_pattern = r'^CREATE\s+(?:PROCEDURE|FUNCTION)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        for i, line in enumerate(lines):
-            match = re.search(proc_pattern, line.strip(), re.IGNORECASE)
-            if match:
-                functions.append({
-                    "name": match.group(1),
-                    "line": i + 1,
-                    "type": "procedure"
-                })
-        
-        code_lines = total_lines - blank_lines - comment_lines
-        
-        return SourceCodeAnalysis(
-            language="sql",
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
-            blank_lines=blank_lines,
-            imports=[],
-            functions=functions,
-            classes=classes,
-            global_vars=[],
-            constants=[],
-            dependencies=[]
-        )
     
     @staticmethod
     def _analyze_generic(content: str, suffix: str) -> SourceCodeAnalysis:
@@ -2400,11 +1979,35 @@ class SourceCodeAnalyzer:
         blank_lines = 0
         comment_lines = 0
         
+        # 根据后缀确定注释模式
+        comment_patterns = []
+        if suffix in ['.py', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd', '.rb', '.pl', '.pm']:
+            comment_patterns = ['#']
+        elif suffix in ['.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp', '.cc', '.go', '.rs', '.swift', '.kt', '.scala']:
+            comment_patterns = ['//', '/*']
+        elif suffix in ['.php']:
+            comment_patterns = ['//', '#', '/*']
+        else:
+            comment_patterns = ['//', '#', '/*']
+        
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 blank_lines += 1
-            elif stripped.startswith('//') or stripped.startswith('#'):
+                continue
+            
+            # 检查注释
+            is_comment = False
+            for pattern in comment_patterns:
+                if stripped.startswith(pattern):
+                    comment_lines += 1
+                    is_comment = True
+                    break
+            if is_comment:
+                continue
+            
+            # 检查块注释结束
+            if '*/' in stripped:
                 comment_lines += 1
         
         # 提取可能的函数定义（通用模式）
@@ -3788,15 +3391,42 @@ class DirectoryDigest:
         self.stats['binary_files'] += 1
         self._calculate_hashes(file_digest)
 
+    def _read_file_content(self, filepath: Path) -> Optional[str]:
+        """统一读取文件内容，处理编码问题"""
+        try:
+            # 首先尝试UTF-8
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            # 如果UTF-8失败，尝试其他编码
+            try:
+                with open(filepath, 'rb') as f:
+                    raw_content = f.read()
+                    
+                    # 如果没有chardet，尝试常见编码
+                    if not CHARDET_AVAILABLE:
+                        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                        for encoding in encodings_to_try:
+                            try:
+                                return raw_content.decode(encoding)
+                            except UnicodeDecodeError:
+                                continue
+                        # 所有编码都失败，使用latin-1并忽略错误
+                        return raw_content.decode('latin-1', errors='ignore')
+                    else:
+                        # 使用chardet检测编码
+                        result = chardet.detect(raw_content)
+                        encoding = result['encoding'] if result['encoding'] else 'latin-1'
+                        return raw_content.decode(encoding, errors='ignore')
+            except Exception:
+                return None
+    
     def _process_as_text(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
         """处理为文本文件"""
         filepath = file_digest.metadata.path
         
-        try:
-            # 读取文件
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
+        content = self._read_file_content(filepath)
+        if content is None:
             # 解码失败，降级为二进制
             self._process_as_binary(file_digest)
             return
@@ -3805,7 +3435,7 @@ class DirectoryDigest:
         if strategy == ProcessingStrategy.FULL_CONTENT:
             file_digest.full_content = content
             file_digest.human_readable_summary = self.human_summarizer.summarize(filepath, content)
-        else:  # SUMMARY_ONLY 或 SUMMARY_WITH_TOC
+        else:  # SUMMARY_ONLY
             summary = self.human_summarizer.summarize(filepath, content)
             file_digest.human_readable_summary = summary
             
@@ -3830,10 +3460,8 @@ class DirectoryDigest:
         """处理为源代码文件"""
         filepath = file_digest.metadata.path
         
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
+        content = self._read_file_content(filepath)
+        if content is None:
             self._process_as_binary(file_digest)
             return
         
@@ -3865,10 +3493,8 @@ class DirectoryDigest:
         """处理为配置文件"""
         filepath = file_digest.metadata.path
         
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
+        content = self._read_file_content(filepath)
+        if content is None:
             self._process_as_binary(file_digest)
             return
         
@@ -3903,10 +3529,8 @@ class DirectoryDigest:
         """处理为数据文件"""
         filepath = file_digest.metadata.path
         
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
+        content = self._read_file_content(filepath)
+        if content is None:
             self._process_as_binary(file_digest)
             return
         
