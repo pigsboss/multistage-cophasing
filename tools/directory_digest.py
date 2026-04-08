@@ -489,6 +489,10 @@ class RuleEngine:
             FileRule("critical_contrib", ["CONTRIBUTING*", "INSTALL*", "AUTHORS*", "NEWS*", "TODO*", "ROADMAP*"], 
                     ProcessingStrategy.SUMMARY_ONLY, priority=95, max_size=256*1024),
             
+            # Zone.Identifier文件（Windows备用数据流）- 添加这个规则
+            FileRule("zone_identifier", ["*:Zone.Identifier"], 
+                    ProcessingStrategy.STRUCTURE_EXTRACT, priority=95, max_size=1*1024),
+            
             # 二进制文件（高优先级，避免误判）
             FileRule("binary_archives", ["*.gz", "*.bz2", "*.xz", "*.7z", "*.rar", "*.zip", "*.tar"], 
                     ProcessingStrategy.METADATA_ONLY, priority=90, force_binary=True),
