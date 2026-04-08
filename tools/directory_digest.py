@@ -3553,11 +3553,9 @@ class DirectoryDigest:
                 f"Found {len(large_files)} large files (>1MB). "
                 f"In 'full' mode, use --max-content-size to limit full content output."
             )
-        if by_type.get(FileType.CONFIG_SCRIPT.value):
-            count = len(by_type[FileType.CONFIG_SCRIPT.value])
-            recommendations.append(
-                f"Found {count} config/script files treated as both human-readable and source code."
-            )
+        # 删除对 CONFIG_SCRIPT 的引用，因为新的分类体系中已不存在这个类型
+        # 配置文件现在属于 TEXT_DATA，脚本属于 SOURCE_CODE
+
         if by_type.get(FileType.UNKNOWN.value, []):
             count = len(by_type[FileType.UNKNOWN.value])
             if count > 5:
