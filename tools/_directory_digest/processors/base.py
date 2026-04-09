@@ -770,14 +770,38 @@ class DataFileProcessor(BaseFileProcessor):
         return header_lines[:30]
 
 
-# ==================== 处理器注册表 ====================
+# ==================== 重构后的处理器注册表 ====================
 
 class FileProcessorRegistry:
-    """文件处理器注册表"""
+    """文件处理器注册表 - 整合处理流程协调与并行处理支持"""
     
-    def __init__(self):
+    def __init__(self, 
+                 rule_engine=None, 
+                 context_manager=None, 
+                 stats=None, 
+                 config=None):
+        """
+        初始化处理器注册表
+        
+        Args:
+            rule_engine: 规则引擎实例，用于文件分类
+            context_manager: 上下文管理器实例，用于Token分配
+            stats: 统计信息字典，用于更新处理统计
+            config: 配置字典，包含大小限制等参数
+        """
         self.processors: List[BaseFileProcessor] = []
-    
+        self.rule_engine = rule_engine
+        self.context_manager = context_manager
+        self.stats = stats or {}
+        self.config = config or {}
+        
+        # 并行处理配置
+        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024 * 1024)  # 默认10GB
+        
+        # 线程锁，用于并行处理时安全更新统计信息
+        self._stats_lock = None
+        self._context_lock = None
+        
     def register(self, processor: BaseFileProcessor):
         """注册处理器"""
         self.processors.append(processor)
@@ -788,13 +812,396 @@ class FileProcessorRegistry:
             if processor.can_handle(file_digest):
                 return processor
         return None
+    
+    def process_file(self, file_digest: FileDigest, mode: str = "framework") -> bool:
+        """
+        处理单个文件 - 整合原 _process_file 逻辑
+        
+        Args:
+            file_digest: 文件摘要对象
+            mode: 输出模式 ("full", "framework", "sort")
+            
+        Returns:
+            bool: 处理是否成功
+        """
+        import sys
+        
+        filepath = file_digest.metadata.path
+        
+        try:
+            # 1. 获取处理策略（使用规则引擎）
+            if self.rule_engine:
+                strategy, force_binary = self.rule_engine.classify_file(filepath)
+            else:
+                # 无规则引擎时的默认策略
+                strategy, force_binary = self._default_classify(file_digest)
+            
+            # 2. 估算token消耗
+            if self.rule_engine:
+                estimated_tokens = self.rule_engine.estimate_token_usage(filepath, strategy)
+            else:
+                estimated_tokens = self._estimate_tokens(file_digest, strategy)
+            
+            # 3. 检查文件大小限制
+            if file_digest.metadata.size > self.max_file_size:
+                self._update_stats('skipped_large_files')
+                self._process_as_binary(file_digest, mode)
+                return True
+            
+            # 4. 检查上下文限制（Token分配）
+            if self.context_manager:
+                if not self._check_and_allocate_context(estimated_tokens, file_digest, strategy):
+                    self._update_stats('skipped_by_context')
+                    return False
+            
+            # 5. 根据策略处理文件
+            if force_binary or strategy == ProcessingStrategy.METADATA_ONLY:
+                success = self._process_as_binary(file_digest, mode)
+                if success:
+                    self._update_stats('binary_files')
+            else:
+                # 获取合适的处理器并执行处理
+                processor = self.get_processor(file_digest)
+                if processor:
+                    # 读取文件内容
+                    content = self._read_file_content(filepath)
+                    if content is None:
+                        self._process_as_binary(file_digest, mode)
+                        self._update_stats('binary_files')
+                        return True
+                    
+                    # 执行处理
+                    processor.process(file_digest, content, mode, strategy)
+                    
+                    # 根据文件类型更新统计
+                    self._update_stats_by_processor(file_digest, processor)
+                    
+                    # 在 full 模式下保存完整内容
+                    if mode == "full" and strategy == ProcessingStrategy.FULL_CONTENT:
+                        file_digest.full_content = content
+                else:
+                    # 无匹配处理器，作为二进制处理
+                    self._process_as_binary(file_digest, mode)
+                    self._update_stats('binary_files')
+            
+            return True
+            
+        except Exception as e:
+            import sys
+            print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
+            # 出错时作为二进制文件处理，确保不中断流程
+            try:
+                self._process_as_binary(file_digest, mode)
+                self._update_stats('binary_files')
+            except:
+                pass
+            return False
+    
+    def _check_and_allocate_context(self, estimated_tokens: int, 
+                                   file_digest: FileDigest, 
+                                   strategy: ProcessingStrategy) -> bool:
+        """检查并分配上下文Token，支持策略降级"""
+        # 尝试分配Token
+        if not self.context_manager.can_allocate(estimated_tokens):
+            # Token不足，尝试降级策略
+            downgraded_strategy = self.context_manager.downgrade_strategy(strategy)
+            if self.rule_engine:
+                downgraded_tokens = self.rule_engine.estimate_token_usage(file_digest.metadata.path, downgraded_strategy)
+            else:
+                downgraded_tokens = self._estimate_tokens(file_digest, downgraded_strategy)
+            
+            if not self.context_manager.can_allocate(downgraded_tokens):
+                return False
+            
+            # 使用降级后的策略
+            strategy = downgraded_strategy
+            estimated_tokens = downgraded_tokens
+        
+        # 分配Token
+        file_record = {
+            "path": str(file_digest.metadata.path),
+            "strategy": strategy.value,
+            "estimated_tokens": estimated_tokens,
+            "size": file_digest.metadata.size,
+        }
+        
+        return self.context_manager.allocate(estimated_tokens, file_record)
+    
+    def _process_as_binary(self, file_digest: FileDigest, mode: str) -> bool:
+        """处理为二进制文件 - 仅计算哈希"""
+        try:
+            self._calculate_hashes(file_digest)
+            file_digest.metadata.file_type = FileType.BINARY_FILES
+            return True
+        except Exception as e:
+            import sys
+            print(f"Warning: Failed to process binary file {file_digest.metadata.path}: {e}", file=sys.stderr)
+            return False
+    
+    def _calculate_hashes(self, file_digest: FileDigest):
+        """计算文件哈希值"""
+        import hashlib
+        filepath = file_digest.metadata.path
+        
+        md5_hash = hashlib.md5()
+        sha256_hash = hashlib.sha256()
+        
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                md5_hash.update(chunk)
+                sha256_hash.update(chunk)
+        
+        file_digest.metadata.md5_hash = md5_hash.hexdigest()
+        file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
+    
+    def _read_file_content(self, filepath: Path) -> Optional[str]:
+        """读取文件内容，处理编码问题"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(filepath, 'rb') as f:
+                    raw_content = f.read()
+                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                    for encoding in encodings_to_try:
+                        try:
+                            return raw_content.decode(encoding)
+                        except UnicodeDecodeError:
+                            continue
+                    return raw_content.decode('latin-1', errors='ignore')
+            except Exception:
+                return None
+    
+    def _default_classify(self, file_digest: FileDigest) -> Tuple[ProcessingStrategy, bool]:
+        """默认文件分类（当没有规则引擎时）"""
+        suffix = file_digest.metadata.path.suffix.lower()
+        size = file_digest.metadata.size
+        
+        # 二进制扩展名
+        binary_exts = {'.exe', '.dll', '.so', '.dylib', '.zip', '.tar', '.gz', 
+                      '.jpg', '.png', '.mp3', '.mp4', '.pdf'}
+        if suffix in binary_exts:
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        # 源代码扩展名
+        code_exts = {'.py', '.java', '.cpp', '.c', '.js', '.ts', '.go', '.rs'}
+        if suffix in code_exts:
+            return ProcessingStrategy.CODE_SKELETON, False
+        
+        # 文档扩展名
+        doc_exts = {'.md', '.txt', '.rst', '.html'}
+        if suffix in doc_exts:
+            if size < 500 * 1024:
+                return ProcessingStrategy.SUMMARY_ONLY, False
+            else:
+                return ProcessingStrategy.HEADER_WITH_STATS, False
+        
+        # 默认
+        if size > 1024 * 1024:  # > 1MB
+            return ProcessingStrategy.METADATA_ONLY, False
+        return ProcessingStrategy.SUMMARY_ONLY, False
+    
+    def _estimate_tokens(self, file_digest: FileDigest, strategy: ProcessingStrategy) -> int:
+        """估算Token消耗（当没有规则引擎时）"""
+        config = STRATEGY_CONFIGS.get(strategy, STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY])
+        
+        if strategy == ProcessingStrategy.METADATA_ONLY:
+            return int(config.token_estimate * 100)
+        
+        file_size = file_digest.metadata.size
+        if config.max_size and file_size > config.max_size:
+            return STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY].token_estimate * 100
+        
+        estimated_chars = min(file_size, config.max_size or file_size)
+        return int(estimated_chars * config.token_estimate)
+    
+    def _update_stats(self, key: str):
+        """更新统计信息（线程安全）"""
+        if key in self.stats:
+            # 如果启用了并行处理，需要加锁
+            if self._stats_lock:
+                import threading
+                with self._stats_lock:
+                    self.stats[key] += 1
+            else:
+                self.stats[key] += 1
+    
+    def _update_stats_by_processor(self, file_digest: FileDigest, processor: BaseFileProcessor):
+        """根据处理器类型更新统计"""
+        processor_type = type(processor).__name__
+        
+        type_mapping = {
+            'SourceCodeProcessor': 'source_code',
+            'TextFileProcessor': 'reference_docs',
+            'ConfigFileProcessor': 'text_data',
+            'DataFileProcessor': 'text_data'
+        }
+        
+        stat_key = type_mapping.get(processor_type, 'binary_files')
+        self._update_stats(stat_key)
+        
+        # 同时更新文件类型元数据
+        file_type_mapping = {
+            'SourceCodeProcessor': FileType.SOURCE_CODE,
+            'TextFileProcessor': FileType.REFERENCE_DOCS,
+            'ConfigFileProcessor': FileType.TEXT_DATA,
+            'DataFileProcessor': FileType.TEXT_DATA
+        }
+        file_digest.metadata.file_type = file_type_mapping.get(
+            processor_type, FileType.BINARY_FILES
+        )
+    
+    def process_directory(self, structure: Any, mode: str = "framework", 
+                         parallel: bool = False, max_workers: int = 4):
+        """
+        处理整个目录结构，支持并行处理
+        
+        Args:
+            structure: DirectoryStructure 对象
+            mode: 输出模式
+            parallel: 是否启用并行处理
+            max_workers: 并行工作线程数
+        """
+        # 收集所有文件
+        all_files = []
+        
+        def collect_files(node):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect_files(subdir)
+        
+        collect_files(structure)
+        
+        if parallel and len(all_files) > 10:
+            self._process_parallel(all_files, mode, max_workers)
+        else:
+            self._process_sequential(all_files, mode)
+    
+    def _process_sequential(self, files: List[FileDigest], mode: str):
+        """顺序处理文件"""
+        for file_digest in files:
+            self.process_file(file_digest, mode)
+    
+    def _process_parallel(self, files: List[FileDigest], mode: str, max_workers: int):
+        """并行处理文件"""
+        import concurrent.futures
+        import threading
+        import sys
+        
+        # 初始化线程锁
+        self._stats_lock = threading.Lock()
+        
+        # 由于ContextManager不是线程安全的，需要在主线程中预分配Token
+        # 这里简化处理：先顺序进行Token分配检查，再并行处理内容
+        files_to_process = []
+        
+        for file_digest in files:
+            filepath = file_digest.metadata.path
+            
+            # 预检查：获取策略和估算Token
+            if self.rule_engine:
+                strategy, _ = self.rule_engine.classify_file(filepath)
+                estimated = self.rule_engine.estimate_token_usage(filepath, strategy)
+            else:
+                strategy, _ = self._default_classify(file_digest)
+                estimated = self._estimate_tokens(file_digest, strategy)
+            
+            # 检查是否能分配（跳过context_manager的实际分配，仅检查）
+            if self.context_manager:
+                if self.context_manager.can_allocate(estimated):
+                    files_to_process.append((file_digest, strategy, estimated))
+                else:
+                    self._update_stats('skipped_by_context')
+            else:
+                files_to_process.append((file_digest, strategy, estimated))
+        
+        # 并行处理文件内容
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_file = {
+                executor.submit(self._process_file_worker, fd, mode, st): (fd, st, est)
+                for fd, st, est in files_to_process
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_digest, strategy, estimated = future_to_file[future]
+                try:
+                    future.result()
+                    # 成功后分配Token（线程安全地）
+                    if self.context_manager:
+                        file_record = {
+                            "path": str(file_digest.metadata.path),
+                            "strategy": strategy.value,
+                            "estimated_tokens": estimated,
+                            "size": file_digest.metadata.size,
+                        }
+                        # 注意：这里需要在主线程中调用allocate
+                        # 为简化，我们在worker中只处理内容，Token分配在这里记录
+                        self.context_manager.allocate(estimated, file_record)
+                except Exception as e:
+                    print(f"Warning: Error in parallel processing {file_digest.metadata.path}: {e}", 
+                          file=sys.stderr)
+        
+        # 清理锁
+        self._stats_lock = None
+    
+    def _process_file_worker(self, file_digest: FileDigest, mode: str, strategy: ProcessingStrategy):
+        """并行处理工作函数（处理单个文件内容）"""
+        try:
+            filepath = file_digest.metadata.path
+            
+            # 检查大小
+            if file_digest.metadata.size > self.max_file_size:
+                self._process_as_binary(file_digest, mode)
+                self._update_stats('skipped_large_files')
+                self._update_stats('binary_files')
+                return
+            
+            # 获取处理器
+            processor = self.get_processor(file_digest)
+            
+            if processor and strategy != ProcessingStrategy.METADATA_ONLY:
+                content = self._read_file_content(filepath)
+                if content:
+                    processor.process(file_digest, content, mode, strategy)
+                    self._update_stats_by_processor(file_digest, processor)
+                else:
+                    self._process_as_binary(file_digest, mode)
+                    self._update_stats('binary_files')
+            else:
+                self._process_as_binary(file_digest, mode)
+                self._update_stats('binary_files')
+                
+        except Exception as e:
+            import sys
+            print(f"Warning: Worker error for {file_digest.metadata.path}: {e}", file=sys.stderr)
+            raise
 
 
 # ==================== 公共 API ====================
 
-def create_default_registry(config: Optional[Dict] = None) -> FileProcessorRegistry:
-    """创建默认处理器注册表"""
-    registry = FileProcessorRegistry()
+def create_default_registry(rule_engine=None, 
+                           context_manager=None, 
+                           stats=None, 
+                           config=None) -> FileProcessorRegistry:
+    """
+    创建默认处理器注册表
+    
+    Args:
+        rule_engine: 规则引擎实例
+        context_manager: 上下文管理器实例  
+        stats: 统计信息字典
+        config: 配置字典
+        
+    Returns:
+        FileProcessorRegistry: 配置好的注册表实例
+    """
+    registry = FileProcessorRegistry(
+        rule_engine=rule_engine,
+        context_manager=context_manager,
+        stats=stats,
+        config=config
+    )
     
     # 按优先级顺序注册（先注册的优先级高）
     registry.register(TextFileProcessor(config))

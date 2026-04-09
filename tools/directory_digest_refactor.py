@@ -95,7 +95,7 @@ class DirectoryDigest(DirectoryDigestBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # Initialize statistics (与原始代码一致)
+        # 初始化统计信息（与原始代码一致）
         self.stats = {
             'total_files': 0,
             'critical_docs': 0,
@@ -109,11 +109,19 @@ class DirectoryDigest(DirectoryDigestBase):
             'processing_time': 0
         }
         
-        # Parallel processing config
+        # 并行处理配置
         self.use_parallel = self.config.get('use_parallel', False)
         self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)
         
-        # Initialize advanced components (if available)
+        # 初始化处理器注册表（新的核心组件）
+        self.processor_registry = create_default_registry(
+            rule_engine=self.rule_engine,
+            context_manager=self.context_manager,
+            stats=self.stats,
+            config=self.config
+        )
+        
+        # 保留高级分析器组件（如果语义分析可用）
         if SEMANTICS_AVAILABLE:
             self.human_summarizer = HumanReadableSummarizer()
             self.source_analyzer = SourceCodeAnalyzer()
@@ -149,8 +157,13 @@ class DirectoryDigest(DirectoryDigestBase):
                 
                 self._calculate_hashes(file_digest)
         else:
-            # 其他模式需要深度处理
-            self._process_directory(self.structure, mode)
+            # 其他模式使用处理器注册表进行深度处理
+            self.processor_registry.process_directory(
+                self.structure, 
+                mode=mode,
+                parallel=self.use_parallel,
+                max_workers=self.max_workers
+            )
         
         # 更新统计信息
         self.stats['processing_time'] = time.time() - start_time
@@ -161,250 +174,6 @@ class DirectoryDigest(DirectoryDigestBase):
         else:
             return self._generate_output(mode)
     
-    def _process_directory(self, structure: DirectoryStructure, mode: str):
-        """Process all files in directory"""
-        if self.use_parallel and len(structure.files) > 10:
-            self._process_directory_parallel(structure, mode)
-        else:
-            for file_digest in structure.files:
-                self._process_file(file_digest, mode)
-        
-        # Recursively process subdirectories
-        for subdir in structure.subdirectories.values():
-            self._process_directory(subdir, mode)
-    
-    def _process_directory_parallel(self, structure: DirectoryStructure, mode: str):
-        """Process directory using parallel processing"""
-        import concurrent.futures
-        
-        # Collect all files
-        all_files = []
-        def collect_files(node: DirectoryStructure):
-            all_files.extend(node.files)
-            for subdir in node.subdirectories.values():
-                collect_files(subdir)
-        
-        collect_files(structure)
-        
-        # Process using thread pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_file = {
-                executor.submit(self._process_file_safe, file_digest, mode): file_digest
-                for file_digest in all_files
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_file):
-                file_digest = future_to_file[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Warning: Error processing file {file_digest.metadata.path}: {e}", file=sys.stderr)
-    
-    def _process_file_safe(self, file_digest: FileDigest, mode: str):
-        """Safe file processing wrapper for parallel execution"""
-        try:
-            self._process_file(file_digest, mode)
-        except Exception as e:
-            print(f"Warning: Error processing file {file_digest.metadata.path}: {e}", file=sys.stderr)
-    
-    def _process_file(self, file_digest: FileDigest, mode: str):
-        """处理单个文件"""
-        filepath = file_digest.metadata.path
-        
-        try:
-            # 1. 获取处理策略
-            strategy, force_binary = self.rule_engine.classify_file(filepath)
-            
-            # 2. 估算token消耗
-            estimated_tokens = self.rule_engine.estimate_token_usage(filepath, strategy)
-            
-            # 3. 检查文件大小限制
-            if file_digest.metadata.size > self.max_file_size:
-                self._process_as_binary(file_digest)
-                self.stats['skipped_large_files'] += 1
-                return
-            
-            # 4. 检查上下文限制
-            file_record = {
-                "path": str(filepath),
-                "strategy": strategy.value,
-                "estimated_tokens": estimated_tokens,
-                "size": file_digest.metadata.size,
-            }
-            
-            if not self.context_manager.can_allocate(estimated_tokens):
-                # 尝试降级策略
-                downgraded_strategy = self.context_manager.downgrade_strategy(strategy)
-                downgraded_tokens = self.rule_engine.estimate_token_usage(filepath, downgraded_strategy)
-                
-                if not self.context_manager.can_allocate(downgraded_tokens):
-                    self.stats['skipped_by_context'] += 1
-                    return
-                
-                strategy = downgraded_strategy
-                estimated_tokens = downgraded_tokens
-            
-            # 5. 分配token
-            if not self.context_manager.allocate(estimated_tokens, file_record):
-                self.stats['skipped_by_context'] += 1
-                return
-            
-            # 6. 根据策略处理文件
-            if force_binary or strategy == ProcessingStrategy.METADATA_ONLY:
-                self._process_as_binary(file_digest)
-            elif strategy == ProcessingStrategy.FULL_CONTENT:
-                self._process_as_text(file_digest, mode, include_full=True)
-            elif strategy == ProcessingStrategy.SUMMARY_ONLY:
-                self._process_as_text(file_digest, mode, include_full=False)
-            elif strategy == ProcessingStrategy.CODE_SKELETON:
-                self._process_as_code(file_digest, mode)
-            elif strategy == ProcessingStrategy.STRUCTURE_EXTRACT:
-                self._process_as_config(file_digest, mode)
-            elif strategy == ProcessingStrategy.HEADER_WITH_STATS:
-                self._process_as_data(file_digest, mode)
-            else:
-                self._process_as_text(file_digest, mode, include_full=False)
-            
-        except Exception as e:
-            print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
-    
-    def _process_as_binary(self, file_digest: FileDigest):
-        """处理为二进制文件"""
-        file_digest.metadata.file_type = FileType.BINARY_FILES
-        self.stats['binary_files'] += 1
-        self._calculate_hashes(file_digest)
-    
-    def _process_as_text(self, file_digest: FileDigest, mode: str, include_full: bool = False):
-        """处理为文本文件"""
-        filepath = file_digest.metadata.path
-        
-        content = self._read_file_content(filepath)
-        if content is None:
-            self._process_as_binary(file_digest)
-            return
-        
-        # 生成摘要
-        if self.human_summarizer and SEMANTICS_AVAILABLE:
-            summary = self.human_summarizer.summarize(filepath, content)
-            file_digest.human_readable_summary = summary
-        else:
-            # 简化摘要
-            lines = content.split('\n')
-            file_digest.human_readable_summary = HumanReadableSummary(
-                title=filepath.stem.replace('_', ' ').title(),
-                line_count=len(lines),
-                word_count=len(content.split()),
-                character_count=len(content),
-                first_lines=lines[:10],
-                summary=f"Text file with {len(lines)} lines"
-            )
-        
-        if include_full and mode == "full":
-            file_digest.full_content = content
-        
-        # 判断文件类型
-        filename = filepath.name.lower()
-        critical_patterns = ['readme', 'license', 'copying', 'notice', 'changelog', 'changes']
-        
-        if any(pattern in filename for pattern in critical_patterns):
-            file_digest.metadata.file_type = FileType.CRITICAL_DOCS
-            self.stats['critical_docs'] += 1
-        else:
-            file_digest.metadata.file_type = FileType.REFERENCE_DOCS
-            self.stats['reference_docs'] += 1
-        
-        self._calculate_hashes(file_digest)
-    
-    def _process_as_code(self, file_digest: FileDigest, mode: str):
-        """处理为源代码文件"""
-        filepath = file_digest.metadata.path
-        
-        content = self._read_file_content(filepath)
-        if content is None:
-            self._process_as_binary(file_digest)
-            return
-        
-        # 分析源代码
-        if self.source_analyzer and SEMANTICS_AVAILABLE:
-            analysis = self.source_analyzer.analyze(filepath, content)
-            file_digest.source_code_analysis = analysis
-        else:
-            # 简化分析
-            lines = content.split('\n')
-            file_digest.source_code_analysis = SourceCodeAnalysis(
-                language=filepath.suffix.lstrip('.') or "unknown",
-                total_lines=len(lines),
-                code_lines=sum(1 for line in lines if line.strip()),
-                comment_lines=sum(1 for line in lines if line.strip().startswith(('#', '//'))),
-                blank_lines=sum(1 for line in lines if not line.strip())
-            )
-        
-        if mode == "full":
-            file_digest.full_content = content
-        
-        file_digest.metadata.file_type = FileType.SOURCE_CODE
-        self.stats['source_code'] += 1
-        self._calculate_hashes(file_digest)
-    
-    def _process_as_config(self, file_digest: FileDigest, mode: str):
-        """处理为配置文件"""
-        filepath = file_digest.metadata.path
-        
-        content = self._read_file_content(filepath)
-        if content is None:
-            self._process_as_binary(file_digest)
-            return
-        
-        # 生成结构摘要
-        lines = content.split('\n')
-        keys = []
-        for line in lines[:50]:
-            stripped = line.strip()
-            if stripped and not stripped.startswith(('#', '//', ';')):
-                if ':' in stripped or '=' in stripped:
-                    key = stripped.split(':', 1)[0].split('=', 1)[0].strip()
-                    if key and len(key) < 50:
-                        keys.append(key)
-        
-        file_digest.human_readable_summary = HumanReadableSummary(
-            title=filepath.name,
-            line_count=len(lines),
-            character_count=len(content),
-            first_lines=lines[:10],
-            summary=f"Config file with keys: {', '.join(keys[:10])}" + ("..." if len(keys) > 10 else "")
-        )
-        
-        if mode == "full":
-            file_digest.full_content = content
-        
-        file_digest.metadata.file_type = FileType.TEXT_DATA
-        self.stats['text_data'] += 1
-        self._calculate_hashes(file_digest)
-    
-    def _process_as_data(self, file_digest: FileDigest, mode: str):
-        """处理为数据文件"""
-        filepath = file_digest.metadata.path
-        
-        content = self._read_file_content(filepath)
-        if content is None:
-            self._process_as_binary(file_digest)
-            return
-        
-        lines = content.split('\n')
-        file_digest.human_readable_summary = HumanReadableSummary(
-            title=filepath.name,
-            line_count=len(lines),
-            character_count=len(content),
-            first_lines=lines[:20],
-            summary=f"Data file with {len(lines)} lines"
-        )
-        
-        if mode == "full":
-            file_digest.full_content = content
-        
-        file_digest.metadata.file_type = FileType.TEXT_DATA
-        self.stats['text_data'] += 1
-        self._calculate_hashes(file_digest)
     
     def _collect_all_files_flat(self) -> List[FileDigest]:
         """扁平化收集所有文件"""
