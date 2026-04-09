@@ -908,6 +908,24 @@ Examples:
         'context_size': context_size,
     }
     
+    # 如果没有提供 --rules 参数，尝试从默认位置查找规则文件
+    if not args.rules:
+        default_rules_paths = [
+            Path.cwd() / ".digest_rules.yaml",
+            Path.cwd() / ".digest_rules.yml",
+            Path.cwd() / "digest_rules.yaml",
+            Path.cwd() / "digest_rules.yml",
+            Path.cwd() / "rules.yaml",
+            Path.cwd() / "rules.yml",
+        ]
+        
+        for rules_path in default_rules_paths:
+            if rules_path.exists():
+                config['rules_file'] = rules_path
+                if args.verbose:
+                    print(f"Found rules file at default location: {rules_path}", file=sys.stderr)
+                break
+    
     # Create digest generator
     digest = DirectoryDigest(args.directory, config)
     
@@ -916,8 +934,15 @@ Examples:
         print(f"Mode: {args.mode}, Format: {args.output}", file=sys.stderr)
         print(f"Skip files larger than: {args.max_size} MB ({args.max_size/1024:.1f} GB)", file=sys.stderr)
         print(f"Context window: {context_size:,} tokens", file=sys.stderr)
+        
+        # 显示规则文件信息
         if args.rules:
-            print(f"Rules file: {args.rules}", file=sys.stderr)
+            print(f"Rules file (explicit): {args.rules}", file=sys.stderr)
+        elif config.get('rules_file'):
+            print(f"Rules file (auto-detected): {config['rules_file']}", file=sys.stderr)
+        else:
+            print(f"Rules file: Using built-in default rules", file=sys.stderr)
+            
         if args.parallel:
             print(f"Parallel processing enabled with {config['max_workers']} workers", file=sys.stderr)
     
