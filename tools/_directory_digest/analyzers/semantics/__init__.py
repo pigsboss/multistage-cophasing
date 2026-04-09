@@ -22,6 +22,11 @@ from .codes import (
     GenericSourceCodeAnalyzer,
     CompositeSourceCodeAnalyzer,
 )
+from .documents import (
+    HumanReadableDocumentAnalyzer,
+    MarkdownDocumentAnalyzer,
+    CompositeDocumentAnalyzer,
+)
 
 __all__ = [
     # 基础类
@@ -43,4 +48,9 @@ __all__ = [
     'JavaScriptSourceCodeAnalyzer',
     'GenericSourceCodeAnalyzer',
     'CompositeSourceCodeAnalyzer',
+    
+    # 文档分析器
+    'HumanReadableDocumentAnalyzer',
+    'MarkdownDocumentAnalyzer',
+    'CompositeDocumentAnalyzer',
 ]
