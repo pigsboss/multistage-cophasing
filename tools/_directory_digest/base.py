@@ -109,6 +109,25 @@ class FileRule:
 
 
 @dataclass
+class FileClassification:
+    """文件分类结果 - 统一的数据契约"""
+    file_type: FileType
+    strategy: ProcessingStrategy
+    force_binary: bool = False
+    estimated_tokens: int = 0
+    rule_name: Optional[str] = None
+    
+    def to_dict(self) -> Dict:
+        return {
+            "file_type": self.file_type.value,
+            "strategy": self.strategy.value,
+            "force_binary": self.force_binary,
+            "estimated_tokens": self.estimated_tokens,
+            "rule_name": self.rule_name
+        }
+
+
+@dataclass
 class FileMetadata:
     """文件元数据基类"""
     path: Path

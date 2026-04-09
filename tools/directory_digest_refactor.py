@@ -11,7 +11,7 @@ import sys
 import argparse
 import mimetypes
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 # Import base modules
@@ -28,6 +28,7 @@ from tools._directory_digest import (
     FormatConverter,
     DirectoryDigestBase,
     STRATEGY_CONFIGS,
+    FileClassification,  # 添加新的导入
 )
 
 # Import processor registry
@@ -114,6 +115,141 @@ class DirectoryDigest(DirectoryDigestBase):
             self.human_summarizer = None
             self.source_analyzer = None
     
+    def _classify_file(self, filepath: Path) -> FileClassification:
+        """
+        统一文件分类方法
+        只在分类阶段确定文件类型和处理策略，后续阶段使用此分类结果
+        
+        Args:
+            filepath: 文件路径
+            
+        Returns:
+            FileClassification: 完整的分类结果
+        """
+        try:
+            # 1. 使用规则引擎进行完整分类
+            if self.rule_engine:
+                strategy, force_binary = self.rule_engine.classify_file(filepath)
+                estimated_tokens = self.rule_engine.estimate_token_usage(filepath, strategy)
+                rule_name = "rule_engine"
+            else:
+                # 无规则引擎时的默认分类
+                strategy, force_binary = self._default_classify(filepath)
+                estimated_tokens = self._estimate_tokens(filepath, strategy)
+                rule_name = "default_classification"
+            
+            # 2. 根据分类结果确定文件类型（不再重复判断）
+            file_type = self._determine_file_type_from_classification(
+                filepath, strategy, force_binary
+            )
+            
+            return FileClassification(
+                file_type=file_type,
+                strategy=strategy,
+                force_binary=force_binary,
+                estimated_tokens=estimated_tokens,
+                rule_name=rule_name
+            )
+            
+        except Exception as e:
+            # 分类失败时返回默认分类
+            import sys
+            print(f"Warning: Classification failed for {filepath}: {e}", file=sys.stderr)
+            return FileClassification(
+                file_type=FileType.UNKNOWN,
+                strategy=ProcessingStrategy.METADATA_ONLY,
+                force_binary=True,
+                estimated_tokens=100,
+                rule_name="error_fallback"
+            )
+    
+    def _determine_file_type_from_classification(self, filepath: Path, 
+                                                strategy: ProcessingStrategy,
+                                                force_binary: bool) -> FileType:
+        """
+        根据分类结果确定文件类型（不再重复判断）
+        
+        Args:
+            filepath: 文件路径（仅用于日志）
+            strategy: 处理策略
+            force_binary: 是否强制二进制
+            
+        Returns:
+            FileType: 确定的文件类型
+        """
+        # 如果强制二进制，直接返回BINARY_FILES
+        if force_binary:
+            return FileType.BINARY_FILES
+        
+        # 根据策略类型映射到文件类型（不再检查文件名或内容）
+        if strategy == ProcessingStrategy.METADATA_ONLY:
+            return FileType.BINARY_FILES
+        elif strategy in [ProcessingStrategy.FULL_CONTENT, ProcessingStrategy.SUMMARY_ONLY]:
+            # 检查是否为关键文档（这部分逻辑保留，但只在分类阶段执行一次）
+            filename = filepath.name.lower()
+            critical_patterns = ['readme', 'license', 'copying', 'notice', 'changelog', 'changes', 
+                                'contributing', 'install', 'authors', 'news', 'todo', 'roadmap']
+            if any(pattern in filename for pattern in critical_patterns):
+                return FileType.CRITICAL_DOCS
+            else:
+                return FileType.REFERENCE_DOCS
+        elif strategy == ProcessingStrategy.CODE_SKELETON:
+            return FileType.SOURCE_CODE
+        elif strategy in [ProcessingStrategy.STRUCTURE_EXTRACT, ProcessingStrategy.HEADER_WITH_STATS]:
+            return FileType.TEXT_DATA
+        else:
+            return FileType.UNKNOWN
+    
+    def _default_classify(self, filepath: Path) -> Tuple[ProcessingStrategy, bool]:
+        """默认文件分类（当没有规则引擎时）- 提取自FileProcessorRegistry"""
+        try:
+            suffix = filepath.suffix.lower()
+            size = filepath.stat().st_size
+        except (OSError, IOError):
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        # 二进制扩展名
+        binary_exts = {'.exe', '.dll', '.so', '.dylib', '.zip', '.tar', '.gz', 
+                      '.jpg', '.png', '.mp3', '.mp4', '.pdf'}
+        if suffix in binary_exts:
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        # 源代码扩展名
+        code_exts = {'.py', '.java', '.cpp', '.c', '.js', '.ts', '.go', '.rs'}
+        if suffix in code_exts:
+            return ProcessingStrategy.CODE_SKELETON, False
+        
+        # 文档扩展名
+        doc_exts = {'.md', '.txt', '.rst', '.html'}
+        if suffix in doc_exts:
+            if size < 500 * 1024:
+                return ProcessingStrategy.SUMMARY_ONLY, False
+            else:
+                return ProcessingStrategy.HEADER_WITH_STATS, False
+        
+        # 默认
+        if size > 1024 * 1024:  # > 1MB
+            return ProcessingStrategy.METADATA_ONLY, False
+        return ProcessingStrategy.SUMMARY_ONLY, False
+    
+    def _estimate_tokens(self, filepath: Path, strategy: ProcessingStrategy) -> int:
+        """估算Token消耗（当没有规则引擎时）"""
+        config = STRATEGY_CONFIGS.get(strategy, STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY])
+        
+        if strategy == ProcessingStrategy.METADATA_ONLY:
+            return int(config.token_estimate * 100)
+        
+        try:
+            file_size = filepath.stat().st_size
+        except (OSError, IOError):
+            file_size = 0
+            
+        if config.max_size and file_size > config.max_size:
+            return STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY].token_estimate * 100
+        
+        estimated_chars = min(file_size, config.max_size or file_size)
+        return int(estimated_chars * config.token_estimate)
+    
     @staticmethod
     def _format_size(size_bytes: int) -> str:
         """格式化文件大小（与原始代码一致）"""
@@ -139,64 +275,309 @@ class DirectoryDigest(DirectoryDigestBase):
         # 构建目录结构（自动使用基类方法）
         self.structure = self._build_directory_structure(self.root)
         
-        # 处理所有文件
+        # 收集所有文件
+        all_files = self._collect_all_files_flat()
+        
+        # 第一阶段：统一分类所有文件
+        classified_files = []
+        for file_digest in all_files:
+            classification = self._classify_file(file_digest.metadata.path)
+            file_digest.metadata.file_type = classification.file_type
+            classified_files.append((file_digest, classification))
+            
+            # 更新统计
+            type_stat_key = classification.file_type.value
+            if type_stat_key in self.stats:
+                self.stats[type_stat_key] += 1
+            
+            # 计算哈希值
+            self._calculate_hashes(file_digest)
+        
+        # 第二阶段：根据模式处理
         if mode == "sort":
-            # sort 模式只需基础元数据，无需深度内容分析
-            for file_digest in self._collect_all_files_flat():
-                filepath = file_digest.metadata.path
-                
-                # 使用规则引擎进行更精确的分类（与原始代码一致）
-                if self.rule_engine:
-                    strategy, force_binary = self.rule_engine.classify_file(filepath)
-                    # 根据策略确定文件类型
-                    if force_binary or strategy == ProcessingStrategy.METADATA_ONLY:
-                        file_type = FileType.BINARY_FILES
-                    elif strategy in [ProcessingStrategy.FULL_CONTENT, ProcessingStrategy.SUMMARY_ONLY]:
-                        # 检查是否为关键文档
-                        filename = filepath.name.lower()
-                        critical_patterns = ['readme', 'license', 'copying', 'notice', 'changelog', 'changes', 
-                                            'contributing', 'install', 'authors', 'news', 'todo', 'roadmap']
-                        if any(pattern in filename for pattern in critical_patterns):
-                            file_type = FileType.CRITICAL_DOCS
-                        else:
-                            file_type = FileType.REFERENCE_DOCS
-                    elif strategy == ProcessingStrategy.CODE_SKELETON:
-                        file_type = FileType.SOURCE_CODE
-                    elif strategy in [ProcessingStrategy.STRUCTURE_EXTRACT, ProcessingStrategy.HEADER_WITH_STATS]:
-                        file_type = FileType.TEXT_DATA
-                    else:
-                        file_type = FileType.UNKNOWN
-                else:
-                    # 回退到文件类型检测器
-                    file_type = self.file_type_detector.detect(filepath)
-                
-                file_digest.metadata.file_type = file_type
-                
-                # 更新统计
-                type_stat_key = file_type.value
-                if type_stat_key in self.stats:
-                    self.stats[type_stat_key] += 1
-                
-                self._calculate_hashes(file_digest)
-            
-            # 更新统计信息
+            # sort模式只需基础元数据，使用已分类的类型
             self.stats['processing_time'] = time.time() - start_time
-            
-            # 调用本地实现的 _generate_sort_output
-            return self._generate_sort_output()
+            return self._generate_sort_output_unified(classified_files)
         else:
-            # 其他模式使用处理器注册表进行深度处理
-            self.processor_registry.process_directory(
-                self.structure, 
-                mode=mode,
-                parallel=self.use_parallel,
-                max_workers=self.max_workers
-            )
+            # framework/full模式使用处理器注册表进行深度处理
+            # 但需要先修改处理器注册表以使用已分类的结果
+            
+            # 临时解决方案：将分类结果传递给处理器注册表
+            for file_digest, classification in classified_files:
+                # 设置处理策略到元数据中，供处理器使用
+                file_digest.metadata.processing_strategy = classification.strategy
+                file_digest.metadata.force_binary = classification.force_binary
+            
+            # 使用修改后的处理器注册表
+            self._process_with_classified_files(classified_files, mode)
             
             # 更新统计信息
             self.stats['processing_time'] = time.time() - start_time
             
             return self._generate_output(mode)
+    
+    def _process_with_classified_files(self, classified_files, mode: str):
+        """使用已分类的文件列表进行处理"""
+        for file_digest, classification in classified_files:
+            self._process_single_file_with_classification(file_digest, classification, mode)
+    
+    def _process_single_file_with_classification(self, file_digest: FileDigest,
+                                                classification: FileClassification,
+                                                mode: str):
+        """使用分类结果处理单个文件"""
+        try:
+            filepath = file_digest.metadata.path
+            
+            # 检查文件大小限制
+            if file_digest.metadata.size > self.max_file_size:
+                self.stats['skipped_large_files'] += 1
+                self._process_as_binary(file_digest, mode)
+                self.stats['binary_files'] += 1
+                return
+            
+            # 检查Token限制
+            if self.context_manager:
+                if not self._check_and_allocate_context(classification, file_digest):
+                    self.stats['skipped_by_context'] += 1
+                    return
+            
+            # 根据分类结果获取处理器
+            processor = self._get_processor_by_file_type(file_digest.metadata.file_type)
+            
+            if processor and not classification.force_binary:
+                # 读取文件内容
+                content = self._read_file_content(filepath)
+                if content:
+                    # 使用分类中的策略进行处理
+                    processor.process(file_digest, content, mode, classification.strategy)
+                    # 统计已在分类阶段更新
+                    return
+                else:
+                    self._process_as_binary(file_digest, mode)
+                    self.stats['binary_files'] += 1
+                    return
+            else:
+                self._process_as_binary(file_digest, mode)
+                self.stats['binary_files'] += 1
+                return
+                
+        except Exception as e:
+            import sys
+            print(f"Warning: Error processing file {file_digest.metadata.path}: {e}", file=sys.stderr)
+            try:
+                self._process_as_binary(file_digest, mode)
+                self.stats['binary_files'] += 1
+            except:
+                pass
+    
+    def _get_processor_by_file_type(self, file_type: FileType) -> Optional[Any]:
+        """根据文件类型获取处理器"""
+        # 简化实现，实际应使用处理器注册表
+        from tools._directory_digest.processors import (
+            TextFileProcessor, SourceCodeProcessor, 
+            ConfigFileProcessor, DataFileProcessor
+        )
+        
+        config = self.config
+        
+        if file_type == FileType.SOURCE_CODE:
+            return SourceCodeProcessor(config)
+        elif file_type in [FileType.CRITICAL_DOCS, FileType.REFERENCE_DOCS]:
+            return TextFileProcessor(config)
+        elif file_type == FileType.TEXT_DATA:
+            # 根据扩展名决定使用配置处理器还是数据处理器
+            return ConfigFileProcessor(config)  # 简化处理
+        else:
+            return None
+    
+    def _read_file_content(self, filepath: Path) -> Optional[str]:
+        """读取文件内容"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(filepath, 'rb') as f:
+                    raw_content = f.read()
+                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                    for encoding in encodings_to_try:
+                        try:
+                            return raw_content.decode(encoding)
+                        except UnicodeDecodeError:
+                            continue
+                    return raw_content.decode('latin-1', errors='ignore')
+            except Exception:
+                return None
+    
+    def _process_as_binary(self, file_digest: FileDigest, mode: str):
+        """处理为二进制文件"""
+        # 哈希值已在分类阶段计算
+        file_digest.metadata.file_type = FileType.BINARY_FILES
+    
+    def _check_and_allocate_context(self, classification: FileClassification,
+                                   file_digest: FileDigest) -> bool:
+        """检查并分配上下文Token"""
+        if not self.context_manager:
+            return True
+        
+        if not self.context_manager.can_allocate(classification.estimated_tokens):
+            return False
+        
+        file_record = {
+            "path": str(file_digest.metadata.path),
+            "strategy": classification.strategy.value,
+            "estimated_tokens": classification.estimated_tokens,
+            "size": file_digest.metadata.size,
+        }
+        
+        return self.context_manager.allocate(classification.estimated_tokens, file_record)
+    
+    def _generate_output(self, mode: str) -> Dict:
+        """生成完整输出"""
+        if not self.structure:
+            return {}
+        
+        output = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "root_directory": str(self.root),
+                "output_mode": mode,
+                "statistics": self.stats,
+                "context_usage": self.context_manager.get_summary(),
+            },
+            "structure": self.structure.to_dict(mode)
+        }
+        
+        if self.context_manager.file_records:
+            output["context_allocation"] = {
+                "file_records": self.context_manager.file_records
+            }
+        
+        return output
+    
+    def _generate_sort_output_unified(self, classified_files) -> Dict:
+        """
+        生成分类排序输出（使用已分类的文件）
+        
+        Args:
+            classified_files: 已分类的文件列表，每个元素为(file_digest, classification)
+            
+        Returns:
+            Dict: 分类报告
+        """
+        # 按类型分组
+        by_type = {
+            FileType.CRITICAL_DOCS.value: [],
+            FileType.REFERENCE_DOCS.value: [],
+            FileType.SOURCE_CODE.value: [],
+            FileType.TEXT_DATA.value: [],
+            FileType.BINARY_FILES.value: [],
+            FileType.UNKNOWN.value: []
+        }
+        
+        # 按大小分组
+        large_files = []      # > 1MB
+        medium_files = []     # 100KB - 1MB
+        small_files = []      # < 100KB
+        
+        for file_digest, classification in classified_files:
+            file_type = file_digest.metadata.file_type.value
+            file_info = {
+                'path': str(file_digest.metadata.path.relative_to(self.root)),
+                'size': file_digest.metadata.size,
+                'size_formatted': self._format_size(file_digest.metadata.size),
+                'modified': file_digest.metadata.modified_time.isoformat() if file_digest.metadata.modified_time else 'unknown',
+                'type': file_type,
+                'is_binary': file_type == FileType.BINARY_FILES.value,
+                'strategy': classification.strategy.value,
+                'estimated_tokens': classification.estimated_tokens
+            }
+            
+            if file_type in by_type:
+                by_type[file_type].append(file_info)
+            else:
+                by_type[FileType.UNKNOWN.value].append(file_info)
+            
+            # 按大小分组
+            size = file_digest.metadata.size
+            if size > 1024 * 1024:
+                large_files.append(file_info)
+            elif size > 100 * 1024:
+                medium_files.append(file_info)
+            else:
+                small_files.append(file_info)
+        
+        # 构建报告
+        sort_report = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "root_directory": str(self.root),
+                "output_mode": "sort",
+                "statistics": self.stats,
+                "context_usage": self.context_manager.get_summary()
+            },
+            "classification": {},
+            "by_size": {
+                "large_files": large_files,
+                "medium_files": medium_files,
+                "small_files": small_files
+            },
+            "file_listings": {
+                k: sorted(v, key=lambda x: x['path']) 
+                for k, v in by_type.items() if v
+            }
+        }
+        
+        # 为每种类型生成详细信息
+        for type_name, files in by_type.items():
+            if not files:
+                continue
+                
+            # 按扩展名分组
+            by_ext = {}
+            for f in files:
+                path = f['path']
+                ext = Path(path).suffix.lower() or "(no extension)"
+                if ext not in by_ext:
+                    by_ext[ext] = []
+                by_ext[ext].append(path)
+            
+            # 计算总大小
+            total_size = sum(f['size'] for f in files)
+            
+            sort_report["classification"][type_name] = {
+                "count": len(files),
+                "total_size_bytes": total_size,
+                "total_size_formatted": self._format_size(total_size),
+                "extensions": {
+                    ext: {
+                        "count": len(paths),
+                        "files": sorted(paths)[:10],
+                        "truncated": len(paths) > 10,
+                        "total_count": len(paths)
+                    }
+                    for ext, paths in sorted(by_ext.items(), key=lambda x: len(x[1]), reverse=True)
+                }
+            }
+        
+        # 添加建议
+        recommendations = []
+        if large_files:
+            recommendations.append(
+                f"Found {len(large_files)} large files (>1MB). "
+                f"In 'full' mode, use --max-content-size to limit full content output."
+            )
+
+        if by_type.get(FileType.UNKNOWN.value, []):
+            count = len(by_type[FileType.UNKNOWN.value])
+            if count > 5:
+                recommendations.append(
+                    f"Found {count} unknown type files. Consider reviewing or adding to ignore patterns."
+                )
+        
+        sort_report["recommendations"] = recommendations
+        
+        return sort_report
     
     def _generate_output(self, mode: str) -> Dict:
         """生成完整输出"""
