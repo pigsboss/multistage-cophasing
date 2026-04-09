@@ -30,6 +30,9 @@ from tools._directory_digest import (
     STRATEGY_CONFIGS,
 )
 
+# Import processor registry
+from tools._directory_digest.processors import create_default_registry
+
 
 # 尝试导入高级分析器（如果可用）
 try:
