@@ -12,6 +12,7 @@ from .base import (
     # 数据类
     StrategyConfig,
     FileRule,
+    FileClassification,
     FileMetadata,
     FileDigest,
     DirectoryStructure,
@@ -34,6 +35,7 @@ __all__ = [
     'OutputFormats',
     'StrategyConfig',
     'FileRule',
+    'FileClassification',
     'FileMetadata',
     'FileDigest',
     'DirectoryStructure',
