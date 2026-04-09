@@ -9,6 +9,7 @@ Directory Digest Refactor - 重构版主入口
 import os
 import sys
 import argparse
+import mimetypes
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -92,6 +93,20 @@ class DirectoryDigest(DirectoryDigestBase):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+        # 初始化统计信息
+        self.stats = {
+            'total_files': 0,
+            'critical_docs': 0,
+            'reference_docs': 0,
+            'source_code': 0,
+            'text_data': 0,
+            'binary_files': 0,
+            'skipped_large_files': 0,
+            'skipped_by_context': 0,
+            'total_size': 0,
+            'processing_time': 0
+        }
         
         # 初始化高级组件（如果可用）
         if SEMANTICS_AVAILABLE:
@@ -333,6 +348,136 @@ class DirectoryDigest(DirectoryDigestBase):
         file_digest.metadata.file_type = FileType.TEXT_DATA
         self.stats['text_data'] += 1
         self._calculate_hashes(file_digest)
+    
+    def _collect_all_files_flat(self) -> List[FileDigest]:
+        """扁平化收集所有文件"""
+        all_files = []
+        
+        def collect(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect(subdir)
+        
+        if self.structure:
+            collect(self.structure)
+        return all_files
+
+    def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None) -> Path:
+        """保存输出到文件"""
+        if not output_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = format.lower()
+            if ext == "markdown":
+                ext = "md"
+            output_path = self.root / f"directory_digest_{timestamp}.{ext}"
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        content = FormatConverter.convert(output, format, mode)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        print(f"Summary saved to: {output_path}", file=sys.stderr)
+        return output_path
+
+    def _calculate_hashes(self, file_digest: FileDigest):
+        """计算文件的哈希值"""
+        import hashlib
+        filepath = file_digest.metadata.path
+        
+        try:
+            md5_hash = hashlib.md5()
+            sha256_hash = hashlib.sha256()
+            
+            with open(filepath, 'rb') as f:
+                # 使用64KB缓冲区流式读取
+                for chunk in iter(lambda: f.read(65536), b''):
+                    md5_hash.update(chunk)
+                    sha256_hash.update(chunk)
+            
+            file_digest.metadata.md5_hash = md5_hash.hexdigest()
+            file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
+            
+        except (OSError, IOError) as e:
+            print(f"Warning: Could not read file for hash calculation: {filepath} - {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "read_error"
+            file_digest.metadata.sha256_hash = "read_error"
+        except Exception as e:
+            print(f"Warning: Hash calculation failed for {filepath}: {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "hash_error"
+            file_digest.metadata.sha256_hash = "hash_error"
+
+    def _read_file_content(self, filepath: Path) -> Optional[str]:
+        """读取文件内容，处理编码问题"""
+        try:
+            # 首先尝试UTF-8
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            # 如果UTF-8失败，尝试其他编码
+            try:
+                with open(filepath, 'rb') as f:
+                    raw_content = f.read()
+                    
+                    # 尝试常见编码
+                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                    for encoding in encodings_to_try:
+                        try:
+                            return raw_content.decode(encoding)
+                        except UnicodeDecodeError:
+                            continue
+                    # 所有编码都失败，使用latin-1并忽略错误
+                    return raw_content.decode('latin-1', errors='ignore')
+            except Exception:
+                return None
+
+    def _build_directory_structure(self, path: Path) -> DirectoryStructure:
+        """递归构建目录结构"""
+        structure = DirectoryStructure(path=path)
+        
+        try:
+            for item in path.iterdir():
+                # 检查是否应该忽略
+                if self._should_ignore(item):
+                    continue
+                
+                if item.is_dir():
+                    # 递归处理子目录
+                    sub_structure = self._build_directory_structure(item)
+                    structure.subdirectories[item.name] = sub_structure
+                else:
+                    # 文件，创建FileDigest
+                    stat_result = item.stat()
+                    structure.files.append(FileDigest(
+                        metadata=FileMetadata(
+                            path=item,
+                            size=stat_result.st_size,
+                            modified_time=datetime.fromtimestamp(stat_result.st_mtime),
+                            created_time=datetime.fromtimestamp(stat_result.st_ctime),
+                            file_type=FileType.UNKNOWN,
+                            mime_type=mimetypes.guess_type(str(item))[0]
+                        )
+                    ))
+                    self.stats['total_files'] += 1
+                    self.stats['total_size'] += stat_result.st_size
+                    
+        except PermissionError:
+            print(f"Warning: Permission denied for directory {path}", file=sys.stderr)
+        
+        return structure
+
+    def _should_ignore(self, path: Path) -> bool:
+        """检查路径是否应该被忽略"""
+        import fnmatch
+        
+        for pattern in self.config.get('ignore_patterns', []):
+            if fnmatch.fnmatch(path.name, pattern):
+                return True
+            if pattern.startswith('*') and path.name.endswith(pattern[1:]):
+                return True
+        
+        return False
     
     def _generate_sort_output(self) -> Dict:
         """生成分类排序输出"""
