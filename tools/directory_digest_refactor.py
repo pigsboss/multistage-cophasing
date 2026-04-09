@@ -768,6 +768,10 @@ def main():
                         text = text.replace(f" (default: {action.default})", 
                                           f" {C['DIM']}(default: {C['YLW']}{action.default}{C['DIM']}){C['RST']}")
                 return text
+            
+            def _format_text(self, text):
+                # 直接返回原始文本，不进行任何换行处理
+                return text if text else ''
         
         FormatterClass = ColorHelpFormatter
     
