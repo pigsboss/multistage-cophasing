@@ -1,0 +1,816 @@
+"""
+Directory Digest - 基础模块
+包含输入输出处理、文件系统分析、规则引擎等核心功能
+"""
+
+import os
+import sys
+import json
+import hashlib
+import mimetypes
+import fnmatch
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, Any
+from dataclasses import dataclass, field
+from datetime import datetime
+import re
+from enum import Enum
+from collections import Counter
+
+# 依赖检测
+try:
+    import chardet
+    CHARDET_AVAILABLE = True
+except ImportError:
+    CHARDET_AVAILABLE = False
+    print("Warning: chardet not installed, using simplified encoding detection", file=sys.stderr)
+
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    print("Warning: PyYAML not installed, YAML parsing limited", file=sys.stderr)
+
+
+# ==================== 枚举定义 ====================
+
+class ProcessingStrategy(Enum):
+    """文件处理策略枚举"""
+    FULL_CONTENT = "full_content"
+    SUMMARY_ONLY = "summary_only"
+    CODE_SKELETON = "code_skeleton"
+    STRUCTURE_EXTRACT = "structure_extract"
+    HEADER_WITH_STATS = "header_with_stats"
+    METADATA_ONLY = "metadata_only"
+
+
+class FileType(Enum):
+    """文件类型枚举"""
+    CRITICAL_DOCS = "critical_docs"
+    REFERENCE_DOCS = "reference_docs"
+    SOURCE_CODE = "source_code"
+    TEXT_DATA = "text_data"
+    BINARY_FILES = "binary_files"
+    UNKNOWN = "unknown"
+
+
+class OutputFormats(Enum):
+    """支持的输出格式"""
+    JSON = "json"
+    YAML = "yaml"
+    MARKDOWN = "md"
+    HTML = "html"
+    TOML = "toml"
+    PLAINTEXT = "txt"
+
+
+# ==================== 数据类定义 ====================
+
+@dataclass
+class StrategyConfig:
+    """策略配置"""
+    token_estimate: float
+    max_size: Optional[int] = None
+    max_lines: Optional[int] = None
+    include_metadata: bool = True
+    include_functions: bool = False
+    include_classes: bool = False
+    max_keys: Optional[int] = None
+    include_stats: bool = False
+
+
+@dataclass
+class FileRule:
+    """文件规则定义"""
+    name: str
+    patterns: List[str]
+    strategy: ProcessingStrategy
+    priority: int = 50
+    force_binary: bool = False
+    max_size: Optional[int] = None
+    comment: Optional[str] = None
+    
+    def matches(self, filepath: Path) -> bool:
+        """检查文件是否匹配此规则"""
+        if self.max_size:
+            try:
+                if filepath.stat().st_size > self.max_size:
+                    return False
+            except (OSError, IOError):
+                return False
+                
+        for pattern in self.patterns:
+            if fnmatch.fnmatch(filepath.name, pattern):
+                return True
+            if fnmatch.fnmatch(str(filepath), pattern):
+                return True
+        return False
+
+
+@dataclass
+class FileMetadata:
+    """文件元数据基类"""
+    path: Path
+    size: int
+    modified_time: datetime
+    created_time: datetime
+    file_type: FileType
+    mime_type: Optional[str] = None
+    md5_hash: Optional[str] = None
+    sha256_hash: Optional[str] = None
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return {
+            "path": str(self.path),
+            "size": self.size,
+            "modified_time": self.modified_time.isoformat(),
+            "created_time": self.created_time.isoformat(),
+            "file_type": self.file_type.value,
+            "mime_type": self.mime_type,
+            "md5_hash": self.md5_hash,
+            "sha256_hash": self.sha256_hash
+        }
+
+
+@dataclass
+class FileDigest:
+    """单个文件摘要"""
+    metadata: FileMetadata
+    full_content: Optional[str] = None
+    human_readable_summary: Optional[Any] = None
+    source_code_analysis: Optional[Any] = None
+    
+    def to_dict(self, mode: str = "framework") -> Dict:
+        """转换为字典"""
+        result = {"metadata": self.metadata.to_dict()}
+        if mode == "full" and self.full_content:
+            result["full_content"] = self.full_content
+        if self.human_readable_summary:
+            result["summary"] = getattr(self.human_readable_summary, 'to_dict', lambda: {})()
+        if self.source_code_analysis:
+            result["source_analysis"] = getattr(self.source_code_analysis, 'to_dict', lambda: {})()
+        return result
+
+
+@dataclass
+class DirectoryStructure:
+    """目录结构表示"""
+    path: Path
+    files: List[FileDigest] = field(default_factory=list)
+    subdirectories: Dict[str, 'DirectoryStructure'] = field(default_factory=dict)
+    
+    def to_dict(self, mode: str = "framework") -> Dict:
+        """转换为嵌套字典结构"""
+        return {
+            "path": str(self.path),
+            "files": [f.to_dict(mode) for f in self.files],
+            "subdirectories": {name: d.to_dict(mode) for name, d in self.subdirectories.items()}
+        }
+
+
+# ==================== 策略配置映射 ====================
+
+STRATEGY_CONFIGS: Dict[ProcessingStrategy, StrategyConfig] = {
+    ProcessingStrategy.FULL_CONTENT: StrategyConfig(
+        token_estimate=0.25,
+        max_size=100 * 1024,
+    ),
+    ProcessingStrategy.SUMMARY_ONLY: StrategyConfig(
+        token_estimate=0.05,
+        max_lines=50,
+    ),
+    ProcessingStrategy.CODE_SKELETON: StrategyConfig(
+        token_estimate=0.02,
+        include_functions=True,
+        include_classes=True,
+    ),
+    ProcessingStrategy.STRUCTURE_EXTRACT: StrategyConfig(
+        token_estimate=0.03,
+        max_keys=20,
+    ),
+    ProcessingStrategy.HEADER_WITH_STATS: StrategyConfig(
+        token_estimate=0.01,
+        max_lines=10,
+        include_stats=True,
+    ),
+    ProcessingStrategy.METADATA_ONLY: StrategyConfig(
+        token_estimate=0.001,
+    ),
+}
+
+
+# ==================== 文件类型检测器 ====================
+
+class FileTypeDetector:
+    """智能文件类型检测器"""
+    
+    EXTENSION_MAPPING = {
+        FileType.REFERENCE_DOCS: ['.md', '.markdown', '.rst', '.html', '.htm'],
+        FileType.SOURCE_CODE: [
+            '.py', '.java', '.cpp', '.c', '.h', '.hpp',
+            '.js', '.ts', '.jsx', '.tsx',
+            '.go', '.rs', '.rb', '.php', '.swift',
+            '.sh', '.bash', '.ps1', '.bat', '.cmd',
+            '.css', '.scss', '.less'
+        ],
+        FileType.TEXT_DATA: [
+            '.txt', '.log', '.csv', '.tsv',
+            '.yaml', '.yml', '.json', '.xml', '.toml', 
+            '.ini', '.cfg', '.conf', '.env',
+            '.tf', '.tls', '.tpc', '.ker', '.cmt'
+        ],
+        FileType.BINARY_FILES: [
+            '.exe', '.dll', '.so', '.dylib',
+            '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+            '.mp3', '.mp4', '.avi', '.mkv',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.bin', '.dat', '.db', '.sqlite',
+            '.h5', '.hdf5', '.fits'
+        ]
+    }
+    
+    @staticmethod
+    def detect_by_extension(filepath: Path) -> Optional[FileType]:
+        """通过扩展名检测文件类型"""
+        suffix = filepath.suffix.lower()
+        for file_type, extensions in FileTypeDetector.EXTENSION_MAPPING.items():
+            if suffix in extensions:
+                return file_type
+        return None
+    
+    @staticmethod
+    def detect_by_content(filepath: Path) -> FileType:
+        """通过内容分析检测文件类型"""
+        try:
+            with open(filepath, 'rb') as f:
+                sample = f.read(4096)
+                
+                if b'\x00' in sample:
+                    return FileType.BINARY_FILES
+                
+                printable_count = 0
+                for byte in sample:
+                    if 32 <= byte <= 126 or byte in (9, 10, 13):
+                        printable_count += 1
+                
+                printable_ratio = printable_count / len(sample) if sample else 0
+                
+                if printable_ratio < 0.7:
+                    return FileType.BINARY_FILES
+                
+                try:
+                    decoded = sample.decode('utf-8', errors='ignore')
+                    if FileTypeDetector._looks_like_source_code(decoded):
+                        return FileType.SOURCE_CODE
+                except:
+                    pass
+                
+                return FileType.TEXT_DATA
+                
+        except Exception:
+            return FileType.BINARY_FILES
+    
+    @staticmethod
+    def _looks_like_source_code(content: str) -> bool:
+        """判断内容是否像源代码"""
+        patterns = [
+            r'^\s*import\s+', r'^\s*package\s+', r'^\s*#include\s+',
+            r'^\s*def\s+\w+\s*\(', r'^\s*function\s+\w+', r'^\s*class\s+\w+',
+            r'^\s*public\s+', r'^\s*private\s+', r'^\s*protected\s+',
+            r'^\s*static\s+', r'^\s*const\s+', r'^\s*let\s+\w+\s*=',
+            r'^\s*var\s+\w+\s*=', r'^\s*console\.log', r'^\s*print\(',
+            r'^\s*System\.out\.', r'^\s*//', r'^\s*/\*', r'^\s*\*/', r'^\s*#\s*',
+        ]
+        
+        lines = content.split('\n')[:50]
+        code_pattern_count = 0
+        
+        for line in lines:
+            for pattern in patterns:
+                if re.search(pattern, line):
+                    code_pattern_count += 1
+                    break
+        
+        return code_pattern_count >= 3
+    
+    @staticmethod
+    def detect(filepath: Path) -> FileType:
+        """综合检测文件类型"""
+        type_by_ext = FileTypeDetector.detect_by_extension(filepath)
+        if type_by_ext:
+            return type_by_ext
+        return FileTypeDetector.detect_by_content(filepath)
+
+
+# ==================== 规则引擎 ====================
+
+class RuleEngine:
+    """规则引擎"""
+    
+    def __init__(self, rules_file: Optional[Path] = None):
+        self.rules: List[FileRule] = []
+        self.default_strategy = ProcessingStrategy.METADATA_ONLY
+        
+        if rules_file and rules_file.exists():
+            self.load_rules(rules_file)
+        else:
+            self.load_default_rules()
+        
+        self.rules.sort(key=lambda r: r.priority, reverse=True)
+    
+    def load_default_rules(self):
+        """加载内置默认规则"""
+        default_rules = [
+            FileRule("critical_readme", ["README*", "readme*"], 
+                    ProcessingStrategy.FULL_CONTENT, priority=100, max_size=256*1024),
+            FileRule("critical_license", ["LICENSE*", "COPYING*", "NOTICE*"], 
+                    ProcessingStrategy.FULL_CONTENT, priority=100, max_size=128*1024),
+            FileRule("critical_changelog", ["CHANGELOG*", "CHANGES*"], 
+                    ProcessingStrategy.SUMMARY_ONLY, priority=95, max_size=256*1024),
+            FileRule("critical_contrib", ["CONTRIBUTING*", "INSTALL*", "AUTHORS*", "NEWS*", "TODO*", "ROADMAP*"], 
+                    ProcessingStrategy.SUMMARY_ONLY, priority=95, max_size=256*1024),
+            FileRule("binary_archives", ["*.gz", "*.bz2", "*.xz", "*.7z", "*.rar", "*.zip", "*.tar"], 
+                    ProcessingStrategy.METADATA_ONLY, priority=90, force_binary=True),
+            FileRule("media_files", ["*.avi", "*.mp4", "*.mov", "*.wav", "*.mp3", "*.jpg", "*.png"],
+                    ProcessingStrategy.METADATA_ONLY, priority=90, force_binary=True),
+            FileRule("reference_docs", ["*.md", "*.markdown", "*.rst", "*.tex", "*.html", "*.htm"],
+                    ProcessingStrategy.SUMMARY_ONLY, priority=80, max_size=512*1024),
+            FileRule("source_code", ["*.py", "*.c", "*.cpp", "*.h", "*.java", "*.js", "*.ts", "*.go", "*.rs"],
+                    ProcessingStrategy.CODE_SKELETON, priority=70),
+            FileRule("config_files", ["*.yaml", "*.yml", "*.json", "*.toml", "*.conf", "*.ini", "*.cfg"],
+                    ProcessingStrategy.STRUCTURE_EXTRACT, priority=60),
+        ]
+        self.rules.extend(default_rules)
+    
+    def load_rules(self, rules_file: Path):
+        """从YAML文件加载规则"""
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+        except Exception as e:
+            print(f"Warning: Could not load rules file {rules_file}: {e}", file=sys.stderr)
+            print("Using built-in default rules", file=sys.stderr)
+            self.load_default_rules()
+            return
+        
+        if 'file_classifications' not in data:
+            for category, patterns in data.items():
+                if not patterns:
+                    continue
+                try:
+                    strategy_map = {
+                        'critical_docs': ProcessingStrategy.FULL_CONTENT,
+                        'reference_docs': ProcessingStrategy.SUMMARY_ONLY,
+                        'source_code': ProcessingStrategy.CODE_SKELETON,
+                        'text_data': ProcessingStrategy.STRUCTURE_EXTRACT,
+                        'binary_files': ProcessingStrategy.METADATA_ONLY
+                    }
+                    strategy = strategy_map.get(category, ProcessingStrategy.METADATA_ONLY)
+                    
+                    rule = FileRule(
+                        name=category,
+                        patterns=patterns,
+                        strategy=strategy,
+                        priority=100 if category == 'critical_docs' else 
+                                90 if category == 'binary_files' else 50,
+                        force_binary=(category == 'binary_files'),
+                        comment=f"From rules file: {category}"
+                    )
+                    self.rules.append(rule)
+                except Exception as e:
+                    print(f"Warning: Error parsing rule category {category}: {e}", file=sys.stderr)
+        else:
+            rule_defs = data.get('file_classifications', [])
+            for rule_def in rule_defs:
+                try:
+                    strategy_name = rule_def.get('strategy', 'metadata_only')
+                    strategy = ProcessingStrategy(strategy_name)
+                    patterns = rule_def.get('patterns', [])
+                    if not patterns:
+                        continue
+                    
+                    rule = FileRule(
+                        name=rule_def.get('name', 'unnamed'),
+                        patterns=patterns,
+                        strategy=strategy,
+                        priority=rule_def.get('priority', 50),
+                        force_binary=rule_def.get('force_binary', False),
+                        max_size=rule_def.get('max_size_kb', 0) * 1024 if rule_def.get('max_size_kb') else None,
+                        comment=rule_def.get('comment')
+                    )
+                    self.rules.append(rule)
+                except Exception as e:
+                    print(f"Warning: Error parsing rule: {rule_def.get('name', 'unnamed')} - {e}", file=sys.stderr)
+        
+        self.rules.sort(key=lambda r: r.priority, reverse=True)
+    
+    def classify_file(self, filepath: Path) -> Tuple[ProcessingStrategy, bool]:
+        """分类文件并返回处理策略"""
+        try:
+            stat_result = filepath.stat()
+        except (OSError, IOError):
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        for rule in self.rules:
+            if rule.matches(filepath):
+                return rule.strategy, rule.force_binary
+        
+        file_size = stat_result.st_size
+        
+        if file_size > 1024 * 1024:
+            return ProcessingStrategy.METADATA_ONLY, True
+        
+        suffix = filepath.suffix.lower()
+        
+        if suffix in ['.txt', '.md', '.rst']:
+            if file_size < 500 * 1024:
+                return ProcessingStrategy.SUMMARY_ONLY, False
+            else:
+                return ProcessingStrategy.HEADER_WITH_STATS, False
+        
+        return ProcessingStrategy.METADATA_ONLY, False
+    
+    def estimate_token_usage(self, filepath: Path, strategy: ProcessingStrategy) -> int:
+        """估算文件使用特定策略的token消耗"""
+        try:
+            file_size = filepath.stat().st_size
+        except (OSError, IOError):
+            return 0
+        
+        config = STRATEGY_CONFIGS.get(strategy, STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY])
+        
+        if strategy == ProcessingStrategy.METADATA_ONLY:
+            return int(config.token_estimate * 100)
+        
+        if config.max_size and file_size > config.max_size:
+            return STRATEGY_CONFIGS[ProcessingStrategy.METADATA_ONLY].token_estimate * 100
+        
+        estimated_chars = min(file_size, config.max_size or file_size)
+        return int(estimated_chars * config.token_estimate)
+
+
+# ==================== 上下文管理器 ====================
+
+class ContextManager:
+    """LLM上下文管理器"""
+    
+    def __init__(self, max_tokens: int = 128000):
+        self.max_tokens = max_tokens
+        self.reserved_tokens = 4000
+        self.used_tokens = 0
+        self.file_records: List[Dict] = []
+        
+    @property
+    def available_tokens(self) -> int:
+        return self.max_tokens - self.reserved_tokens - self.used_tokens
+    
+    def can_allocate(self, estimated_tokens: int) -> bool:
+        return self.used_tokens + estimated_tokens <= self.available_tokens
+    
+    def allocate(self, estimated_tokens: int, file_record: Dict) -> bool:
+        if not self.can_allocate(estimated_tokens):
+            return False
+        self.used_tokens += estimated_tokens
+        self.file_records.append(file_record)
+        return True
+    
+    def downgrade_strategy(self, current_strategy: ProcessingStrategy) -> ProcessingStrategy:
+        strategy_hierarchy = [
+            ProcessingStrategy.FULL_CONTENT,
+            ProcessingStrategy.SUMMARY_ONLY,
+            ProcessingStrategy.CODE_SKELETON,
+            ProcessingStrategy.STRUCTURE_EXTRACT,
+            ProcessingStrategy.HEADER_WITH_STATS,
+            ProcessingStrategy.METADATA_ONLY,
+        ]
+        
+        try:
+            current_index = strategy_hierarchy.index(current_strategy)
+            if current_index + 1 < len(strategy_hierarchy):
+                return strategy_hierarchy[current_index + 1]
+        except ValueError:
+            pass
+        
+        return ProcessingStrategy.METADATA_ONLY
+    
+    def get_summary(self) -> Dict[str, Any]:
+        return {
+            "max_tokens": self.max_tokens,
+            "reserved_tokens": self.reserved_tokens,
+            "used_tokens": self.used_tokens,
+            "available_tokens": self.available_tokens,
+            "file_count": len(self.file_records),
+            "token_utilization": self.used_tokens / (self.max_tokens - self.reserved_tokens),
+        }
+
+
+# ==================== 格式转换器（基础版） ====================
+
+class FormatConverter:
+    """格式转换器（基础版）"""
+    
+    @staticmethod
+    def convert(digest_data: Dict, format: str, mode: str = None) -> str:
+        """转换为指定格式"""
+        if format == "json":
+            return json.dumps(digest_data, indent=2, ensure_ascii=False)
+        elif format == "yaml":
+            return FormatConverter._to_yaml(digest_data)
+        elif format == "markdown" or format == "md":
+            return FormatConverter._to_markdown_basic(digest_data)
+        elif format == "txt" or format == "text":
+            return FormatConverter._to_plaintext(digest_data)
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+    
+    @staticmethod
+    def _to_yaml(digest_data: Dict) -> str:
+        """转换为YAML格式"""
+        if not YAML_AVAILABLE:
+            return json.dumps(digest_data, indent=2, ensure_ascii=False)
+        try:
+            return yaml.dump(digest_data, allow_unicode=True, default_flow_style=False)
+        except Exception:
+            return json.dumps(digest_data, indent=2, ensure_ascii=False)
+    
+    @staticmethod
+    def _to_markdown_basic(digest_data: Dict) -> str:
+        """基础Markdown转换"""
+        lines = ["# Directory Digest Report", ""]
+        metadata = digest_data.get('metadata', {})
+        if metadata:
+            lines.append("## Metadata")
+            lines.append("")
+            for key, value in metadata.items():
+                if isinstance(value, dict):
+                    lines.append(f"- **{key}**:")
+                    for k, v in value.items():
+                        lines.append(f"  - {k}: {v}")
+                else:
+                    lines.append(f"- **{key}**: {value}")
+            lines.append("")
+        lines.append("## Raw Data")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(digest_data, indent=2, ensure_ascii=False))
+        lines.append("```")
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def _to_plaintext(digest_data: Dict) -> str:
+        """转换为纯文本"""
+        return json.dumps(digest_data, indent=2, ensure_ascii=False)
+    
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """格式化文件大小"""
+        if size_bytes == 0:
+            return "0 B"
+        import math
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {units[i]}"
+
+
+# ==================== 目录摘要生成器（基础版） ====================
+
+class DirectoryDigestBase:
+    """目录摘要生成器（基础版 - 包含输入输出和文件系统分析）"""
+    
+    def __init__(self, 
+                 root_path: Union[str, Path],
+                 config: Optional[Dict] = None):
+        """
+        初始化摘要生成器
+        
+        Args:
+            root_path: 根目录路径
+            config: 配置字典
+        """
+        self.root = Path(root_path).resolve()
+        self.config = config or {}
+        
+        self.max_file_size = self.config.get('max_file_size', 10 * 1024 * 1024 * 1024)
+        self.ignore_patterns = self.config.get('ignore_patterns', [
+            '*.pyc', '*.pyo', '*.so', '*.dll', '__pycache__', 
+            '.git', '.svn', '.hg', '.DS_Store', '*.swp', '*.swo'
+        ])
+        
+        self.rules_file = self.config.get('rules_file')
+        self.context_size = self.config.get('context_size', 128000)
+        self.rule_engine = RuleEngine(self.rules_file)
+        self.context_manager = ContextManager(self.context_size)
+        
+        self.file_type_detector = FileTypeDetector()
+        
+        self.structure: Optional[DirectoryStructure] = None
+        self.stats = {
+            'total_files': 0,
+            'critical_docs': 0,
+            'reference_docs': 0,
+            'source_code': 0,
+            'text_data': 0,
+            'binary_files': 0,
+            'skipped_large_files': 0,
+            'skipped_by_context': 0,
+            'total_size': 0,
+            'processing_time': 0
+        }
+    
+    def _should_ignore(self, path: Path) -> bool:
+        """检查路径是否应该被忽略"""
+        for pattern in self.ignore_patterns:
+            if fnmatch.fnmatch(path.name, pattern):
+                return True
+            if pattern.startswith('*') and path.name.endswith(pattern[1:]):
+                return True
+        return False
+    
+    def _build_directory_structure(self, path: Path) -> DirectoryStructure:
+        """递归构建目录结构"""
+        structure = DirectoryStructure(path=path)
+        
+        try:
+            for item in path.iterdir():
+                if self._should_ignore(item):
+                    continue
+                
+                if item.is_dir():
+                    sub_structure = self._build_directory_structure(item)
+                    structure.subdirectories[item.name] = sub_structure
+                else:
+                    structure.files.append(FileDigest(
+                        metadata=FileMetadata(
+                            path=item,
+                            size=item.stat().st_size,
+                            modified_time=datetime.fromtimestamp(item.stat().st_mtime),
+                            created_time=datetime.fromtimestamp(item.stat().st_ctime),
+                            file_type=FileType.UNKNOWN,
+                            mime_type=mimetypes.guess_type(str(item))[0]
+                        )
+                    ))
+                    self.stats['total_files'] += 1
+                    self.stats['total_size'] += item.stat().st_size
+                    
+        except PermissionError:
+            print(f"Warning: Permission denied accessing directory {path}", file=sys.stderr)
+        
+        return structure
+    
+    def _read_file_content(self, filepath: Path) -> Optional[str]:
+        """统一读取文件内容，处理编码问题"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(filepath, 'rb') as f:
+                    raw_content = f.read()
+                    
+                    if not CHARDET_AVAILABLE:
+                        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                        for encoding in encodings_to_try:
+                            try:
+                                return raw_content.decode(encoding)
+                            except UnicodeDecodeError:
+                                continue
+                        return raw_content.decode('latin-1', errors='ignore')
+                    else:
+                        result = chardet.detect(raw_content)
+                        encoding = result['encoding'] if result['encoding'] else 'latin-1'
+                        return raw_content.decode(encoding, errors='ignore')
+            except Exception:
+                return None
+    
+    def _calculate_hashes(self, file_digest: FileDigest):
+        """计算文件的哈希值（流式处理）"""
+        filepath = file_digest.metadata.path
+        
+        try:
+            md5_hash = hashlib.md5()
+            sha256_hash = hashlib.sha256()
+            
+            with open(filepath, 'rb') as f:
+                for chunk in iter(lambda: f.read(65536), b''):
+                    md5_hash.update(chunk)
+                    sha256_hash.update(chunk)
+            
+            file_digest.metadata.md5_hash = md5_hash.hexdigest()
+            file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
+            
+        except (OSError, IOError) as e:
+            print(f"Warning: Could not read file for hash calculation: {filepath} - {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "read_error"
+            file_digest.metadata.sha256_hash = "read_error"
+        except Exception as e:
+            print(f"Warning: Hash calculation failed for {filepath}: {e}", file=sys.stderr)
+            file_digest.metadata.md5_hash = "hash_error"
+            file_digest.metadata.sha256_hash = "hash_error"
+    
+    def _collect_all_files_flat(self) -> List[FileDigest]:
+        """扁平化收集所有文件"""
+        all_files = []
+        
+        def collect(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect(subdir)
+        
+        if self.structure:
+            collect(self.structure)
+        return all_files
+    
+    def create_basic_digest(self, mode: str = "framework") -> Dict:
+        """
+        创建基础目录摘要（仅包含文件系统分析和元数据）
+        
+        Args:
+            mode: 输出模式
+        """
+        import time
+        start_time = time.time()
+        
+        self.structure = self._build_directory_structure(self.root)
+        
+        for file_digest in self._collect_all_files_flat():
+            filepath = file_digest.metadata.path
+            
+            file_type = self.file_type_detector.detect(filepath)
+            file_digest.metadata.file_type = file_type
+            
+            type_stat_key = file_type.value
+            if type_stat_key in self.stats:
+                self.stats[type_stat_key] += 1
+            
+            self._calculate_hashes(file_digest)
+        
+        self.stats['processing_time'] = time.time() - start_time
+        
+        return self._generate_basic_output(mode)
+    
+    def _generate_basic_output(self, mode: str) -> Dict:
+        """生成基础输出"""
+        if not self.structure:
+            return {}
+        
+        return {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "root_directory": str(self.root),
+                "output_mode": mode,
+                "statistics": self.stats,
+                "context_usage": self.context_manager.get_summary(),
+            },
+            "structure": self.structure.to_dict(mode)
+        }
+    
+    def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None):
+        """保存输出到文件"""
+        if not output_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = format.lower()
+            if ext == "markdown":
+                ext = "md"
+            output_path = self.root / f"directory_digest_{timestamp}.{ext}"
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        content = FormatConverter.convert(output, format, mode)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        print(f"Digest saved to: {output_path}")
+        return output_path
+
+
+# ==================== 公共 API 导出 ====================
+
+__all__ = [
+    # 枚举
+    'ProcessingStrategy',
+    'FileType',
+    'OutputFormats',
+    
+    # 数据类
+    'StrategyConfig',
+    'FileRule',
+    'FileMetadata',
+    'FileDigest',
+    'DirectoryStructure',
+    
+    # 核心类
+    'FileTypeDetector',
+    'RuleEngine',
+    'ContextManager',
+    'FormatConverter',
+    'DirectoryDigestBase',
+    
+    # 配置
+    'STRATEGY_CONFIGS',
+]
