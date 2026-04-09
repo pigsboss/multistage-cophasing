@@ -515,15 +515,9 @@ class FormatConverter:
     @staticmethod
     def convert(digest_data: Dict, format: str, mode: str = None) -> str:
         """转换为指定格式"""
-        # 优先处理 sort 模式
+        # 优先处理 sort 模式 - 强制使用 ls -l 格式（与原始代码一致）
         if mode == "sort" or digest_data.get('metadata', {}).get('output_mode') == "sort":
-            if format in ["json", "yaml"]:
-                # Sort 模式下 JSON/YAML 仍输出结构化数据
-                import json
-                return json.dumps(digest_data, indent=2, ensure_ascii=False)
-            else:
-                # 文本格式使用 ls -l 风格
-                return FormatConverter._to_sort_format(digest_data)
+            return FormatConverter._to_sort_format(digest_data)
         
         # 其他模式原有逻辑
         if format == "json":
