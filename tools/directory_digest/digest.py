@@ -7,19 +7,23 @@ import os
 import sys
 import hashlib
 import mimetypes
+import concurrent.futures
 from pathlib import Path
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional, Union, List, Any
 from datetime import datetime
 import fnmatch
 
-from .constants import FileType, ProcessingStrategy
-from .types import DirectoryStructure, FileDigest, FileMetadata
+from .constants import FileType, ProcessingStrategy, OutputFormats
+from .types import DirectoryStructure, FileDigest, FileMetadata, StrategyConfig, HumanReadableSummary
 from .core.rule_engine import RuleEngine
 from .core.context_manager import ContextManager
 from .analysis.summarizer import HumanReadableSummarizer
 from .analysis.code_analyzer import SourceCodeAnalyzer
+from .analysis.content_analyzer import ContentAnalyzer
 from .analysis.text_processor import SmartTextProcessor
 from .utils.detector import FileTypeDetector
+from .utils.complexity_analyzer import ComplexityAnalyzer
+from .utils.format_converter import FormatConverter
 
 
 class DirectoryDigest:
@@ -50,14 +54,17 @@ class DirectoryDigest:
         # 新配置项
         self.rules_file = self.config.get('rules_file')
         self.context_size = self.config.get('context_size', 128000)
+        
+        # 初始化组件
         self.rule_engine = RuleEngine(self.rules_file)
         self.context_manager = ContextManager(self.context_size)
-        
-        # 原有分析器
         self.file_type_detector = FileTypeDetector()
         self.human_summarizer = HumanReadableSummarizer()
         self.source_analyzer = SourceCodeAnalyzer()
         self.text_processor = SmartTextProcessor()
+        self.content_analyzer = ContentAnalyzer()
+        self.complexity_analyzer = ComplexityAnalyzer()
+        self.format_converter = FormatConverter()
         
         # 存储结果
         self.structure: Optional[DirectoryStructure] = None
@@ -88,7 +95,10 @@ class DirectoryDigest:
         self.structure = self._build_directory_structure(self.root)
         
         # 处理所有文件
-        self._process_directory(self.structure, mode)
+        if self.use_parallel and len(self.structure.files) > 10:
+            self._process_directory_parallel(self.structure, mode)
+        else:
+            self._process_directory(self.structure, mode)
         
         # 更新统计信息
         self.stats['processing_time'] = time.time() - start_time
@@ -143,9 +153,42 @@ class DirectoryDigest:
         
         return False
     
+    def _process_directory_parallel(self, structure: DirectoryStructure, mode: str):
+        """并行处理目录中的所有文件"""
+        # 收集所有文件
+        all_files = []
+        def collect_files(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect_files(subdir)
+        
+        collect_files(structure)
+        
+        # 使用线程池并行处理文件
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有处理任务
+            future_to_file = {
+                executor.submit(self._process_file_safe, file_digest, mode): file_digest
+                for file_digest in all_files
+            }
+            
+            # 等待所有任务完成
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_digest = future_to_file[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"警告: 并行处理文件 {file_digest.metadata.path} 时出错: {e}", file=sys.stderr)
+    
+    def _process_file_safe(self, file_digest: FileDigest, mode: str):
+        """安全的文件处理（用于并行处理）"""
+        try:
+            self._process_file(file_digest, mode)
+        except Exception as e:
+            print(f"警告: 处理文件 {file_digest.metadata.path} 时出错: {e}", file=sys.stderr)
+    
     def _process_directory(self, structure: DirectoryStructure, mode: str):
-        """处理目录中的所有文件"""
-        # 串行处理
+        """串行处理目录中的所有文件"""
         for file_digest in structure.files:
             self._process_file(file_digest, mode)
         
@@ -167,9 +210,9 @@ class DirectoryDigest:
             # 3. 检查文件大小限制
             if file_digest.metadata.size > self.max_file_size:
                 file_digest.metadata.file_type = FileType.BINARY_FILES
-                file_digest.human_readable_summary = HumanReadableSummary(
-                    summary=f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) exceeds limit",
-                    line_count=0
+                file_digest.human_readable_summary = HumanReadableSummarizer.summarize(
+                    filepath, 
+                    f"[SKIPPED] File size ({file_digest.metadata.size / (1024*1024):.2f} MB) exceeds limit"
                 )
                 self.stats['skipped_large_files'] += 1
                 self.stats['binary_files'] += 1
@@ -193,9 +236,9 @@ class DirectoryDigest:
                     # 即使降级也无法分配，跳过此文件
                     self.stats['skipped_by_context'] += 1
                     file_digest.metadata.file_type = FileType.UNKNOWN
-                    file_digest.human_readable_summary = HumanReadableSummary(
-                        summary=f"[SKIPPED] Exceeds context window (estimated {estimated_tokens} tokens)",
-                        line_count=0
+                    file_digest.human_readable_summary = HumanReadableSummarizer.summarize(
+                        filepath,
+                        f"[SKIPPED] Exceeds context window (estimated {estimated_tokens} tokens)"
                     )
                     return
                 
@@ -227,8 +270,9 @@ class DirectoryDigest:
         except Exception as e:
             print(f"Warning: Error processing file {filepath}: {e}", file=sys.stderr)
             file_digest.metadata.file_type = FileType.UNKNOWN
-            file_digest.human_readable_summary = HumanReadableSummary(
-                summary=f"[ERROR] Processing failed: {str(e)}"
+            file_digest.human_readable_summary = HumanReadableSummarizer.summarize(
+                filepath,
+                f"[ERROR] Processing failed: {str(e)}"
             )
     
     def _process_as_binary(self, file_digest: FileDigest):
@@ -308,17 +352,11 @@ class DirectoryDigest:
         # 分析源代码
         analysis = self.source_analyzer.analyze(filepath, content)
         
-        # 根据策略调整分析结果
-        if strategy == ProcessingStrategy.CODE_SKELETON:
-            # 骨架模式：只保留关键信息
-            skeleton = {
-                "language": analysis.language,
-                "total_lines": analysis.total_lines,
-                "functions": len(analysis.functions[:10]),  # 最多10个函数
-                "classes": len(analysis.classes[:10]),      # 最多10个类
-                "imports": analysis.imports[:10],           # 最多10个导入
-            }
-            # 可以添加骨架化处理...
+        # 添加复杂度分析
+        if filepath.suffix.lower() == '.py':
+            analysis.complexity_metrics = self.complexity_analyzer.analyze_python(content)
+        else:
+            analysis.complexity_metrics = self.complexity_analyzer.analyze_generic(content)
         
         file_digest.source_code_analysis = analysis
         
@@ -352,10 +390,9 @@ class DirectoryDigest:
                 if len(structure) > 20:
                     summary_lines.append(f"  ... and {len(structure) - 20} more")
                 
-                file_digest.human_readable_summary = HumanReadableSummary(
-                    summary='\n'.join(summary_lines),
-                    line_count=len(content.split('\n')),
-                    character_count=len(content)
+                file_digest.human_readable_summary = HumanReadableSummarizer.summarize(
+                    filepath,
+                    '\n'.join(summary_lines)
                 )
         
         if mode == "full":
@@ -381,11 +418,10 @@ class DirectoryDigest:
             if mode == "full":
                 file_digest.full_content = human_content
             else:
-                file_digest.human_readable_summary = HumanReadableSummary(
-                    summary=f"[Structured Data] Type: {filepath.suffix}",
-                    first_lines=human_content.split('\n')[:10],
-                    line_count=len(content.split('\n')),
-                    character_count=len(content)
+                file_digest.human_readable_summary = HumanReadableSummarizer.summarize(
+                    filepath,
+                    f"[Structured Data] Type: {filepath.suffix}",
+                    first_lines=human_content.split('\n')[:10]
                 )
         else:
             # 普通文本处理
@@ -428,17 +464,138 @@ class DirectoryDigest:
             file_digest.metadata.sha256_hash = "hash_error"
     
     def _generate_sort_output(self) -> Dict:
-        """生成分类排序输出"""
-        # 简化实现
-        return {
+        """生成分类排序输出（增强版，保留文件元数据用于 ls -l 格式）"""
+        all_files = self._collect_all_files_flat()
+        
+        # 按类型分组，同时保留完整元数据
+        by_type = {
+            FileType.CRITICAL_DOCS.value: [],
+            FileType.REFERENCE_DOCS.value: [],
+            FileType.SOURCE_CODE.value: [],
+            FileType.TEXT_DATA.value: [],
+            FileType.BINARY_FILES.value: [],
+            FileType.UNKNOWN.value: []
+        }
+        
+        # 按大小分组
+        large_files = []      # > 1MB
+        medium_files = []     # 100KB - 1MB
+        small_files = []      # < 100KB
+        
+        for f in all_files:
+            file_type = f.metadata.file_type.value
+            file_info = {
+                'path': str(f.metadata.path.relative_to(self.root)),
+                'size': f.metadata.size,
+                'size_formatted': self._format_bytes(f.metadata.size),
+                'modified': f.metadata.modified_time.isoformat(),
+                'type': file_type,
+                'is_binary': file_type == FileType.BINARY_FILES.value
+            }
+            
+            if file_type in by_type:
+                by_type[file_type].append(file_info)
+            else:
+                by_type[FileType.UNKNOWN.value].append(file_info)
+            
+            # 按大小分组
+            size = f.metadata.size
+            if size > 1024 * 1024:
+                large_files.append(file_info)
+            elif size > 100 * 1024:
+                medium_files.append(file_info)
+            else:
+                small_files.append(file_info)
+        
+        # 构建报告
+        sort_report = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
                 "root_directory": str(self.root),
                 "output_mode": "sort",
                 "statistics": self.stats,
+                "context_usage": self.context_manager.get_summary()
+            },
+            "classification": {},
+            "by_size": {
+                "large_files": large_files,
+                "medium_files": medium_files,
+                "small_files": small_files
+            },
+            "file_listings": {
+                k: sorted(v, key=lambda x: x['path']) 
+                for k, v in by_type.items() if v
             }
         }
+        
+        # 为每种类型生成详细信息
+        for type_name, files in by_type.items():
+            if not files:
+                continue
+                
+            # 按扩展名分组
+            by_ext = {}
+            for f in files:
+                path = f['path']
+                ext = Path(path).suffix.lower() or "(no extension)"
+                if ext not in by_ext:
+                    by_ext[ext] = []
+                by_ext[ext].append(path)
+            
+            # 计算总大小
+            total_size = sum(f['size'] for f in files)
+            
+            sort_report["classification"][type_name] = {
+                "count": len(files),
+                "total_size_bytes": total_size,
+                "total_size_formatted": self._format_bytes(total_size),
+                "extensions": {
+                    ext: {
+                        "count": len(paths),
+                        "files": sorted(paths)[:10],
+                        "truncated": len(paths) > 10,
+                        "total_count": len(paths)
+                    }
+                    for ext, paths in sorted(by_ext.items(), key=lambda x: len(x[1]), reverse=True)
+                }
+            }
+        
+        # 添加建议
+        recommendations = []
+        if large_files:
+            recommendations.append(
+                f"Found {len(large_files)} large files (>1MB). "
+                f"In 'full' mode, use --max-content-size to limit full content output."
+            )
+
+        if by_type.get(FileType.UNKNOWN.value, []):
+            count = len(by_type[FileType.UNKNOWN.value])
+            if count > 5:
+                recommendations.append(
+                    f"Found {count} unknown type files. Consider reviewing or adding to ignore patterns."
+                )
+        
+        sort_report["recommendations"] = recommendations
+        
+        return sort_report
+
+    def _format_bytes(self, size_bytes: int) -> str:
+        """格式化字节大小为人类可读"""
+        return FormatConverter._format_size(size_bytes)
     
+    def _collect_all_files_flat(self) -> List[FileDigest]:
+        """扁平化收集所有文件"""
+        all_files = []
+        
+        def collect(node: DirectoryStructure):
+            all_files.extend(node.files)
+            for subdir in node.subdirectories.values():
+                collect(subdir)
+        
+        if self.structure:
+            collect(self.structure)
+        return all_files
+
     def _generate_output(self, mode: str) -> Dict:
         """生成最终输出"""
         if not self.structure:
@@ -457,15 +614,30 @@ class DirectoryDigest:
                 "statistics": self.stats,
                 "context_usage": self.context_manager.get_summary(),
             },
-            "structure": self.structure.to_dict(mode) if self.structure else {}
+            "structure": self.structure.to_dict(mode)
         }
         
+        # 添加上下文分配信息
+        if self.context_manager.file_records:
+            output["context_allocation"] = {
+                "file_records": self.context_manager.file_records,
+                "strategy_distribution": self._analyze_strategy_distribution(),
+            }
+        
         return output
+
+    def _analyze_strategy_distribution(self) -> Dict[str, Any]:
+        """分析策略使用分布"""
+        distribution = {}
+        for record in self.context_manager.file_records:
+            strategy = record.get("strategy", "unknown")
+            distribution[strategy] = distribution.get(strategy, 0) + 1
+        
+        return distribution
     
     def save_output(self, output: Dict, format: str = "json", 
                    output_path: Optional[Path] = None, mode: str = None) -> Path:
         """保存输出到文件"""
-        # 简化实现
         if not output_path:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             ext = format.lower()
@@ -475,10 +647,15 @@ class DirectoryDigest:
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 简单JSON输出
-        import json
+        content = self.format_converter.convert(output, format, mode)
+        
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
+            f.write(content)
         
         print(f"摘要已保存到: {output_path}")
         return output_path
+    
+    def save_output_with_mode(self, output: Dict, format: str = "json", 
+                             output_path: Optional[Path] = None, mode: str = None) -> Path:
+        """兼容方法：保存输出到文件（带模式参数）"""
+        return self.save_output(output, format, output_path, mode)
