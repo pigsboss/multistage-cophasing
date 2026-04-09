@@ -634,7 +634,11 @@ class FormatConverter:
             # 类 ls -l 格式：类型 大小 日期 路径
             for f in files[:100]:  # 限制显示数量
                 path = f.get('path', 'unknown')
-                size = f.get('size_formatted', FormatConverter._format_size(f.get('size', 0)))
+                # 优先使用size_formatted，否则计算
+                if 'size_formatted' in f:
+                    size = f['size_formatted']
+                else:
+                    size = FormatConverter._format_size(f.get('size', 0))
                 modified = f.get('modified', 'unknown')
                 
                 # 格式化日期 (与原始代码一致)

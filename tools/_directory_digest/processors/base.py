@@ -1031,9 +1031,18 @@ class FileProcessorRegistry:
         """根据处理器类型更新统计"""
         processor_type = type(processor).__name__
         
+        # 检查是否为关键文档
+        is_critical = False
+        if processor_type == 'TextFileProcessor':
+            filename = file_digest.metadata.path.name.lower()
+            critical_patterns = ['readme', 'license', 'copying', 'notice', 'changelog', 'changes', 
+                                'contributing', 'install', 'authors', 'news', 'todo', 'roadmap']
+            is_critical = any(pattern in filename for pattern in critical_patterns)
+        
+        # 统计键映射
         type_mapping = {
             'SourceCodeProcessor': 'source_code',
-            'TextFileProcessor': 'reference_docs',
+            'TextFileProcessor': 'critical_docs' if is_critical else 'reference_docs',
             'ConfigFileProcessor': 'text_data',
             'DataFileProcessor': 'text_data'
         }
@@ -1044,7 +1053,7 @@ class FileProcessorRegistry:
         # 同时更新文件类型元数据
         file_type_mapping = {
             'SourceCodeProcessor': FileType.SOURCE_CODE,
-            'TextFileProcessor': FileType.REFERENCE_DOCS,
+            'TextFileProcessor': FileType.CRITICAL_DOCS if is_critical else FileType.REFERENCE_DOCS,
             'ConfigFileProcessor': FileType.TEXT_DATA,
             'DataFileProcessor': FileType.TEXT_DATA
         }
