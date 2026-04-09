@@ -745,111 +745,53 @@ def main():
         # 移除 WHT，使用 BOLD 代替作为高亮
     } if USE_COLOR else {k: '' for k in ['RST', 'BOLD', 'DIM', 'RED', 'GRN', 'YLW', 'BLU', 'MAG', 'CYN']}
     
-    # 始终使用自定义的 ColorHelpFormatter，不使用 rich-argparse，以确保帮助文本的换行正常显示
-    USE_RICH = False
-    
-    class ColorHelpFormatter(argparse.RawTextHelpFormatter):
-        """自定义彩色帮助格式化器 - 使用 RawTextHelpFormatter 保留所有换行"""
+    # 使用自定义的帮助格式化器
+    class HelpFormatter(argparse.RawTextHelpFormatter):
+        """自定义帮助格式化器 - 使用 RawTextHelpFormatter 保留所有换行"""
         def __init__(self, *args, **kwargs):
-            kwargs['width'] = 120  # 设置合理宽度
+            kwargs['width'] = 80  # 设置为更标准的宽度
             super().__init__(*args, **kwargs)
         
         def _format_action(self, action):
-            text = super()._format_action(action)
-            if USE_COLOR and action.option_strings:
-                for opt in action.option_strings:
-                    text = text.replace(opt, f"{C['GRN']}{opt}{C['RST']}")
-                if action.default is not None and action.default != argparse.SUPPRESS:
-                    text = text.replace(f" (default: {action.default})", 
-                                      f" {C['DIM']}(default: {C['YLW']}{action.default}{C['DIM']}){C['RST']}")
-            return text
+            # 移除颜色处理逻辑
+            return super()._format_action(action)
         
         def _format_text(self, text):
             # 直接返回原始文本，不进行任何换行处理
             return text if text else ''
     
-    FormatterClass = ColorHelpFormatter
+    FormatterClass = HelpFormatter
     
-    # 构建带颜色和图标的帮助文本（无方框版本）
-    if USE_COLOR or USE_RICH:
-        description = f"""{C['BOLD']}{C['CYN']}Directory Digest Tool{C['RST']} - {C['DIM']}Knowledge Digest Generator{C['RST']}
-
-{C['DIM']}Recursively digests the filesystem into LLM-understandable summaries.{C['RST']}
-
-{C['BOLD']}📂 File Classification:{C['RST']}
-  {C['GRN']}📄 Critical Docs{C['RST']}  {C['DIM']}(README, LICENSE, CHANGELOG){C['RST']}  → Full Content
-  {C['BLU']}💻 Source Code{C['RST']}   {C['DIM']}(Python, C++, JavaScript...){C['RST']}  → Code Skeleton
-  {C['YLW']}⚙️  Config{C['RST']}       {C['DIM']}(YAML, JSON, INI, TOML){C['RST']}      → Structure Only
-  {C['RED']}📦 Binary{C['RST']}        {C['DIM']}(Images, Archives, Media){C['RST']}   → Metadata Only
-
-{C['BOLD']}🎮 Operation Modes:{C['RST']}
-  {C['CYN']}framework{C['RST']}  {C['DIM']}Generate structure & metadata (default){C['RST']}
-  {C['CYN']}full{C['RST']}       {C['DIM']}Include complete file contents{C['RST']}
-  {C['CYN']}sort{C['RST']}       {C['DIM']}List files by type/size with statistics{C['RST']}"""
-        
-        epilog = f"""{C['BOLD']}{C['CYN']}📌 Examples:{C['RST']}
-  {C['DIM']}# Basic usage - output JSON to stdout{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} /path/to/project
-  
-  {C['DIM']}# Use custom rules file{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} . {C['YLW']}--rules{C['RST']} .digest_rules.yaml {C['YLW']}--save{C['RST']} report.json
-  
-  {C['DIM']}# Custom context size (64k tokens) & full content mode{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} . {C['YLW']}--context-size{C['RST']} 64k {C['YLW']}--mode{C['RST']} full
-  
-  {C['DIM']}# Sort mode with filtering{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} . {C['YLW']}--mode{C['RST']} sort | grep "Source Code"
-  
-  {C['DIM']}# Parallel processing for large projects{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} /data {C['YLW']}--parallel{C['RST']} {C['YLW']}--workers{C['RST']} 8
-  
-  {C['DIM']}# Strict size limit - skip files larger than 100MB{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} . {C['YLW']}--max-size{C['RST']} 100
-  
-  {C['DIM']}# Custom ignore patterns{C['RST']}
-  {C['GRN']}%(prog)s{C['RST']} . {C['YLW']}--ignore{C['RST']} "*.log,*.tmp,cache,node_modules"
-
-{C['DIM']}💡 Tip: Install rich-argparse for enhanced color support: pip install rich-argparse{C['RST']}"""
-    else:
-        # 纯文本版本（无颜色）
-        description = """Directory Digest Tool - Knowledge Digest Generator
-
-Recursively digests the filesystem into LLM-understandable summaries.
+    # 构建简洁的帮助文本（移除颜色和图标）
+    description = """Directory Digest Tool
+Generate structured summaries of directory contents for LLM consumption.
 
 File Classification:
-  📄 Critical Docs  (README, LICENSE, CHANGELOG)  → Full Content
-  💻 Source Code   (Python, C++, JavaScript...)  → Code Skeleton  
-  ⚙️  Config       (YAML, JSON, INI, TOML)      → Structure Only
-  📦 Binary        (Images, Archives, Media)   → Metadata Only
+  Critical Docs    (README, LICENSE, CHANGELOG)    -> Full content
+  Source Code      (Python, C++, JavaScript...)    -> Code skeleton
+  Config Files     (YAML, JSON, INI, TOML)        -> Structure only
+  Binary Files     (Images, archives, media)      -> Metadata only
 
 Operation Modes:
-  framework  Generate structure & metadata (default)
-  full       Include complete file contents
-  sort       List files by type/size with statistics"""
-        
-        epilog = """Examples:
+  framework    Generate structure and metadata (default)
+  full         Include complete file contents
+  sort         List files by type and size with statistics"""
+
+    epilog = """Examples:
   # Basic usage - output JSON to stdout
   %(prog)s /path/to/project
   
-  # Use custom rules file
+  # Save to file with custom rules
   %(prog)s . --rules .digest_rules.yaml --save report.json
   
-  # Custom context size & full content mode
+  # Full content mode with custom context size
   %(prog)s . --context-size 64k --mode full
   
-  # Sort mode with filtering
-  %(prog)s . --mode sort | grep "Source Code"
+  # Sort mode to analyze file types
+  %(prog)s . --mode sort
   
-  # Parallel processing for large projects
-  %(prog)s /data --parallel --workers 8
-  
-  # Strict size limit - skip files larger than 100MB
-  %(prog)s . --max-size 100
-  
-  # Custom ignore patterns
-  %(prog)s . --ignore "*.log,*.tmp,cache,node_modules"
-
-Tip: Install rich-argparse for enhanced color support: pip install rich-argparse"""
+  # Skip large files (>100MB) and use parallel processing
+  %(prog)s /data --max-size 100 --parallel --workers 8"""
     
     parser = argparse.ArgumentParser(
         prog="directory_digest_refactor",
