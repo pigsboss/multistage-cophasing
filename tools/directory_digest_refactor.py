@@ -780,7 +780,7 @@ def main():
 {C['BOLD']}📂 File Classification:{C['RST']}
   {C['GRN']}📄 Critical Docs{C['RST']}  {C['DIM']}(README, LICENSE, CHANGELOG){C['RST']}  → Full Content
   {C['BLU']}💻 Source Code{C['RST']}   {C['DIM']}(Python, C++, JavaScript...){C['RST']}  → Code Skeleton
-  {C['YLW']}⚙️  onfig{C['RST']}       {C['DIM']}(YAML, JSON, INI, TOML){C['RST']}      → Structure Onlyy
+  {C['YLW']}⚙️  Config{C['RST']}       {C['DIM']}(YAML, JSON, INI, TOML){C['RST']}      → Structure Only
   {C['RED']}📦 Binary{C['RST']}        {C['DIM']}(Images, Archives, Media){C['RST']}   → Metadata Only
 
 {C['BOLD']}🎮 Operation Modes:{C['RST']}
