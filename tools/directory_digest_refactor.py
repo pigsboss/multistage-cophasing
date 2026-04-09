@@ -98,24 +98,6 @@ class DirectoryDigest(DirectoryDigestBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # 初始化统计信息（与原始代码一致）
-        self.stats = {
-            'total_files': 0,
-            'critical_docs': 0,
-            'reference_docs': 0,
-            'source_code': 0,
-            'text_data': 0,
-            'binary_files': 0,
-            'skipped_large_files': 0,
-            'skipped_by_context': 0,
-            'total_size': 0,
-            'processing_time': 0
-        }
-        
-        # 并行处理配置
-        self.use_parallel = self.config.get('use_parallel', False)
-        self.max_workers = self.config.get('max_workers', os.cpu_count() or 4)
-        
         # 初始化处理器注册表（新的核心组件）
         self.processor_registry = create_default_registry(
             rule_engine=self.rule_engine,
@@ -142,7 +124,7 @@ class DirectoryDigest(DirectoryDigestBase):
         import time
         start_time = time.time()
         
-        # 构建目录结构
+        # 构建目录结构（自动使用基类方法）
         self.structure = self._build_directory_structure(self.root)
         
         # 处理所有文件
@@ -173,153 +155,17 @@ class DirectoryDigest(DirectoryDigestBase):
         
         # 根据模式生成输出
         if mode == "sort":
-            return self._generate_sort_output()
+            return self._generate_sort_output()  # 使用基类方法
         else:
             return self._generate_output(mode)
     
     
-    def _collect_all_files_flat(self) -> List[FileDigest]:
-        """扁平化收集所有文件"""
-        all_files = []
-        
-        def collect(node: DirectoryStructure):
-            all_files.extend(node.files)
-            for subdir in node.subdirectories.values():
-                collect(subdir)
-        
-        if self.structure:
-            collect(self.structure)
-        return all_files
 
-    def save_output(self, output: Dict, format: str = "json", output_path: Optional[Path] = None, mode: str = None) -> Path:
-        """Save output to file"""
-        if not output_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ext = format.lower()
-            if ext == "markdown":
-                ext = "md"
-            output_path = self.root / f"directory_digest_{timestamp}.{ext}"
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 修复：使用 FormatConverter 而不是 ExtendedFormatConverter
-        content = FormatConverter.convert(output, format, mode)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        print(f"Digest saved to: {output_path}", file=sys.stderr)  # 与原始代码一致，输出到 stderr
-        return output_path
 
-    def _calculate_hashes(self, file_digest: FileDigest):
-        """计算文件的哈希值"""
-        import hashlib
-        filepath = file_digest.metadata.path
-        
-        try:
-            md5_hash = hashlib.md5()
-            sha256_hash = hashlib.sha256()
-            
-            with open(filepath, 'rb') as f:
-                # 使用64KB缓冲区流式读取
-                for chunk in iter(lambda: f.read(65536), b''):
-                    md5_hash.update(chunk)
-                    sha256_hash.update(chunk)
-            
-            file_digest.metadata.md5_hash = md5_hash.hexdigest()
-            file_digest.metadata.sha256_hash = sha256_hash.hexdigest()
-            
-        except (OSError, IOError) as e:
-            print(f"Warning: Could not read file for hash calculation: {filepath} - {e}", file=sys.stderr)
-            file_digest.metadata.md5_hash = "read_error"
-            file_digest.metadata.sha256_hash = "read_error"
-        except Exception as e:
-            print(f"Warning: Hash calculation failed for {filepath}: {e}", file=sys.stderr)
-            file_digest.metadata.md5_hash = "hash_error"
-            file_digest.metadata.sha256_hash = "hash_error"
-
-    def _read_file_content(self, filepath: Path) -> Optional[str]:
-        """读取文件内容，处理编码问题"""
-        try:
-            # 首先尝试UTF-8
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return f.read()
-        except UnicodeDecodeError:
-            # 如果UTF-8失败，尝试其他编码
-            try:
-                with open(filepath, 'rb') as f:
-                    raw_content = f.read()
-                    
-                    # 尝试常见编码
-                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
-                    for encoding in encodings_to_try:
-                        try:
-                            return raw_content.decode(encoding)
-                        except UnicodeDecodeError:
-                            continue
-                    # 所有编码都失败，使用latin-1并忽略错误
-                    return raw_content.decode('latin-1', errors='ignore')
-            except Exception:
-                return None
-
-    def _build_directory_structure(self, path: Path) -> DirectoryStructure:
-        """递归构建目录结构"""
-        structure = DirectoryStructure(path=path)
-        
-        try:
-            for item in path.iterdir():
-                # 检查是否应该忽略
-                if self._should_ignore(item):
-                    continue
-                
-                if item.is_dir():
-                    # 递归处理子目录
-                    sub_structure = self._build_directory_structure(item)
-                    structure.subdirectories[item.name] = sub_structure
-                else:
-                    # 文件，创建FileDigest
-                    stat_result = item.stat()
-                    structure.files.append(FileDigest(
-                        metadata=FileMetadata(
-                            path=item,
-                            size=stat_result.st_size,
-                            modified_time=datetime.fromtimestamp(stat_result.st_mtime),
-                            created_time=datetime.fromtimestamp(stat_result.st_ctime),
-                            file_type=FileType.UNKNOWN,
-                            mime_type=mimetypes.guess_type(str(item))[0]
-                        )
-                    ))
-                    self.stats['total_files'] += 1
-                    self.stats['total_size'] += stat_result.st_size
-                    
-        except PermissionError:
-            print(f"Warning: Permission denied for directory {path}", file=sys.stderr)
-        
-        return structure
-
-    def _should_ignore(self, path: Path) -> bool:
-        """检查路径是否应该被忽略"""
-        import fnmatch
-        
-        for pattern in self.config.get('ignore_patterns', []):
-            if fnmatch.fnmatch(path.name, pattern):
-                return True
-            if pattern.startswith('*') and path.name.endswith(pattern[1:]):
-                return True
-        
-        return False
-    
     def _generate_output(self, mode: str) -> Dict:
         """生成完整输出"""
         if not self.structure:
             return {}
-        
-        # 确保结构有 to_dict 方法
-        try:
-            structure_dict = self.structure.to_dict(mode)
-        except AttributeError:
-            # 如果 to_dict 不存在，手动转换
-            structure_dict = self._structure_to_dict(self.structure, mode)
         
         output = {
             "metadata": {
@@ -329,7 +175,7 @@ class DirectoryDigest(DirectoryDigestBase):
                 "statistics": self.stats,
                 "context_usage": self.context_manager.get_summary(),
             },
-            "structure": structure_dict
+            "structure": self.structure.to_dict(mode)
         }
         
         if self.context_manager.file_records:
@@ -338,55 +184,6 @@ class DirectoryDigest(DirectoryDigestBase):
             }
         
         return output
-    
-    def _structure_to_dict(self, structure: DirectoryStructure, mode: str) -> Dict:
-        """手动转换目录结构为字典"""
-        return {
-            "path": str(structure.path),
-            "files": [self._file_digest_to_dict(f, mode) for f in structure.files],
-            "subdirectories": {
-                name: self._structure_to_dict(subdir, mode)
-                for name, subdir in structure.subdirectories.items()
-            }
-        }
-    
-    def _file_digest_to_dict(self, file_digest: FileDigest, mode: str) -> Dict:
-        """转换 FileDigest 为字典"""
-        result = {
-            "metadata": {
-                "path": str(file_digest.metadata.path),
-                "size": file_digest.metadata.size,
-                "modified_time": file_digest.metadata.modified_time.isoformat(),
-                "created_time": file_digest.metadata.created_time.isoformat(),
-                "file_type": file_digest.metadata.file_type.value,
-                "mime_type": file_digest.metadata.mime_type,
-                "md5_hash": file_digest.metadata.md5_hash,
-                "sha256_hash": file_digest.metadata.sha256_hash
-            }
-        }
-        
-        if mode == "full" and hasattr(file_digest, 'full_content') and file_digest.full_content:
-            result["full_content"] = file_digest.full_content
-        
-        if hasattr(file_digest, 'human_readable_summary') and file_digest.human_readable_summary:
-            result["summary"] = file_digest.human_readable_summary.to_dict()
-        
-        if hasattr(file_digest, 'source_code_analysis') and file_digest.source_code_analysis:
-            result["source_analysis"] = file_digest.source_code_analysis.to_dict()
-        
-        return result
-    
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        """格式化文件大小"""
-        if size_bytes == 0:
-            return "0 B"
-        import math
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        i = int(math.floor(math.log(size_bytes, 1024)))
-        p = math.pow(1024, i)
-        s = round(size_bytes / p, 2)
-        return f"{s} {units[i]}"
 
 
 def parse_context_size(size_str: str) -> int:
