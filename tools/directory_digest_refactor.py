@@ -766,11 +766,13 @@ def main():
     description = """Directory Digest Tool
 Generate structured summaries of directory contents for LLM consumption.
 
-File Classification:
-  Critical Docs    (README, LICENSE, CHANGELOG)    -> Full content
-  Source Code      (Python, C++, JavaScript...)    -> Code skeleton
-  Config Files     (YAML, JSON, INI, TOML)        -> Structure only
-  Binary Files     (Images, archives, media)      -> Metadata only
+File Classification (6 categories):
+  Critical Docs    (README, LICENSE, CHANGELOG, etc.)     -> Full content or Summary
+  Reference Docs   (Markdown, RST, HTML, etc.)           -> Summary or Header with stats
+  Source Code      (Python, C++, Java, JavaScript, etc.) -> Code skeleton
+  Text Data        (CSV, JSON, YAML, logs, etc.)         -> Structure extract or Header with stats
+  Binary Files     (Images, archives, media, etc.)       -> Metadata only (hashes)
+  Unknown          (Unclassifiable files)                -> Metadata only
 
 Operation Modes:
   framework    Generate structure and metadata (default)
