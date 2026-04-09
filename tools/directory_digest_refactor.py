@@ -745,35 +745,30 @@ def main():
         # 移除 WHT，使用 BOLD 代替作为高亮
     } if USE_COLOR else {k: '' for k in ['RST', 'BOLD', 'DIM', 'RED', 'GRN', 'YLW', 'BLU', 'MAG', 'CYN']}
     
-    # 尝试使用 rich-argparse（如果已安装），否则使用自定义彩色格式化器
-    try:
-        from rich_argparse import RichHelpFormatter
-        FormatterClass = RichHelpFormatter
-        USE_RICH = True
-    except ImportError:
-        USE_RICH = False
+    # 始终使用自定义的 ColorHelpFormatter，不使用 rich-argparse，以确保帮助文本的换行正常显示
+    USE_RICH = False
+    
+    class ColorHelpFormatter(argparse.RawTextHelpFormatter):
+        """自定义彩色帮助格式化器 - 使用 RawTextHelpFormatter 保留所有换行"""
+        def __init__(self, *args, **kwargs):
+            kwargs['width'] = 120  # 设置合理宽度
+            super().__init__(*args, **kwargs)
         
-        class ColorHelpFormatter(argparse.RawTextHelpFormatter):
-            """自定义彩色帮助格式化器 - 使用 RawTextHelpFormatter 保留所有换行"""
-            def __init__(self, *args, **kwargs):
-                kwargs['width'] = 120  # 设置合理宽度
-                super().__init__(*args, **kwargs)
-            
-            def _format_action(self, action):
-                text = super()._format_action(action)
-                if USE_COLOR and action.option_strings:
-                    for opt in action.option_strings:
-                        text = text.replace(opt, f"{C['GRN']}{opt}{C['RST']}")
-                    if action.default is not None and action.default != argparse.SUPPRESS:
-                        text = text.replace(f" (default: {action.default})", 
-                                          f" {C['DIM']}(default: {C['YLW']}{action.default}{C['DIM']}){C['RST']}")
-                return text
-            
-            def _format_text(self, text):
-                # 直接返回原始文本，不进行任何换行处理
-                return text if text else ''
+        def _format_action(self, action):
+            text = super()._format_action(action)
+            if USE_COLOR and action.option_strings:
+                for opt in action.option_strings:
+                    text = text.replace(opt, f"{C['GRN']}{opt}{C['RST']}")
+                if action.default is not None and action.default != argparse.SUPPRESS:
+                    text = text.replace(f" (default: {action.default})", 
+                                      f" {C['DIM']}(default: {C['YLW']}{action.default}{C['DIM']}){C['RST']}")
+            return text
         
-        FormatterClass = ColorHelpFormatter
+        def _format_text(self, text):
+            # 直接返回原始文本，不进行任何换行处理
+            return text if text else ''
+    
+    FormatterClass = ColorHelpFormatter
     
     # 构建带颜色和图标的帮助文本（无方框版本）
     if USE_COLOR or USE_RICH:
