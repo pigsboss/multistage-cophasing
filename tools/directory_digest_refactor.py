@@ -737,13 +737,13 @@ def main():
         return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
     
     USE_COLOR = _supports_color()
-    # 颜色代码定义
+    # 颜色代码定义（移除白色，使用更安全的颜色）
     C = {
         'RST': '\033[0m', 'BOLD': '\033[1m', 'DIM': '\033[2m',
         'RED': '\033[91m', 'GRN': '\033[92m', 'YLW': '\033[93m',
         'BLU': '\033[94m', 'MAG': '\033[95m', 'CYN': '\033[96m',
-        'WHT': '\033[97m', 'BGCYN': '\033[46m\033[30m',
-    } if USE_COLOR else {k: '' for k in ['RST', 'BOLD', 'DIM', 'RED', 'GRN', 'YLW', 'BLU', 'MAG', 'CYN', 'WHT', 'BGCYN']}
+        # 移除 WHT，使用 BOLD 代替作为高亮
+    } if USE_COLOR else {k: '' for k in ['RST', 'BOLD', 'DIM', 'RED', 'GRN', 'YLW', 'BLU', 'MAG', 'CYN']}
     
     # 尝试使用 rich-argparse（如果已安装），否则使用自定义彩色格式化器
     try:
