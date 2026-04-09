@@ -803,7 +803,11 @@ Examples:
         help="""
         Path to rules file (YAML format).
         Defines file classification and processing strategies.
-        If not provided, uses built-in heuristic rules.
+        If not provided, searches for default rule files in current directory:
+          .digest_rules.yaml, .digest_rules.yml, 
+          digest_rules.yaml, digest_rules.yml,
+          rules.yaml, rules.yml
+        If no rule file found, uses built-in heuristic rules.
         """
     )
     rule_group.add_argument(
