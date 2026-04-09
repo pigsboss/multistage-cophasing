@@ -515,12 +515,27 @@ class FormatConverter:
     @staticmethod
     def convert(digest_data: Dict, format: str, mode: str = None) -> str:
         """转换为指定格式"""
+        # 优先处理 sort 模式
+        if mode == "sort" or digest_data.get('metadata', {}).get('output_mode') == "sort":
+            if format in ["json", "yaml"]:
+                # Sort 模式下 JSON/YAML 仍输出结构化数据
+                import json
+                return json.dumps(digest_data, indent=2, ensure_ascii=False)
+            else:
+                # 文本格式使用 ls -l 风格
+                return FormatConverter._to_sort_format(digest_data)
+        
+        # 其他模式原有逻辑
         if format == "json":
             return json.dumps(digest_data, indent=2, ensure_ascii=False)
         elif format == "yaml":
             return FormatConverter._to_yaml(digest_data)
         elif format == "markdown" or format == "md":
             return FormatConverter._to_markdown_basic(digest_data)
+        elif format == "html":
+            return FormatConverter._to_html_basic(digest_data)
+        elif format == "toml":
+            return FormatConverter._to_toml(digest_data)
         elif format == "txt" or format == "text":
             return FormatConverter._to_plaintext(digest_data)
         else:
@@ -560,9 +575,105 @@ class FormatConverter:
         return '\n'.join(lines)
     
     @staticmethod
+    def _to_html_basic(digest_data: Dict) -> str:
+        """基础HTML转换"""
+        md_content = FormatConverter._to_markdown_basic(digest_data)
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Directory Digest Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+        h1, h2, h3 {{ color: #333; }}
+        code {{ background-color: #f4f4f4; padding: 2px 4px; border-radius: 3px; }}
+        pre {{ background-color: #f8f8f8; padding: 10px; border-radius: 5px; overflow: auto; }}
+    </style>
+</head>
+<body>
+<pre>{md_content}</pre>
+</body>
+</html>"""
+    
+    @staticmethod
+    def _to_toml(digest_data: Dict) -> str:
+        """转换为TOML格式（简化版）"""
+        return f"# TOML format not fully implemented, using JSON representation\n{json.dumps(digest_data, indent=2, ensure_ascii=False)}"
+    
+    @staticmethod
     def _to_plaintext(digest_data: Dict) -> str:
         """转换为纯文本"""
         return json.dumps(digest_data, indent=2, ensure_ascii=False)
+    
+    @staticmethod
+    def _to_sort_format(digest_data: Dict) -> str:
+        """Generate ls -l style output for sort mode"""
+        lines = []
+        root_dir = digest_data.get('metadata', {}).get('root_directory', '.')
+        
+        lines.append(f"Directory Digest: {root_dir}")
+        lines.append(f"Generated: {digest_data.get('metadata', {}).get('generated_at', 'unknown')}")
+        lines.append("")
+        
+        # 类型映射 (type_key: (display_name, type_char))
+        type_names = {
+            'critical_docs': ('Critical Docs', 'C'),
+            'reference_docs': ('Reference Docs', 'R'),
+            'source_code': ('Source Code', 'S'),
+            'text_data': ('Text Data', 'T'),
+            'binary_files': ('Binary Files', 'B'),
+            'unknown': ('Unknown', '?')
+        }
+        
+        listings = digest_data.get('file_listings', {})
+        
+        for type_key, (type_name, type_char) in type_names.items():
+            if type_key not in listings or not listings[type_key]:
+                continue
+            
+            files = listings[type_key]
+            total_size = sum(f.get('size', 0) for f in files)
+            
+            lines.append(f"{type_name} ({len(files)} files, {FormatConverter._format_size(total_size)})")
+            lines.append("-" * 80)
+            
+            # 类 ls -l 格式：类型 大小 日期 路径
+            for f in files[:100]:  # 限制显示数量
+                path = f.get('path', 'unknown')
+                size = f.get('size_formatted', '0 B')
+                modified = f.get('modified', 'unknown')
+                
+                # 格式化日期
+                if modified != 'unknown':
+                    try:
+                        dt = datetime.fromisoformat(modified)
+                        date_str = dt.strftime("%b %d %H:%M")
+                    except:
+                        date_str = modified[:16] if len(modified) > 16 else modified
+                else:
+                    date_str = "unknown"
+                
+                # 格式：类型 大小 日期 路径
+                lines.append(f"{type_char}  {size:>10}  {date_str:>12}  {path}")
+            
+            if len(files) > 100:
+                lines.append(f"... ({len(files) - 100} more files)")
+            
+            lines.append("")
+        
+        # 统计摘要
+        stats = digest_data.get('metadata', {}).get('statistics', {})
+        lines.append("Summary:")
+        lines.append(f"  Total: {stats.get('total_files', 0)} files, "
+                    f"{FormatConverter._format_size(stats.get('total_size', 0))}")
+        lines.append(f"  Critical Docs: {stats.get('critical_docs', 0)}")
+        lines.append(f"  Reference Docs: {stats.get('reference_docs', 0)}")
+        lines.append(f"  Source Code: {stats.get('source_code', 0)}")
+        lines.append(f"  Text Data: {stats.get('text_data', 0)}")
+        lines.append(f"  Binary Files: {stats.get('binary_files', 0)}")
+        lines.append(f"  Skipped (>limit): {stats.get('skipped_large_files', 0)}")
+        
+        return '\n'.join(lines)
     
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -771,12 +882,12 @@ class DirectoryDigestBase:
     
     def _generate_sort_output(self) -> Dict:
         """
-        在基类中提供 sort 模式的默认实现
-        子类可以覆盖此方法以提供完整功能
+        生成分类排序输出（完整版，与原始代码逻辑一致）
+        包含文件类型分类、大小分类、扩展名统计和建议
         """
         all_files = self._collect_all_files_flat()
         
-        # 基础分类
+        # 按类型分组，同时保留完整元数据
         by_type = {
             FileType.CRITICAL_DOCS.value: [],
             FileType.REFERENCE_DOCS.value: [],
@@ -786,34 +897,107 @@ class DirectoryDigestBase:
             FileType.UNKNOWN.value: []
         }
         
+        # 按大小分组
+        large_files = []      # > 1MB
+        medium_files = []     # 100KB - 1MB
+        small_files = []      # < 100KB
+        
         for f in all_files:
             file_type = f.metadata.file_type.value
             file_info = {
                 'path': str(f.metadata.path.relative_to(self.root)),
                 'size': f.metadata.size,
                 'size_formatted': self._format_size(f.metadata.size),
-                'modified': f.metadata.modified_time.isoformat() if hasattr(f.metadata, 'modified_time') and f.metadata.modified_time else 'unknown',
+                'modified': f.metadata.modified_time.isoformat() if f.metadata.modified_time else 'unknown',
                 'type': file_type,
+                'is_binary': file_type == FileType.BINARY_FILES.value
             }
             
             if file_type in by_type:
                 by_type[file_type].append(file_info)
             else:
                 by_type[FileType.UNKNOWN.value].append(file_info)
+            
+            # 按大小分组
+            size = f.metadata.size
+            if size > 1024 * 1024:
+                large_files.append(file_info)
+            elif size > 100 * 1024:
+                medium_files.append(file_info)
+            else:
+                small_files.append(file_info)
         
-        return {
+        # 构建报告
+        sort_report = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
                 "root_directory": str(self.root),
                 "output_mode": "sort",
                 "statistics": self.stats,
-                "context_usage": self.context_manager.get_summary() if hasattr(self, 'context_manager') else {}
+                "context_usage": self.context_manager.get_summary()
+            },
+            "classification": {},
+            "by_size": {
+                "large_files": large_files,
+                "medium_files": medium_files,
+                "small_files": small_files
             },
             "file_listings": {
                 k: sorted(v, key=lambda x: x['path']) 
                 for k, v in by_type.items() if v
             }
         }
+        
+        # 为每种类型生成详细信息（包括扩展名统计）
+        for type_name, files in by_type.items():
+            if not files:
+                continue
+                
+            # 按扩展名分组
+            by_ext = {}
+            for f in files:
+                path = f['path']
+                ext = Path(path).suffix.lower() or "(no extension)"
+                if ext not in by_ext:
+                    by_ext[ext] = []
+                by_ext[ext].append(path)
+            
+            # 计算总大小
+            total_size = sum(f['size'] for f in files)
+            
+            sort_report["classification"][type_name] = {
+                "count": len(files),
+                "total_size_bytes": total_size,
+                "total_size_formatted": self._format_size(total_size),
+                "extensions": {
+                    ext: {
+                        "count": len(paths),
+                        "files": sorted(paths)[:10],  # 只显示前10个
+                        "truncated": len(paths) > 10,
+                        "total_count": len(paths)
+                    }
+                    for ext, paths in sorted(by_ext.items(), key=lambda x: len(x[1]), reverse=True)
+                }
+            }
+        
+        # 添加建议
+        recommendations = []
+        if large_files:
+            recommendations.append(
+                f"Found {len(large_files)} large files (>1MB). "
+                f"In 'full' mode, use --max-content-size to limit full content output."
+            )
+
+        if by_type.get(FileType.UNKNOWN.value, []):
+            count = len(by_type[FileType.UNKNOWN.value])
+            if count > 5:
+                recommendations.append(
+                    f"Found {count} unknown type files. Consider reviewing or adding to ignore patterns."
+                )
+        
+        sort_report["recommendations"] = recommendations
+        
+        return sort_report
     
     @staticmethod
     def _format_size(size_bytes: int) -> str:
