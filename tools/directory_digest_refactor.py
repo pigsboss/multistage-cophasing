@@ -30,6 +30,108 @@ from tools._directory_digest import (
     STRATEGY_CONFIGS,
 )
 
+# Extended FormatConverter for sort mode support
+class ExtendedFormatConverter(FormatConverter):
+    """扩展格式转换器，支持 sort 模式的完整 ls -l 格式输出"""
+    
+    @staticmethod
+    def convert(digest_data: Dict, format: str, mode: str = None) -> str:
+        """转换为指定格式，优先处理 sort 模式"""
+        if mode == "sort" or digest_data.get('metadata', {}).get('output_mode') == "sort":
+            if format in ["json", "yaml"]:
+                # Sort 模式下 JSON/YAML 仍输出结构化数据
+                import json
+                return json.dumps(digest_data, indent=2, ensure_ascii=False)
+            else:
+                # 文本格式使用 ls -l 风格
+                return ExtendedFormatConverter._to_sort_format(digest_data)
+        
+        # 其他模式调用父类
+        return super().convert(digest_data, format, mode) if hasattr(super(), 'convert') else \
+               FormatConverter.convert(digest_data, format)
+    
+    @staticmethod
+    def _to_sort_format(digest_data: Dict) -> str:
+        """Generate ls -l style output for sort mode"""
+        lines = []
+        root_dir = digest_data.get('metadata', {}).get('root_directory', '.')
+        
+        lines.append(f"Directory Digest: {root_dir}")
+        lines.append(f"Generated: {digest_data.get('metadata', {}).get('generated_at', 'unknown')}")
+        lines.append("")
+        
+        # Type mapping (type_key: (display_name, type_char))
+        type_names = {
+            'critical_docs': ('Critical Docs', 'C'),
+            'reference_docs': ('Reference Docs', 'R'),
+            'source_code': ('Source Code', 'S'),
+            'text_data': ('Text Data', 'T'),
+            'binary_files': ('Binary Files', 'B'),
+            'unknown': ('Unknown', '?')
+        }
+        
+        listings = digest_data.get('file_listings', {})
+        
+        for type_key, (type_name, type_char) in type_names.items():
+            if type_key not in listings or not listings[type_key]:
+                continue
+            
+            files = listings[type_key]
+            total_size = sum(f.get('size', 0) for f in files)
+            
+            lines.append(f"{type_name} ({len(files)} files, {ExtendedFormatConverter._format_size(total_size)})")
+            lines.append("-" * 80)
+            
+            # Format: Type  Size  Date  Path (similar to ls -l)
+            for f in files[:100]:  # Limit display to 100 files per type
+                path = f.get('path', 'unknown')
+                size = f.get('size_formatted', '0 B')
+                modified = f.get('modified', 'unknown')
+                
+                # Format date
+                if modified != 'unknown':
+                    try:
+                        dt = datetime.fromisoformat(modified)
+                        date_str = dt.strftime("%b %d %H:%M")
+                    except:
+                        date_str = modified[:16] if len(modified) > 16 else modified
+                else:
+                    date_str = "unknown"
+                
+                # Output: TypeChar  Size  Date  Path
+                lines.append(f"{type_char}  {size:>10}  {date_str:>12}  {path}")
+            
+            if len(files) > 100:
+                lines.append(f"... ({len(files) - 100} more files)")
+            
+            lines.append("")
+        
+        # Summary statistics
+        stats = digest_data.get('metadata', {}).get('statistics', {})
+        lines.append("Summary:")
+        lines.append(f"  Total: {stats.get('total_files', 0)} files, "
+                    f"{ExtendedFormatConverter._format_size(stats.get('total_size', 0))}")
+        lines.append(f"  Critical Docs: {stats.get('critical_docs', 0)}")
+        lines.append(f"  Reference Docs: {stats.get('reference_docs', 0)}")
+        lines.append(f"  Source Code: {stats.get('source_code', 0)}")
+        lines.append(f"  Text Data: {stats.get('text_data', 0)}")
+        lines.append(f"  Binary Files: {stats.get('binary_files', 0)}")
+        lines.append(f"  Skipped (>limit): {stats.get('skipped_large_files', 0)}")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        if size_bytes == 0:
+            return "0 B"
+        import math
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {units[i]}"
+
 # 尝试导入高级分析器（如果可用）
 try:
     from tools._directory_digest.analyzers.semantics.base import (
@@ -414,7 +516,8 @@ class DirectoryDigest(DirectoryDigestBase):
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        content = FormatConverter.convert(output, format, mode)
+        # Use ExtendedFormatConverter to support sort mode
+        content = ExtendedFormatConverter.convert(output, format, mode)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -521,7 +624,7 @@ class DirectoryDigest(DirectoryDigestBase):
         return False
     
     def _generate_sort_output(self) -> Dict:
-        """Generate sorted classification output"""
+        """Generate sorted classification output (ls -l style)"""
         all_files = self._collect_all_files_flat()
         
         # Group by type
@@ -545,7 +648,7 @@ class DirectoryDigest(DirectoryDigestBase):
                 'path': str(f.metadata.path.relative_to(self.root)),
                 'size': f.metadata.size,
                 'size_formatted': self._format_size(f.metadata.size),
-                'modified': f.metadata.modified_time.isoformat(),
+                'modified': f.metadata.modified_time.isoformat() if f.metadata.modified_time else 'unknown',
                 'type': file_type,
                 'is_binary': file_type == FileType.BINARY_FILES.value
             }
@@ -555,7 +658,7 @@ class DirectoryDigest(DirectoryDigestBase):
             else:
                 by_type[FileType.UNKNOWN.value].append(file_info)
             
-            # Group by size
+            # Size grouping
             size = f.metadata.size
             if size > 1024 * 1024:
                 large_files.append(file_info)
@@ -564,7 +667,7 @@ class DirectoryDigest(DirectoryDigestBase):
             else:
                 small_files.append(file_info)
         
-        # Build report
+        # Build report structure (must match original exactly)
         sort_report = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
@@ -585,7 +688,7 @@ class DirectoryDigest(DirectoryDigestBase):
             }
         }
         
-        # Generate detailed information for each type
+        # Generate classification details
         for type_name, files in by_type.items():
             if not files:
                 continue
@@ -599,7 +702,6 @@ class DirectoryDigest(DirectoryDigestBase):
                     by_ext[ext] = []
                 by_ext[ext].append(path)
             
-            # Calculate total size
             total_size = sum(f['size'] for f in files)
             
             sort_report["classification"][type_name] = {
@@ -609,7 +711,7 @@ class DirectoryDigest(DirectoryDigestBase):
                 "extensions": {
                     ext: {
                         "count": len(paths),
-                        "files": sorted(paths)[:10],  # Show only first 10
+                        "files": sorted(paths)[:10],
                         "truncated": len(paths) > 10,
                         "total_count": len(paths)
                     }
@@ -617,7 +719,7 @@ class DirectoryDigest(DirectoryDigestBase):
                 }
             }
         
-        # Add recommendations
+        # Generate recommendations (must match original logic)
         recommendations = []
         if large_files:
             recommendations.append(
@@ -939,7 +1041,7 @@ Examples:
     if output_to_stdout:
         # Output to stdout (supports piping)
         try:
-            content = FormatConverter.convert(output, args.output, mode=args.mode)
+            content = ExtendedFormatConverter.convert(output, args.output, mode=args.mode)
             sys.stdout.write(content)
             if not content.endswith('\n'):
                 sys.stdout.write('\n')
