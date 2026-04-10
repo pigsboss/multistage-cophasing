@@ -304,7 +304,10 @@ class DirectoryDigest(DirectoryDigestBase):
             
             # 将策略写入元数据
             file_digest.metadata.processing_strategy = initial_strategy
-            initial_strategies[file_digest] = initial_strategy
+            
+            # 存储策略使用文件路径作为键（可哈希）
+            file_path = str(file_digest.metadata.path)
+            initial_strategies[file_path] = (file_digest, initial_strategy)
             
             # 更新统计和计算哈希
             type_stat_key = file_type.value
@@ -321,7 +324,7 @@ class DirectoryDigest(DirectoryDigestBase):
         self.final_strategies = adjusted_strategies
         
         # 第三阶段：执行最终策略
-        for file_digest, final_strategy in adjusted_strategies.items():
+        for file_path, (file_digest, final_strategy) in adjusted_strategies.items():
             # 更新元数据中的策略
             file_digest.metadata.processing_strategy = final_strategy
             
@@ -342,11 +345,11 @@ class DirectoryDigest(DirectoryDigestBase):
         根据token资源约束调整策略
         
         Args:
-            initial_strategies: 初始策略映射
+            initial_strategies: 初始策略映射（file_path -> (file_digest, strategy)）
             mode: 输出模式
             
         Returns:
-            调整后的策略映射
+            调整后的策略映射（file_path -> (file_digest, strategy)）
         """
         # 如果没有上下文管理器，直接使用初始策略
         if not self.context_manager:
@@ -356,7 +359,7 @@ class DirectoryDigest(DirectoryDigestBase):
         total_tokens = 0
         token_estimates = {}
         
-        for file_digest, strategy in initial_strategies.items():
+        for file_path, (file_digest, strategy) in initial_strategies.items():
             if self.rule_engine:
                 estimated = self.rule_engine.estimate_token_usage(
                     file_digest.metadata.path, strategy
@@ -365,7 +368,7 @@ class DirectoryDigest(DirectoryDigestBase):
                 estimated = self._estimate_tokens(
                     file_digest.metadata.path, strategy
                 )
-            token_estimates[file_digest] = estimated
+            token_estimates[file_path] = estimated
             total_tokens += estimated
         
         # 检查是否超出限制
@@ -380,10 +383,10 @@ class DirectoryDigest(DirectoryDigestBase):
         
         # 准备调整：按优先级排序文件
         files_by_priority = []
-        for file_digest in initial_strategies.keys():
+        for file_path, (file_digest, strategy) in initial_strategies.items():
             file_type = file_digest.metadata.file_type
             priority = InitialEmbeddingStrategy.get_priority(file_type)
-            files_by_priority.append((priority, file_type, file_digest))
+            files_by_priority.append((priority, file_type, file_digest, strategy, file_path))
         
         # 按优先级排序（优先级低的先调整）
         files_by_priority.sort(key=lambda x: (-x[0], x[1].value))
@@ -392,10 +395,9 @@ class DirectoryDigest(DirectoryDigestBase):
         
         # 逐步降级策略直到满足token限制
         while total_tokens > available_tokens and files_by_priority:
-            priority, file_type, file_digest = files_by_priority.pop(0)
+            priority, file_type, file_digest, current_strategy, file_path = files_by_priority.pop(0)
             
-            current_strategy = adjusted_strategies[file_digest]
-            current_estimate = token_estimates[file_digest]
+            current_estimate = token_estimates[file_path]
             
             # 获取策略降级序列
             strategy_hierarchy = InitialEmbeddingStrategy.get_strategy_hierarchy(file_type)
@@ -420,8 +422,8 @@ class DirectoryDigest(DirectoryDigestBase):
                     total_tokens = total_tokens - current_estimate + new_estimate
                     
                     # 更新策略和估算
-                    adjusted_strategies[file_digest] = new_strategy
-                    token_estimates[file_digest] = new_estimate
+                    adjusted_strategies[file_path] = (file_digest, new_strategy)
+                    token_estimates[file_path] = new_estimate
                     
                     print(f"  - Downgraded {file_digest.metadata.path.name} from {current_strategy.value} to {new_strategy.value}", 
                           file=sys.stderr)
@@ -728,7 +730,7 @@ class DirectoryDigest(DirectoryDigestBase):
         # 添加策略使用统计
         if hasattr(self, 'final_strategies') and self.final_strategies:
             strategy_counts = {}
-            for file_digest, strategy in self.final_strategies.items():
+            for file_path, (file_digest, strategy) in self.final_strategies.items():
                 strategy_name = strategy.value
                 strategy_counts[strategy_name] = strategy_counts.get(strategy_name, 0) + 1
             
