@@ -26,15 +26,17 @@ import sys
 # Check if spiceypy is available
 try:
     import spiceypy as spice
+    from spiceypy.utils.exceptions import SpiceyError
     SPICE_AVAILABLE = True
 except ImportError:
     SPICE_AVAILABLE = False
     spice = None
+    SpiceyError = None
 
 # Import MCPC modules
 from mission_sim.core.spacetime.ephemeris.spice_interface import (
     SPICEInterface, SPICEKernelManager, SPICECalculator, 
-    SPICEConfig, SPICEError, KernelNotFoundError, MissionType
+    SPICEConfig, SPICEError, KernelNotFoundError, KernelLoadError, MissionType
 )
 from mission_sim.core.spacetime.ephemeris.high_precision import (
     HighPrecisionEphemeris, EphemerisMode, EphemerisConfig, CelestialBody
