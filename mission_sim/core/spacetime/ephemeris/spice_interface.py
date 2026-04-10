@@ -93,8 +93,8 @@ class SPICEKernelManager:
             'description': 'Leapseconds kernel (time conversion)'
         },
         'pck': {
-            'patterns': ['pck*.tpc', 'moon_pa*.bpc', 'earth*.bpc', 'earth*.tf'],
-            'required': True,  # 修改为 True，因为 moon_pa 现在被认为是必需的
+            'patterns': ['pck*.tpc', 'moon_pa*.bpc'],
+            'required': True,
             'description': 'Planetary constants (orientation/shape)'
         },
         'spk_planets': {
@@ -103,7 +103,7 @@ class SPICEKernelManager:
             'description': 'Planetary ephemeris'
         },
         'spk_moon': {
-            'patterns': ['moon_*.tf', 'moon_pa_*.bpc'],
+            'patterns': ['moon_*.tf'],
             'required': False,
             'description': 'Lunar orientation and reference frames'
         },
@@ -205,6 +205,9 @@ class SPICEKernelManager:
         config = self.KERNEL_PATTERNS[ktype]
         found = False
         
+        # Track loaded files for this kernel type
+        loaded_for_this_type = []
+        
         # Try loading in priority order
         for pattern in config['patterns']:
             # 搜索所有子目录
@@ -230,17 +233,31 @@ class SPICEKernelManager:
                     # 其他内核按文件名倒序（通常更新的版本在后）
                     paths.sort(reverse=True)
                 
-                selected = paths[0]
+                # For 'pck' type, load ALL matching files (text PCK and binary PCK)
+                # For other types, just load the first one
+                if ktype == 'pck':
+                    files_to_load = paths
+                else:
+                    files_to_load = [paths[0]]
                 
-                try:
-                    self._load_single_kernel(selected, ktype)
-                    found = True
-                    if self.config.verbose:
-                        print(f"[SPICE] Loaded {ktype}: {selected.relative_to(self.kernel_root)}")
-                    break
-                except Exception as e:
-                    warnings.warn(f"Failed to load kernel {selected}: {e}")
-                    continue
+                for selected in files_to_load:
+                    # Skip if already loaded
+                    if selected in loaded_for_this_type:
+                        continue
+                        
+                    try:
+                        self._load_single_kernel(selected, ktype)
+                        loaded_for_this_type.append(selected)
+                        found = True
+                        if self.config.verbose:
+                            print(f"[SPICE] Loaded {ktype}: {selected.relative_to(self.kernel_root)}")
+                    except Exception as e:
+                        warnings.warn(f"Failed to load kernel {selected}: {e}")
+                        # Continue to next file for pck type
+                        if ktype == 'pck':
+                            continue
+                        else:
+                            break  # For non-pck types, break on first failure
         
         if not found and config['required']:
             # 提供更详细的错误信息
