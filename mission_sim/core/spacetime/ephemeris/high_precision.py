@@ -212,7 +212,7 @@ class HighPrecisionEphemeris(Ephemeris):
         self._max_cache_size = self.config.cache_size
         
         if self.verbose:
-            print(f"[HighPrecisionEphemeris] 初始化完成，模式: {self.config.mode.value}")
+            print(f"[HighPrecisionEphemeris] Initialization complete, mode: {self.config.mode.value}")
     
     def _initialize_models(self):
         """初始化重力模型"""
@@ -225,7 +225,7 @@ class HighPrecisionEphemeris(Ephemeris):
                 )
             except Exception as e:
                 if self.verbose:
-                    print(f"[HighPrecisionEphemeris] 地球重力模型初始化失败: {e}")
+                    print(f"[HighPrecisionEphemeris] Earth gravity model initialization failed: {e}")
         
         # 初始化CRTBP模型
         if self.config.mode == EphemerisMode.CRTBP:
@@ -272,14 +272,14 @@ class HighPrecisionEphemeris(Ephemeris):
             if success:
                 self._spice_initialized = True
                 if self.verbose:
-                    print(f"[HighPrecisionEphemeris] SPICE 初始化成功")
+                    print(f"[HighPrecisionEphemeris] SPICE initialization successful")
                 return True
             else:
-                warnings.warn("SPICE 初始化失败，回退到解析模式")
+                warnings.warn("SPICE initialization failed, falling back to analytical mode")
                 return False
                 
         except Exception as e:
-            warnings.warn(f"SPICE 初始化错误: {e}，回退到解析模式")
+            warnings.warn(f"SPICE initialization error: {e}, falling back to analytical mode")
             self._spice_interface = None
             self._spice_initialized = False
             return False
@@ -351,7 +351,7 @@ class HighPrecisionEphemeris(Ephemeris):
             if self.config.mode == EphemerisMode.SPICE:
                 warnings.warn("SPICE not initialized, falling back to analytical mode")
                 return self._compute_analytical_state(target, observer, epoch, coord_frame)
-            raise ValueError(f"不支持的星历模式: {self.config.mode}")
+            raise ValueError(f"Unsupported ephemeris mode: {self.config.mode}")
     
     def _compute_spice_state(self,
                             target: CelestialBody,
@@ -392,7 +392,7 @@ class HighPrecisionEphemeris(Ephemeris):
             
         except Exception as e:
             if self.verbose:
-                print(f"[HighPrecisionEphemeris] SPICE 计算失败: {e}，回退到解析模式")
+                print(f"[HighPrecisionEphemeris] SPICE calculation failed: {e}, falling back to analytical mode")
             # 回退到解析模式
             return self._compute_analytical_state(target, observer, epoch, frame)
     
@@ -504,7 +504,7 @@ class HighPrecisionEphemeris(Ephemeris):
                 return np.concatenate([pos_rot, vel_rot])
             except Exception as e:
                 if self.verbose:
-                    print(f"SPICE 旋转转换失败: {e}，使用 CRTBP 近似")
+                    print(f"SPICE rotation transformation failed: {e}, using CRTBP approximation")
         
         # 原有 CRTBP 逻辑
         moon_state_j2000 = self.get_state(
@@ -561,7 +561,7 @@ class HighPrecisionEphemeris(Ephemeris):
         
         # 其他情况：返回近似位置（零向量）
         else:
-            warnings.warn(f"解析模型不支持 {target.value} 相对于 {observer.value}，返回近似解")
+            warnings.warn(f"Analytical model does not support {target.value} relative to {observer.value}, returning approximate solution")
             return np.zeros(6)
     
     def _compute_earth_around_sun(self, epoch: float, frame: CoordinateFrame) -> np.ndarray:
@@ -616,7 +616,7 @@ class HighPrecisionEphemeris(Ephemeris):
         """使用CRTBP模型计算状态（原有实现）"""
         if self.config.crtbp_system == "sun_earth":
             if not (target == CelestialBody.EARTH and observer == CelestialBody.SUN):
-                warnings.warn("CRTBP模型仅支持日地系统，返回近似解")
+                warnings.warn("CRTBP model only supports Sun-Earth system, returning approximate solution")
                 return np.zeros(6)
             
             crtbp_model = self._crtbp_models["sun_earth"]
@@ -632,7 +632,7 @@ class HighPrecisionEphemeris(Ephemeris):
         
         elif self.config.crtbp_system == "earth_moon":
             if not (target == CelestialBody.MOON and observer == CelestialBody.EARTH):
-                warnings.warn("CRTBP模型仅支持地月系统，返回近似解")
+                warnings.warn("CRTBP model only supports Earth-Moon system, returning approximate solution")
                 return np.zeros(6)
             
             crtbp_model = self._crtbp_models["earth_moon"]
@@ -647,7 +647,7 @@ class HighPrecisionEphemeris(Ephemeris):
             return state_physical
         
         else:
-            warnings.warn(f"不支持的CRTBP系统: {self.config.crtbp_system}")
+            warnings.warn(f"Unsupported CRTBP system: {self.config.crtbp_system}")
             return np.zeros(6)
     
     def _compute_numerical_state(self,
@@ -656,7 +656,7 @@ class HighPrecisionEphemeris(Ephemeris):
                                 epoch: float,
                                 frame: CoordinateFrame) -> np.ndarray:
         """使用数值积分计算状态（原有实现）"""
-        warnings.warn("数值积分模式尚未完全实现，返回近似解")
+        warnings.warn("Numerical integration mode not fully implemented, returning approximate solution")
         return np.zeros(6)
     
     def _compute_external_state(self,
@@ -665,7 +665,7 @@ class HighPrecisionEphemeris(Ephemeris):
                                epoch: float,
                                frame: CoordinateFrame) -> np.ndarray:
         """使用外部数据计算状态（原有实现）"""
-        warnings.warn("外部数据模式尚未实现，返回近似解")
+        warnings.warn("External data mode not implemented, returning approximate solution")
         return np.zeros(6)
     
     def _normalize_body(self, body: Union[str, CelestialBody]) -> CelestialBody:
@@ -674,7 +674,7 @@ class HighPrecisionEphemeris(Ephemeris):
             try:
                 return CelestialBody(body.lower())
             except ValueError:
-                raise ValueError(f"不支持的天体: {body}")
+                raise ValueError(f"Unsupported celestial body: {body}")
         elif isinstance(body, CelestialBody):
             return body
         else:
@@ -690,7 +690,7 @@ class HighPrecisionEphemeris(Ephemeris):
                 try:
                     return CoordinateFrame[normalized_name]
                 except KeyError:
-                    raise ValueError(f"不支持的坐标系: {frame}")
+                    raise ValueError(f"Unsupported coordinate frame: {frame}")
         elif isinstance(frame, CoordinateFrame):
             return frame
         else:
@@ -738,7 +738,7 @@ class HighPrecisionEphemeris(Ephemeris):
         self.clear_cache()
         
         if self.verbose:
-            print(f"[HighPrecisionEphemeris] 切换模式为: {mode.value}")
+            print(f"[HighPrecisionEphemeris] Mode switched to: {mode.value}")
     
     def shutdown(self):
         """关闭星历接口，释放资源"""
@@ -746,7 +746,7 @@ class HighPrecisionEphemeris(Ephemeris):
             self._spice_interface.shutdown()
             self._spice_initialized = False
             if self.verbose:
-                print("[HighPrecisionEphemeris] SPICE 接口已关闭")
+                print("[HighPrecisionEphemeris] SPICE interface closed")
     
     def __enter__(self):
         """上下文管理器入口"""
