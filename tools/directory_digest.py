@@ -101,6 +101,9 @@ class DirectoryDigest(DirectoryDigestBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
+        # 从配置中获取debug标志
+        self.debug = self.config.get('debug', False)
+        
         # 初始化处理器注册表（新的核心组件）
         # Note: We'll configure it properly in create_digest based on the mode
         self.processor_registry = create_default_registry(
@@ -277,6 +280,13 @@ class DirectoryDigest(DirectoryDigestBase):
         """
         import time
         start_time = time.time()
+        
+        # 输出debug信息
+        if self.debug:
+            import sys
+            print(f"[DEBUG] create_digest called with mode: {mode}", file=sys.stderr)
+            print(f"[DEBUG] Config: {self.config}", file=sys.stderr)
+            print(f"[DEBUG] Root: {self.root}", file=sys.stderr)
         
         # 重新配置处理器注册表以适应当前模式
         processor_config = self.config.copy()
@@ -488,8 +498,20 @@ class DirectoryDigest(DirectoryDigestBase):
         try:
             filepath = file_digest.metadata.path
             
+            # 添加debug输出
+            if self.debug:
+                import sys
+                print(f"[DEBUG] Processing file: {filepath}", file=sys.stderr)
+                print(f"[DEBUG]   Size: {file_digest.metadata.size} bytes", file=sys.stderr)
+                print(f"[DEBUG]   Strategy: {final_strategy}", file=sys.stderr)
+                print(f"[DEBUG]   File type: {file_digest.metadata.file_type}", file=sys.stderr)
+                print(f"[DEBUG]   Force binary: {file_digest.metadata.force_binary}", file=sys.stderr)
+            
             # 对于METADATA_ONLY策略，只处理元数据
             if final_strategy == ProcessingStrategy.METADATA_ONLY:
+                if self.debug:
+                    import sys
+                    print(f"[DEBUG]   METADATA_ONLY strategy, skipping content processing", file=sys.stderr)
                 # 哈希值已在第一阶段计算
                 file_digest.actual_strategy = final_strategy.value
                 return
@@ -500,14 +522,32 @@ class DirectoryDigest(DirectoryDigestBase):
             if success:
                 # 记录实际使用的策略
                 file_digest.actual_strategy = final_strategy.value
+                
+                # 添加debug输出
+                if self.debug:
+                    import sys
+                    print(f"[DEBUG]   Processor registry returned success", file=sys.stderr)
+                    print(f"[DEBUG]   Full content set: {file_digest.full_content is not None}", file=sys.stderr)
+                    if file_digest.full_content:
+                        print(f"[DEBUG]   Full content length: {len(file_digest.full_content)} chars", file=sys.stderr)
+                    else:
+                        print(f"[DEBUG]   WARNING: Full content is None despite success", file=sys.stderr)
             else:
                 # 处理失败，作为二进制处理
                 file_digest.metadata.file_type = FileType.BINARY_FILES
                 file_digest.actual_strategy = "PROCESS_FAILED"
+                
+                if self.debug:
+                    import sys
+                    print(f"[DEBUG]   Processor registry returned failure", file=sys.stderr)
             
         except Exception as e:
             import sys
             print(f"Warning: Error processing file {file_digest.metadata.path}: {e}", file=sys.stderr)
+            if self.debug:
+                import traceback
+                print(f"[DEBUG]   Exception details:", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
             # 出错时作为二进制文件处理
             file_digest.metadata.file_type = FileType.BINARY_FILES
             file_digest.actual_strategy = "ERROR"
@@ -933,6 +973,17 @@ Operation Modes:
         help="Show detailed processing information (including per-file status)"
     )
     
+    # Debug option
+    debug_group = parser.add_argument_group(
+        "Debug Options",
+        "Troubleshooting and diagnostic output"
+    )
+    debug_group.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode for troubleshooting processing issues"
+    )
+    
     # Size limits group
     size_group = parser.add_argument_group(
         "Size Limits",
@@ -991,6 +1042,7 @@ Operation Modes:
         'max_workers': args.workers if args.workers > 0 else os.cpu_count() or 4,
         'rules_file': Path(args.rules) if args.rules else None,
         'context_size': context_size,
+        'debug': args.debug,  # 添加debug标志
     }
     
     # 如果没有提供 --rules 参数，尝试从默认位置查找规则文件
@@ -1034,6 +1086,11 @@ Operation Modes:
                                   file=sys.stderr)
         except Exception as e:
             print(f"Warning: Could not load ignore patterns from rules file: {e}", file=sys.stderr)
+    
+    if args.debug:
+        print(f"[DEBUG MODE ENABLED]", file=sys.stderr)
+        print(f"[DEBUG] Args: {args}", file=sys.stderr)
+        print(f"[DEBUG] Config: {config}", file=sys.stderr)
     
     # Create digest generator
     digest = DirectoryDigest(args.directory, config)
