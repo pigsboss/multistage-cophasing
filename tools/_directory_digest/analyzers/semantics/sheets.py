@@ -931,24 +931,33 @@ class ConfigFileAnalyzer(BaseConfigAnalyzer):
         return '\n'.join(parts)
 
 
-# ==================== 表格数据文件分析器 ====================
+# ==================== 修改现有的表格数据文件分析器 ====================
 
 class TableDataAnalyzer(BaseDataSheetAnalyzer):
     """表格数据文件分析器 - CSV/TSV 等"""
     
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         super().__init__()
+        self.debug = debug
+        self.smart_analyzer = SmartDataFileAnalyzer(debug)
     
     def can_handle(self, filepath: Path, content: Optional[str] = None) -> bool:
-        """判断是否为表格数据文件"""
+        """判断是否为表格数据文件或智能数据文件"""
+        # 首先检查是否是表格数据文件
         table_extensions = {
             '.csv', '.tsv', '.dat', '.data', '.txt'
         }
-        return filepath.suffix.lower() in table_extensions
+        
+        suffix = filepath.suffix.lower()
+        if suffix in table_extensions:
+            return True
+        
+        # 如果不是标准表格文件，检查是否需要智能分析
+        return self.smart_analyzer.can_handle(filepath, content)
     
     def analyze(self, filepath: Path, content: Optional[str] = None) -> SemanticAnalysisResult:
         """
-        分析表格数据文件
+        分析表格数据文件或智能数据文件
         
         Args:
             filepath: 文件路径
@@ -957,6 +966,15 @@ class TableDataAnalyzer(BaseDataSheetAnalyzer):
         Returns:
             SemanticAnalysisResult: 分析结果
         """
+        # 首先尝试作为标准表格文件分析
+        if filepath.suffix.lower() in ['.csv', '.tsv']:
+            return self._analyze_standard_table(filepath, content)
+        
+        # 否则使用智能分析器
+        return self.smart_analyzer.analyze(filepath, content)
+    
+    def _analyze_standard_table(self, filepath: Path, content: Optional[str] = None) -> SemanticAnalysisResult:
+        """分析标准表格文件（原有逻辑）"""
         result = SemanticAnalysisResult(
             content_type="data_sheet",
             language="data"
