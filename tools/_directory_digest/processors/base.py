@@ -145,7 +145,10 @@ class BaseFileProcessor(ABC):
 class TextFileProcessor(BaseFileProcessor):
     """人类可读文本文件处理器"""
     
-    TEXT_EXTENSIONS = {'.txt', '.md', '.markdown', '.rst', '.tex', '.html', '.htm', '.cmt'}
+    TEXT_EXTENSIONS = {
+        '.txt', '.md', '.markdown', '.rst', '.tex', '.html', '.htm', '.cmt',
+        '.tls', '.tpc', '.ker'  # 添加SPICE内核文件，它们本质上是文本文件
+    }
     
     def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
@@ -807,9 +810,12 @@ class ConfigFileProcessor(BaseFileProcessor):
 # ==================== 数据文件处理器 ====================
 
 class DataFileProcessor(BaseFileProcessor):
-    """数据文件处理器（CSV、TSV、日志等）"""
+    """数据文件处理器（CSV、TSV、日志、SPICE内核等）"""
     
-    DATA_EXTENSIONS = {'.csv', '.tsv', '.log', '.out', '.err', '.dat', '.txt'}
+    DATA_EXTENSIONS = {
+        '.csv', '.tsv', '.log', '.out', '.err', '.dat', '.txt',
+        '.tls', '.tpc', '.ker'  # 添加SPICE内核文件扩展名
+    }
     
     def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
@@ -830,6 +836,15 @@ class DataFileProcessor(BaseFileProcessor):
                     return file_digest.metadata.file_type not in (
                         FileType.CRITICAL_DOCS, FileType.REFERENCE_DOCS, FileType.SOURCE_CODE
                     )
+        
+        # 或者，如果文件策略明确为HEADER_WITH_STATS，即使不在扩展名列表中，也应该处理
+        # 这是为了处理规则引擎分配了HEADER_WITH_STATS策略但扩展名不在列表中的情况
+        if file_digest.metadata.processing_strategy == ProcessingStrategy.HEADER_WITH_STATS:
+            # 检查是否是SPICE内核文件或其他数据文件
+            suffix = file_digest.metadata.path.suffix.lower()
+            if suffix in ('.tls', '.tpc', '.ker'):  # SPICE内核文件
+                return True
+            
         return False
     
     def process(self, file_digest: FileDigest, content: str, mode: str = "framework", 
