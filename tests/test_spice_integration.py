@@ -12,6 +12,11 @@ Skipped if:
     - Required kernels (naif0012.tls, de440.bsp, etc.) are not found
 """
 
+import warnings
+# Filter out requests library warnings about urllib3/chardet compatibility
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="requests")
+warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+
 import pytest
 import numpy as np
 from pathlib import Path

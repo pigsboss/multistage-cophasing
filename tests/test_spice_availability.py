@@ -5,6 +5,11 @@ Minimal prerequisite checks for MCPC SPICE integration.
 Validates spiceypy installation and required kernel files.
 """
 
+import warnings
+# Filter out requests library warnings about urllib3/chardet compatibility
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="requests")
+warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+
 import pytest
 import sys
 from pathlib import Path

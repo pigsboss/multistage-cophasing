@@ -15,12 +15,16 @@ Usage:
     >>> state = spice.get_state('moon', epoch=0.0, observer='earth', frame='J2000')
 """
 
+import warnings
+# Filter out requests library warnings about urllib3/chardet compatibility
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="requests")
+warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum, auto
-import warnings
 import sys
 import os
 

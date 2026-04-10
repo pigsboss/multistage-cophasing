@@ -16,12 +16,16 @@
 版本: 2.0.0 (SPICE Integrated)
 """
 
+import warnings
+# Filter out requests library warnings about urllib3/chardet compatibility
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="requests")
+warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-import warnings
 import os
 
 from mission_sim.core.spacetime.ids import CoordinateFrame
