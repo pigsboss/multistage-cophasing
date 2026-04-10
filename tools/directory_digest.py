@@ -813,6 +813,27 @@ Operation Modes:
                     print(f"Found rules file at default location: {rules_path}", file=sys.stderr)
                 break
     
+    # 加载规则文件中的忽略模式（如果存在）
+    if config['rules_file'] and config['rules_file'].exists():
+        try:
+            import yaml
+            with open(config['rules_file'], 'r', encoding='utf-8') as f:
+                rules_content = yaml.safe_load(f)
+            
+            if rules_content and isinstance(rules_content, dict) and 'ignore_patterns' in rules_content:
+                file_patterns = rules_content['ignore_patterns']
+                if isinstance(file_patterns, list):
+                    # 合并并去重：命令行参数优先，规则文件补充
+                    existing_patterns = set(config['ignore_patterns'])
+                    new_patterns = [p for p in file_patterns if p not in existing_patterns]
+                    if new_patterns:
+                        config['ignore_patterns'].extend(new_patterns)
+                        if args.verbose:
+                            print(f"Loaded {len(new_patterns)} additional ignore patterns from rules file", 
+                                  file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not load ignore patterns from rules file: {e}", file=sys.stderr)
+    
     # Create digest generator
     digest = DirectoryDigest(args.directory, config)
     
