@@ -4,7 +4,7 @@
 file_classifications:
   # 1. CRITICAL_DOCS - 关键文档（最高优先级）
   - name: "critical_docs"
-    patterns: ["README*", "readme*", "LICENSE*", "COPYING*", "NOTICE*", "CHANGELOG*", "AUTHORS*", "NEWS*", "VERSION*"]
+    patterns: ["*README*", "*readme*", "LICENSE*", "COPYING*", "NOTICE*", "CHANGELOG*", "AUTHORS*", "NEWS*", "VERSION*"]
     strategy: "full_content"
     priority: 100
     max_size_kb: 128
@@ -20,7 +20,7 @@ file_classifications:
 
   # 3. REFERENCE_DOCS - SPICE注释文件（包含重要元数据）
   - name: "reference_docs"
-    patterns: ["*.cmt", "*.comment", "*.notes", "*.doc", "*.md"]
+    patterns: ["*comments*", "*.cmt", "*.comment", "*.notes", "*.doc", "*.md"]
     strategy: "summary_only"
     priority: 90
     max_size_kb: 256
@@ -68,6 +68,7 @@ file_classifications:
 
 # 忽略模式（不处理的文件）
 ignore_patterns:
+  - ".rules.yml"
   - "*.zip"
   - "*.tar.gz"
   - "*.tar.bz2"

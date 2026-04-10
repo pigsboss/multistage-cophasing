@@ -1,1 +1,1 @@
-from .ephemeris import Ephemeris
+from .base import Ephemeris
