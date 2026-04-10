@@ -188,8 +188,11 @@ class TextFileProcessor(BaseFileProcessor):
             if debug:
                 print(f"[DEBUG:TextFileProcessor]   FULL_CONTENT strategy", file=sys.stderr)
                 print(f"[DEBUG:TextFileProcessor]     File size: {file_digest.metadata.size}, max_full_content_size: {self.max_full_content_size}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     File size type: {type(file_digest.metadata.size)}, value: {file_digest.metadata.size}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     max_full_content_size type: {type(self.max_full_content_size)}, value: {self.max_full_content_size}", file=sys.stderr)
             
-            # 在full模式下，即使文件大小超过限制，也尝试嵌入部分内容
+            # FULL_CONTENT策略必须设置full_content，无论文件大小
+            # 但在文件过大时进行截断
             if file_digest.metadata.size <= self.max_full_content_size:
                 if debug:
                     print(f"[DEBUG:TextFileProcessor]     File size within limit, setting full_content", file=sys.stderr)
@@ -206,6 +209,13 @@ class TextFileProcessor(BaseFileProcessor):
                     if debug:
                         print(f"[DEBUG:TextFileProcessor]     File within char limit, setting full_content", file=sys.stderr)
                     file_digest.full_content = content
+            
+            # 确保full_content被设置（双重检查）
+            if file_digest.full_content is None:
+                if debug:
+                    print(f"[DEBUG:TextFileProcessor]   WARNING: full_content was None, setting it now", file=sys.stderr)
+                file_digest.full_content = content
+            
             # 确保不设置human_readable_summary
             file_digest.human_readable_summary = None
             
@@ -214,6 +224,7 @@ class TextFileProcessor(BaseFileProcessor):
                 print(f"[DEBUG:TextFileProcessor]     full_content set: {file_digest.full_content is not None}", file=sys.stderr)
                 if file_digest.full_content:
                     print(f"[DEBUG:TextFileProcessor]     full_content length: {len(file_digest.full_content)} chars", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     human_readable_summary set: {file_digest.human_readable_summary is not None}", file=sys.stderr)
             
             return file_digest
             
@@ -1093,7 +1104,16 @@ class FileProcessorRegistry:
                     if mode == "full" and strategy == ProcessingStrategy.FULL_CONTENT and not file_digest.full_content:
                         if self.debug:
                             print(f"[DEBUG:ProcessorRegistry]   WARNING: Processor didn't set full_content for FULL_CONTENT strategy, setting it now", file=sys.stderr)
-                        file_digest.full_content = content
+                        # 重新读取内容并设置
+                        try:
+                            with open(filepath, 'r', encoding='utf-8') as f:
+                                fallback_content = f.read()
+                            file_digest.full_content = fallback_content
+                            if self.debug:
+                                print(f"[DEBUG:ProcessorRegistry]     Set fallback full_content, length: {len(fallback_content)} chars", file=sys.stderr)
+                        except Exception as e:
+                            if self.debug:
+                                print(f"[DEBUG:ProcessorRegistry]     Failed to read fallback content: {e}", file=sys.stderr)
                 else:
                     # 无匹配处理器，作为二进制处理
                     if self.debug:

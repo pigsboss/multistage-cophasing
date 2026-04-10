@@ -489,11 +489,6 @@ class DirectoryDigest(DirectoryDigestBase):
                                    mode: str):
         """
         使用最终确定的策略处理文件
-        
-        Args:
-            file_digest: 文件摘要对象
-            final_strategy: 最终策略
-            mode: 输出模式
         """
         try:
             filepath = file_digest.metadata.path
@@ -532,6 +527,20 @@ class DirectoryDigest(DirectoryDigestBase):
                         print(f"[DEBUG]   Full content length: {len(file_digest.full_content)} chars", file=sys.stderr)
                     else:
                         print(f"[DEBUG]   WARNING: Full content is None despite success", file=sys.stderr)
+                
+                # 在full模式下，如果策略是FULL_CONTENT但full_content未设置，则强制设置
+                if mode == "full" and final_strategy == ProcessingStrategy.FULL_CONTENT and not file_digest.full_content:
+                    if self.debug:
+                        print(f"[DEBUG]   CRITICAL: FULL_CONTENT strategy but full_content not set, reading and setting now", file=sys.stderr)
+                    try:
+                        content = self._read_file_content(filepath)
+                        if content:
+                            file_digest.full_content = content
+                            if self.debug:
+                                print(f"[DEBUG]     Set full_content, length: {len(content)} chars", file=sys.stderr)
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[DEBUG]     Failed to read content: {e}", file=sys.stderr)
             else:
                 # 处理失败，作为二进制处理
                 file_digest.metadata.file_type = FileType.BINARY_FILES
