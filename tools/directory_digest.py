@@ -102,17 +102,12 @@ class DirectoryDigest(DirectoryDigestBase):
         super().__init__(*args, **kwargs)
         
         # 初始化处理器注册表（新的核心组件）
-        processor_config = self.config.copy()
-        # 在full模式下增加全文大小限制
-        if mode == "full":
-            # full模式下增加全文大小限制到100MB或根据配置
-            processor_config['max_full_content_size'] = processor_config.get('max_full_content_size', 100 * 1024 * 1024)
-        
+        # Note: We'll configure it properly in create_digest based on the mode
         self.processor_registry = create_default_registry(
             rule_engine=self.rule_engine,
             context_manager=self.context_manager,
             stats=self.stats,
-            config=processor_config
+            config=self.config.copy()
         )
         
         # 保留高级分析器组件（如果语义分析可用）
