@@ -224,7 +224,7 @@ class TestSPICEKernelManager:
         
         manager = SPICEKernelManager(spice_kernels_path)
         
-        # 改为期望 ValueError 而不是 KernelNotFoundError
+        # 期望 ValueError 因为任务类型验证发生在内核加载之前
         with pytest.raises(ValueError):
             manager.initialize("invalid_mission_type")
 
