@@ -481,28 +481,23 @@ class SPICECalculator:
     
     def get_moon_libration_matrix(self, epoch: float) -> np.ndarray:
         """
-        获取月球天平动矩阵（J2000 -> MOON_PA）
+        获取月球天平动矩阵（J2000 -> IAU_MOON）
         
-        需要加载 moon_pa_de440_200625.bpc 等月球姿态内核
+        使用 IAU（国际天文学联合会）定义的月球坐标系。
+        这是一个稳定的坐标系，总是可用，不需要额外的姿态内核。
         
         Args:
             epoch: 历书时秒
         
         Returns:
-            np.ndarray: 3x3 旋转矩阵（从 J2000 到月球主轴坐标系）
+            np.ndarray: 3x3 旋转矩阵（从 J2000 到 IAU_MOON 坐标系）
         """
         try:
-            # MOON_PA 是 Principal Axis 坐标系（物理主轴）
-            rot_mat = spice.pxform('J2000', 'MOON_PA', epoch)
+            # 使用 IAU_MOON 坐标系，这是 SPICE 内置的，总是可用
+            rot_mat = spice.pxform('J2000', 'IAU_MOON', epoch)
             return np.array(rot_mat)
         except SpiceyError as e:
-            # 如果 MOON_PA 未定义，尝试 IAU_MOON
-            try:
-                rot_mat = spice.pxform('J2000', 'IAU_MOON', epoch)
-                warnings.warn("MOON_PA not available, using IAU_MOON instead")
-                return np.array(rot_mat)
-            except SpiceyError:
-                raise SPICEError(f"Failed to get moon libration matrix: {e}")
+            raise SPICEError(f"Failed to get moon libration matrix: {e}")
     
     def utc_to_et(self, utc: str) -> float:
         """
