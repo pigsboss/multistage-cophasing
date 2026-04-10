@@ -767,7 +767,7 @@ class FormatConverter:
             'source_code': ('Source Code', 'S'),
             'text_data': ('Text Data', 'T'),
             'binary_files': ('Binary Files', 'B'),
-            'unknown': ('Unknown', '?')  # 添加 unknown 类型
+            'unknown': ('Unknown', 'U')  # 修正：使用 'U' 而不是 '?'
         }
         
         listings = digest_data.get('file_listings', {})
@@ -820,7 +820,7 @@ class FormatConverter:
         lines.append(f"  Source Code: {stats.get('source_code', 0)}")
         lines.append(f"  Text Data: {stats.get('text_data', 0)}")
         lines.append(f"  Binary Files: {stats.get('binary_files', 0)}")
-        lines.append(f"  Unknown: {stats.get('unknown', 0)}")  # 添加 unknown
+        lines.append(f"  Unknown: {stats.get('unknown', 0)}")
         lines.append(f"  Skipped (>limit): {stats.get('skipped_large_files', 0)}")
         
         return '\n'.join(lines)

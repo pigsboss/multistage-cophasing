@@ -173,25 +173,32 @@ class TextFileProcessor(BaseFileProcessor):
             # FULL_CONTENT策略：只嵌入全文，不生成摘要
             if file_digest.metadata.size <= self.max_full_content_size:
                 file_digest.full_content = content
-            # 不设置human_readable_summary
+            # 确保不设置human_readable_summary
+            file_digest.human_readable_summary = None
             return file_digest
             
         elif strategy == ProcessingStrategy.SUMMARY_ONLY:
             # SUMMARY_ONLY策略：只生成极简摘要，不嵌入全文
             summary = self._generate_minimal_summary(filepath, content)
             file_digest.human_readable_summary = summary
+            # 确保不设置full_content
+            file_digest.full_content = None
             return file_digest
             
         elif strategy == ProcessingStrategy.HEADER_WITH_STATS:
             # HEADER_WITH_STATS策略：生成头部信息和统计
             summary = self._generate_header_stats_summary(filepath, content)
             file_digest.human_readable_summary = summary
+            # 确保不设置full_content
+            file_digest.full_content = None
             return file_digest
             
         else:
             # 其他策略，默认生成摘要
             summary = self._generate_minimal_summary(filepath, content)
             file_digest.human_readable_summary = summary
+            # 确保不设置full_content
+            file_digest.full_content = None
             return file_digest
     
     def _generate_minimal_summary(self, filepath: Path, content: str) -> HumanReadableSummary:
@@ -350,25 +357,23 @@ class SourceCodeProcessor(BaseFileProcessor):
         # 处理完整内容：对于 FULL_CONTENT 策略，总是设置完整内容（如果文件大小允许）
         if strategy == ProcessingStrategy.FULL_CONTENT and file_digest.metadata.size <= self.max_full_content_size:
             file_digest.full_content = content
-        # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
-        elif self._should_include_full_content(file_digest, mode):
-            file_digest.full_content = content
+            # FULL_CONTENT策略：不生成摘要
+            file_digest.human_readable_summary = None
+        else:
+            # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
+            if self._should_include_full_content(file_digest, mode):
+                file_digest.full_content = content
+            else:
+                file_digest.full_content = None
         
         # 分析代码（结构分析对代码文件始终有价值）
         analysis = self._analyze_code(filepath, content, strategy)
         file_digest.source_code_analysis = analysis
         
-        # 生成摘要：对于 FULL_CONTENT 策略，生成最小化摘要
+        # 生成摘要：对于 FULL_CONTENT 策略，不生成摘要
         if strategy == ProcessingStrategy.FULL_CONTENT:
-            lines = content.split('\n')
-            summary = HumanReadableSummary(
-                title=filepath.name,
-                line_count=analysis.total_lines,
-                character_count=len(content),
-                first_lines=lines[:10],
-                summary=f"Source code file with FULL_CONTENT strategy. Complete content ({len(content)} characters) is included."
-            )
-            file_digest.human_readable_summary = summary
+            # 已经设置为None，不需要额外处理
+            pass
         else:
             # 对于其他策略，生成正常摘要
             summary = self._generate_code_summary(filepath, content, analysis)
@@ -578,24 +583,22 @@ class ConfigFileProcessor(BaseFileProcessor):
         # 处理完整内容：对于 FULL_CONTENT 策略，总是设置完整内容（如果文件大小允许）
         if strategy == ProcessingStrategy.FULL_CONTENT and file_digest.metadata.size <= self.max_full_content_size:
             file_digest.full_content = content
-        # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
-        elif self._should_include_full_content(file_digest, mode):
-            file_digest.full_content = content
+            # FULL_CONTENT策略：不生成摘要
+            file_digest.human_readable_summary = None
+        else:
+            # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
+            if self._should_include_full_content(file_digest, mode):
+                file_digest.full_content = content
+            else:
+                file_digest.full_content = None
         
         # 分析配置结构
         config_analysis = self._analyze_config(filepath, content, strategy)
         
-        # 生成摘要：对于 FULL_CONTENT 策略，生成最小化摘要
+        # 生成摘要：对于 FULL_CONTENT 策略，不生成摘要
         if strategy == ProcessingStrategy.FULL_CONTENT:
-            lines = content.split('\n')
-            summary = HumanReadableSummary(
-                title=filepath.name,
-                line_count=len(lines),
-                character_count=len(content),
-                first_lines=lines[:15],
-                summary=f"Configuration file with FULL_CONTENT strategy. Complete content ({len(content)} characters) is included."
-            )
-            file_digest.human_readable_summary = summary
+            # 已经设置为None，不需要额外处理
+            pass
         else:
             # 对于其他策略，生成正常摘要
             summary = self._generate_config_summary(filepath, content, config_analysis, strategy)
@@ -762,21 +765,19 @@ class DataFileProcessor(BaseFileProcessor):
         # 处理完整内容：对于 FULL_CONTENT 策略，总是设置完整内容（如果文件大小允许）
         if strategy == ProcessingStrategy.FULL_CONTENT and file_digest.metadata.size <= self.max_full_content_size:
             file_digest.full_content = content
-        # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
-        elif mode == "full" and strategy == ProcessingStrategy.FULL_CONTENT:
-            file_digest.full_content = content
+            # FULL_CONTENT策略：不生成摘要
+            file_digest.human_readable_summary = None
+        else:
+            # 对于其他策略，仅在 full 模式下且文件大小允许时设置完整内容
+            if mode == "full" and strategy == ProcessingStrategy.FULL_CONTENT:
+                file_digest.full_content = content
+            else:
+                file_digest.full_content = None
         
-        # 生成摘要：对于 FULL_CONTENT 策略，生成最小化摘要
+        # 生成摘要：对于 FULL_CONTENT 策略，不生成摘要
         if strategy == ProcessingStrategy.FULL_CONTENT:
-            lines = content.split('\n')
-            summary = HumanReadableSummary(
-                title=filepath.name,
-                line_count=len(lines),
-                character_count=len(content),
-                first_lines=self._extract_header(lines, filepath.suffix.lower()),
-                summary=f"Data file with FULL_CONTENT strategy. Complete content ({len(content)} characters) is included."
-            )
-            file_digest.human_readable_summary = summary
+            # 已经设置为None，不需要额外处理
+            pass
         else:
             # 对于其他策略，生成正常摘要
             summary = self._generate_data_summary(filepath, content, strategy)
