@@ -585,6 +585,9 @@ def parse_context_size(size_str: str) -> int:
 def main():
     """Command line entry point"""
     
+    # 获取程序名用于帮助信息格式化
+    prog_name = os.path.basename(sys.argv[0])
+    
     # 检测终端颜色支持（跨平台）
     def _supports_color():
         """检测终端是否支持 ANSI 颜色"""
@@ -632,21 +635,21 @@ Operation Modes:
   full         Include complete file contents
   sort         List files by type and size with statistics"""
 
-    epilog = """Examples:
+    epilog = f"""Examples:
   # Basic usage - output JSON to stdout
-  %(prog)s /path/to/project
+  {prog_name} /path/to/project
   
   # Save to file with custom rules
-  %(prog)s . --rules .digest_rules.yaml --save report.json
+  {prog_name} . --rules .digest_rules.yaml --save report.json
   
   # Full content mode with custom context size
-  %(prog)s . --context-size 64k --mode full
+  {prog_name} . --context-size 64k --mode full
   
   # Sort mode to analyze file types
-  %(prog)s . --mode sort
+  {prog_name} . --mode sort
   
   # Skip large files (>100MB) and use parallel processing
-  %(prog)s /data --max-size 100 --parallel --workers 8"""
+  {prog_name} /data --max-size 100 --parallel --workers 8"""
     
     parser = argparse.ArgumentParser(
         description=description,
