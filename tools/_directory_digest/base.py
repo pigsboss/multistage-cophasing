@@ -179,6 +179,11 @@ class FileDigest:
     
     def to_dict(self, mode: str = "framework") -> Dict:
         """转换为字典"""
+        import sys  # 添加导入
+        # 这里我们无法直接获取debug标志，但可以通过环境变量或其他方式
+        # 暂时设置为False，如果需要调试可以修改
+        debug = False
+        
         result = {"metadata": self.metadata.to_dict()}
         
         # 记录实际使用的策略
@@ -188,9 +193,21 @@ class FileDigest:
         # 根据策略决定输出哪些内容
         strategy = self.metadata.processing_strategy
         
+        # 添加调试输出
+        if debug:
+            print(f"[DEBUG:FileDigest.to_dict] Converting file: {self.metadata.path}", file=sys.stderr)
+            print(f"[DEBUG:FileDigest.to_dict]   Mode: {mode}", file=sys.stderr)
+            print(f"[DEBUG:FileDigest.to_dict]   Strategy: {strategy}", file=sys.stderr)
+            print(f"[DEBUG:FileDigest.to_dict]   full_content is None: {self.full_content is None}", file=sys.stderr)
+            if self.full_content:
+                print(f"[DEBUG:FileDigest.to_dict]   full_content length: {len(self.full_content)}", file=sys.stderr)
+        
+        # 对于 FULL_CONTENT 策略，总是输出完整内容（如果已设置）
         if strategy == ProcessingStrategy.FULL_CONTENT and self.full_content:
-            # FULL_CONTENT策略：只输出完整内容
+            # FULL_CONTENT策略：输出完整内容
             result["full_content"] = self.full_content
+            if debug:
+                print(f"[DEBUG:FileDigest.to_dict]   Added full_content to output", file=sys.stderr)
             
         elif strategy == ProcessingStrategy.SUMMARY_ONLY and self.human_readable_summary:
             # SUMMARY_ONLY策略：只输出摘要
@@ -207,6 +224,9 @@ class FileDigest:
             # 结构提取或头部统计：输出摘要
             if self.human_readable_summary:
                 result["summary"] = getattr(self.human_readable_summary, 'to_dict', lambda: {})()
+        
+        if debug:
+            print(f"[DEBUG:FileDigest.to_dict]   Result keys: {list(result.keys())}", file=sys.stderr)
         
         return result
 

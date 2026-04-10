@@ -219,12 +219,17 @@ class TextFileProcessor(BaseFileProcessor):
             # 确保不设置human_readable_summary
             file_digest.human_readable_summary = None
             
+            # 在返回前再次确认设置
             if debug:
-                print(f"[DEBUG:TextFileProcessor]   After processing:", file=sys.stderr)
-                print(f"[DEBUG:TextFileProcessor]     full_content set: {file_digest.full_content is not None}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]   Before return from FULL_CONTENT:", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     metadata.strategy: {file_digest.metadata.processing_strategy}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     full_content type: {type(file_digest.full_content)}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     full_content is None: {file_digest.full_content is None}", file=sys.stderr)
                 if file_digest.full_content:
                     print(f"[DEBUG:TextFileProcessor]     full_content length: {len(file_digest.full_content)} chars", file=sys.stderr)
-                print(f"[DEBUG:TextFileProcessor]     human_readable_summary set: {file_digest.human_readable_summary is not None}", file=sys.stderr)
+                    # 打印前100个字符以供验证
+                    print(f"[DEBUG:TextFileProcessor]     full_content preview (first 100 chars): {repr(file_digest.full_content[:100])}", file=sys.stderr)
+                print(f"[DEBUG:TextFileProcessor]     human_readable_summary: {file_digest.human_readable_summary}", file=sys.stderr)
             
             return file_digest
             
@@ -1088,10 +1093,12 @@ class FileProcessorRegistry:
                             print(f"[DEBUG:ProcessorRegistry]   FULL_CONTENT strategy, max_full_content_size: {processor.max_full_content_size}", file=sys.stderr)
                     
                     # 执行处理（传入策略确保一致性）
-                    processor.process(file_digest, content, mode, strategy)
+                    file_digest = processor.process(file_digest, content, mode, strategy)
                     
                     if self.debug:
                         print(f"[DEBUG:ProcessorRegistry]   After processor.process:", file=sys.stderr)
+                        print(f"[DEBUG:ProcessorRegistry]     metadata.processing_strategy: {file_digest.metadata.processing_strategy}", file=sys.stderr)
+                        print(f"[DEBUG:ProcessorRegistry]     strategy argument: {strategy}", file=sys.stderr)
                         print(f"[DEBUG:ProcessorRegistry]     full_content set: {file_digest.full_content is not None}", file=sys.stderr)
                         if file_digest.full_content:
                             print(f"[DEBUG:ProcessorRegistry]     full_content length: {len(file_digest.full_content)} chars", file=sys.stderr)
