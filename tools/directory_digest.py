@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 # Import base modules
-from tools._directory_digest import (
+from tools._directory_digest.base import (
     ProcessingStrategy,
     FileType,
     OutputFormats,
