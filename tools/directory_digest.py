@@ -351,6 +351,10 @@ class DirectoryDigest(DirectoryDigestBase):
         Returns:
             调整后的策略映射（file_path -> (file_digest, strategy)）
         """
+        # 在full模式下，不应该降级策略，因为用户明确要求完整内容
+        if mode == "full":
+            return initial_strategies
+        
         # 如果没有上下文管理器，直接使用初始策略
         if not self.context_manager:
             return initial_strategies
@@ -463,32 +467,17 @@ class DirectoryDigest(DirectoryDigestBase):
                 file_digest.actual_strategy = final_strategy.value
                 return
             
-            # 获取处理器
-            processor = self.processor_registry.get_processor(file_digest)
-            if not processor:
-                # 无匹配处理器，作为二进制处理
+            # 使用处理器注册表处理文件，确保统计信息正确更新
+            # 这比直接调用processor.process()更好，因为它会更新file_type统计
+            success = self.processor_registry.process_file(file_digest, mode)
+            
+            if success:
+                # 记录实际使用的策略
+                file_digest.actual_strategy = final_strategy.value
+            else:
+                # 处理失败，作为二进制处理
                 file_digest.metadata.file_type = FileType.BINARY_FILES
-                file_digest.actual_strategy = "NO_PROCESSOR"
-                return
-            
-            # 读取文件内容
-            content = self._read_file_content(filepath)
-            if not content:
-                # 无法读取内容，作为二进制处理
-                file_digest.metadata.file_type = FileType.BINARY_FILES
-                file_digest.actual_strategy = "NO_CONTENT"
-                return
-            
-            # 清除之前可能设置的内容（确保不冗余）
-            file_digest.full_content = None
-            file_digest.human_readable_summary = None
-            file_digest.source_code_analysis = None
-            
-            # 调用处理器处理，传入最终策略
-            processor.process(file_digest, content, mode, final_strategy)
-            
-            # 记录实际使用的策略
-            file_digest.actual_strategy = final_strategy.value
+                file_digest.actual_strategy = "PROCESS_FAILED"
             
         except Exception as e:
             import sys

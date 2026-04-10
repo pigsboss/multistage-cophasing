@@ -105,7 +105,9 @@ class BaseFileProcessor(ABC):
     
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
-        self.max_full_content_size = self.config.get('max_full_content_size', 1024 * 1024)  # 1MB
+        # 在full模式下，应该允许更大的文件大小限制
+        # 默认值从1MB增加到10MB，但可以通过配置覆盖
+        self.max_full_content_size = self.config.get('max_full_content_size', 10 * 1024 * 1024)  # 10MB
     
     @abstractmethod
     def can_handle(self, file_digest: FileDigest) -> bool:
@@ -171,8 +173,17 @@ class TextFileProcessor(BaseFileProcessor):
         # 根据策略决定输出内容，确保不冗余
         if strategy == ProcessingStrategy.FULL_CONTENT:
             # FULL_CONTENT策略：只嵌入全文，不生成摘要
+            # 在full模式下，即使文件大小超过限制，也尝试嵌入部分内容
             if file_digest.metadata.size <= self.max_full_content_size:
                 file_digest.full_content = content
+            else:
+                # 如果文件太大，至少嵌入前部分内容
+                # 限制为最大内容大小的一半，确保不会太大
+                max_chars = self.max_full_content_size // 2
+                if len(content) > max_chars:
+                    file_digest.full_content = content[:max_chars] + f"\n...[文件过大，已截断。完整文件大小: {file_digest.metadata.size} 字节]"
+                else:
+                    file_digest.full_content = content
             # 确保不设置human_readable_summary
             file_digest.human_readable_summary = None
             return file_digest
