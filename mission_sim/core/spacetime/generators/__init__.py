@@ -45,10 +45,22 @@ def create_generator_with_ephemeris(orbit_type: str, ephemeris, **kwargs) -> Bas
         BaseTrajectoryGenerator: 生成器实例
     """
     orbit_type = orbit_type.lower()
+    
+    # 开普勒轨道生成器不需要高精度星历
+    if orbit_type in ["keplerian", "j2_keplerian"]:
+        import warnings
+        warnings.warn(
+            f"{orbit_type} 生成器不需要高精度星历，将忽略 ephemeris 参数",
+            UserWarning
+        )
+        # 移除 ephemeris 参数，避免传递给生成器
+        if 'ephemeris' in kwargs:
+            del kwargs['ephemeris']
+    
     if orbit_type == "keplerian":
-        return KeplerianGenerator(ephemeris=ephemeris, **kwargs)
+        return KeplerianGenerator(**kwargs)
     elif orbit_type == "j2_keplerian":
-        return J2KeplerianGenerator(ephemeris=ephemeris, **kwargs)
+        return J2KeplerianGenerator(**kwargs)
     elif orbit_type == "halo":
         return HaloDifferentialCorrector(ephemeris=ephemeris, **kwargs)
     else:
@@ -69,14 +81,17 @@ def create_high_precision_generator(orbit_type: str, ephemeris, **kwargs) -> Bas
     """
     orbit_type = orbit_type.lower()
     
+    # 开普勒轨道不支持高精度模式
+    if orbit_type in ["keplerian", "j2_keplerian"]:
+        raise ValueError(
+            f"{orbit_type} 生成器不支持高精度模式。"
+            "请使用 create_generator() 或考虑使用数值积分生成器。"
+        )
+    
     # 确保传递 use_high_precision=True
     kwargs['use_high_precision'] = True
     
-    if orbit_type == "keplerian":
-        return KeplerianGenerator(ephemeris=ephemeris, **kwargs)
-    elif orbit_type == "j2_keplerian":
-        return J2KeplerianGenerator(ephemeris=ephemeris, **kwargs)
-    elif orbit_type == "halo":
+    if orbit_type == "halo":
         return HaloDifferentialCorrector(ephemeris=ephemeris, **kwargs)
     else:
         raise ValueError(f"未知的轨道类型: {orbit_type}")

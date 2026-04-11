@@ -15,15 +15,29 @@ class J2KeplerianGenerator(BaseTrajectoryGenerator):
     带 J2 摄动的开普勒轨道生成器。
     通过数值积分二体 + J2 摄动，生成高精度参考星历。
     适用于 LEO/GEO 任务。
+    
+    注意：J2KeplerianGenerator 不需要高精度星历，因为：
+    1. 在地心惯性系中计算航天器相对地球的运动
+    2. 地球位置始终为原点 (0,0,0)
+    3. J2 模型假设地球为固定中心天体
     """
 
-    def __init__(self, mu: float = 3.986004418e14):
+    def __init__(self, mu: float = 3.986004418e14, ephemeris=None, use_high_precision=False):
         """
         初始化生成器。
 
         Args:
             mu: 中心天体引力常数 (m³/s²)，默认地球。
+            ephemeris: 忽略此参数（J2KeplerianGenerator 不需要星历）
+            use_high_precision: 忽略此参数（J2KeplerianGenerator 不支持高精度模式）
+            
+        注意：J2KeplerianGenerator 不需要高精度星历，因为：
+        1. 它在地心惯性系中计算相对地球的轨道
+        2. 地球位置始终为原点，不需要从星历获取
+        3. 这是简化摄动模型，适用于 LEO/GEO 任务规划
         """
+        # 忽略ephemeris和use_high_precision参数
+        super().__init__(ephemeris=None, use_high_precision=False)
         self.mu = mu
         self.j2_model = J2Gravity(mu_earth=mu)  # 使用 J2 模型
 
