@@ -304,7 +304,8 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
             state0_nd, 
             symmetry=SymmetryType.XZ_PLANE,
             max_iter=config["max_iterations"],
-            tol=config["tolerance"]
+            tol=config["tolerance"],
+            lagrange_point=lagrange_point
         )
         
         # 生成完整轨道
@@ -342,7 +343,8 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
             state0_nd,
             symmetry=SymmetryType.X_AXIS,
             max_iter=config["max_iterations"],
-            tol=config["tolerance"]
+            tol=config["tolerance"],
+            lagrange_point=lagrange_point
         )
         
         return self._integrate_orbit(
@@ -374,7 +376,8 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
                 state0_nd,
                 symmetry=SymmetryType.X_AXIS,
                 max_iter=config["max_iterations"],
-                tol=config["tolerance"]
+                tol=config["tolerance"],
+                lagrange_point=lagrange_point
             )
         else:
             # L4/L5 点的 Lyapunov 轨道不同
@@ -422,27 +425,14 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
         max_iter = max(config.get("max_iterations", 50), 150)  # 增加迭代次数
         tol = config.get("tolerance", 1e-10)
         
-        try:
-            # 尝试使用更精确的微分修正
-            corrected_state, period = self._enhanced_differential_correction(
-                state0_nd,
-                orbit_type="vertical",
-                lagrange_point=lagrange_point,
-                max_iter=max_iter,
-                tol=tol
-            )
-        except Exception as e:
-            if self.verbose:
-                print(f"  增强微分修正失败: {e}")
-                print("  回退到标准微分修正")
-            
-            # 回退到标准微分修正
-            corrected_state, period = self._differential_correction(
-                state0_nd,
-                symmetry=SymmetryType.Z_AXIS,
-                max_iter=max_iter,
-                tol=tol
-            )
+        # 直接使用标准微分修正，避免复杂的增强方法
+        corrected_state, period = self._differential_correction(
+            state0_nd,
+            symmetry=SymmetryType.Z_AXIS,
+            max_iter=max_iter,
+            tol=tol,
+            lagrange_point=lagrange_point
+        )
         
         # 验证修正后的状态
         if self.verbose:
@@ -664,7 +654,8 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
                                 initial_guess: np.ndarray,
                                 symmetry: SymmetryType,
                                 max_iter: int = 50,
-                                tol: float = 1e-10) -> Tuple[np.ndarray, float]:
+                                tol: float = 1e-10,
+                                lagrange_point: int = 2) -> Tuple[np.ndarray, float]:
         """
         通用的微分修正算法
         
@@ -730,8 +721,10 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
                 # 垂直轨道：积分到z=0平面
                 T_half = self._find_half_period(state, event='z')
                 if T_half is None:
-                    # 如果找不到z=0的穿越点，尝试其他方法
-                    T_half = self._estimate_period(state) / 2
+                    # 如果找不到z=0的穿越点，使用估计周期
+                    T_half = self._estimate_vertical_period(state, lagrange_point=lagrange_point) / 2
+                    if T_half is None or T_half <= 0:
+                        T_half = 2.0  # 默认值
                 
                 sol = solve_ivp(self._crtbp_equations, (0, T_half), state,
                               method='DOP853', rtol=1e-12, atol=1e-12)
@@ -749,10 +742,18 @@ class CRTBPOrbitGenerator(BaseTrajectoryGenerator):
                 
                 # 改进的修正策略：调整初始状态
                 # 根据误差调整初始z位置和y速度
-                state[2] -= error[0] * 0.1  # 调整z
-                state[4] -= error[2] * 0.1  # 调整vy
+                damping = 0.5  # 阻尼系数防止振荡
+                state[2] -= error[0] * damping * 0.1  # 调整z
+                state[4] -= error[2] * damping * 0.1  # 调整vy
                 # 轻微调整x位置以帮助收敛
-                state[0] -= error[1] * 0.01  # 调整x
+                state[0] -= error[1] * damping * 0.01  # 调整x
+                
+                # 防止调整过大
+                max_adjustment = 0.1
+                for i in range(6):
+                    if abs(state[i]) > 10.0:  # 如果状态变得太大，重置
+                        state = initial_guess.copy()
+                        break
         
         # 未完全收敛，返回最佳结果
         if self.verbose:
