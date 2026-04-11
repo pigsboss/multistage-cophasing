@@ -107,9 +107,11 @@ def elements_to_cartesian(
         raise ValueError(f"Nearly parabolic orbit (1 - e² ≈ 0) may cause numerical issues, got e={e:.6f}")
     
     # 1. Solve Kepler's equation: M = E - e sin(E) using Newton-Raphson
-    E = M
+    # Wrap mean anomaly to [0, 2π) to handle values outside this range
+    M_wrapped = M % (2 * np.pi)
+    E = M_wrapped
     for _ in range(10):
-        f = E - e * np.sin(E) - M
+        f = E - e * np.sin(E) - M_wrapped
         f_prime = 1 - e * np.cos(E)
         delta = f / f_prime
         E -= delta
