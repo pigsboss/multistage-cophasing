@@ -39,83 +39,125 @@ class TestKeplerianGenerator:
         assert hasattr(generator, 'generate')
         
     def test_generate_circular_orbit(self):
-        """测试生成圆轨道"""
-        # 注意：KeplerianGenerator 期望 'elements' 键包含6个轨道根数
-        # 格式: [a, e, i, Ω, ω, M0]
-        # 地球引力常数
+        """Test generating a circular orbit"""
+        # Note: KeplerianGenerator expects 'elements' key containing 6 orbital elements
+        # Format: [a, e, i, Ω, ω, M0] where M0 is mean anomaly at epoch
         mu_earth = 3.986004418e14
         
-        a = 7000e3  # 半长轴 (m) - LEO轨道
-        # 计算轨道周期
+        a = 7000e3  # Semi-major axis (m) - LEO orbit
+        # Calculate orbital period
         period = 2 * np.pi * np.sqrt(a**3 / mu_earth)
         
-        # 设置仿真时长为2个轨道周期，确保轨道闭合
+        # Set simulation duration to 2 orbital periods to ensure orbit closure
         config = {
             'elements': [
                 a,
-                0.0,     # 偏心率 (圆轨道)
-                np.deg2rad(30.0),  # 轨道倾角
-                np.deg2rad(45.0),  # 升交点赤经
-                np.deg2rad(60.0),   # 近地点幅角
-                np.deg2rad(0.0),     # 真近点角
+                0.0,     # Eccentricity (circular orbit)
+                np.deg2rad(30.0),  # Inclination
+                np.deg2rad(45.0),  # RAAN
+                np.deg2rad(60.0),  # Argument of perigee
+                0.0,     # Mean anomaly at epoch (M0) - start at perigee
             ],
             'epoch': 0.0,
             'dt': 60.0,
-            'sim_time': period * 2,  # 2个完整周期
+            'sim_time': period * 2,  # 2 full periods
         }
         
         generator = KeplerianGenerator()
         ephemeris = generator.generate(config)
         
-        # 验证返回类型
+        # Verify return type
         assert isinstance(ephemeris, Ephemeris)
         
-        # 验证坐标系
+        # Verify coordinate frame
         assert ephemeris.frame == CoordinateFrame.J2000_ECI
         
-        # 验证数据维度
+        # Verify data dimensions
         assert len(ephemeris.times) > 0
         assert ephemeris.states.shape[1] == 6
         
-        # 验证轨道闭合（圆轨道应近似闭合）
-        pos_start = ephemeris.states[0, 0:3]
-        pos_end = ephemeris.states[-1, 0:3]
-        distance = np.linalg.norm(pos_end - pos_start)
+        # Instead of checking first and last points (which may not align perfectly due to dt),
+        # interpolate at exact period multiples for accurate closure check
         
-        # 由于数值积分误差，允许一定容差
-        # 圆轨道在完整周期后应闭合在轨道半径的1%以内
-        tolerance = a * 0.01  # 轨道半径的1%（约70公里）
-        assert distance < tolerance, f"轨道闭合误差 {distance:.1f} m 超过容差 {tolerance:.1f} m"
+        # Get state at t=0
+        state_0 = ephemeris.states[0]
+        pos_0 = state_0[0:3]
+        
+        # Get interpolated state at exactly 1 period
+        t_period = period
+        state_1period = ephemeris.get_interpolated_state(t_period)
+        pos_1period = state_1period[0:3]
+        
+        # Get interpolated state at exactly 2 periods
+        t_2period = period * 2
+        state_2period = ephemeris.get_interpolated_state(t_2period)
+        pos_2period = state_2period[0:3]
+        
+        # Circular orbit should close at exact period multiples
+        # Check closure at 1 period
+        distance_1period = np.linalg.norm(pos_1period - pos_0)
+        
+        # Check closure at 2 periods
+        distance_2period = np.linalg.norm(pos_2period - pos_0)
+        
+        # Due to numerical integration errors, allow some tolerance
+        # Circular orbit should close within 1% of orbital radius
+        tolerance = a * 0.01  # 1% of orbital radius (~70 km)
+        
+        # Both period checks should pass
+        assert distance_1period < tolerance, (
+            f"Orbit closure error at 1 period: {distance_1period:.1f} m "
+            f"exceeds tolerance {tolerance:.1f} m"
+        )
+        
+        assert distance_2period < tolerance, (
+            f"Orbit closure error at 2 periods: {distance_2period:.1f} m "
+            f"exceeds tolerance {tolerance:.1f} m"
+        )
+        
+        # Also verify that velocity direction changes appropriately (should reverse after half period)
+        # This is a sanity check for circular orbit dynamics
+        t_half_period = period / 2
+        state_half = ephemeris.get_interpolated_state(t_half_period)
+        vel_half = state_half[3:6]
+        vel_0 = state_0[3:6]
+        
+        # For circular orbit, velocity should be approximately opposite at half period
+        dot_product = np.dot(vel_half, vel_0)
+        # Allow some tolerance due to inclination
+        assert dot_product < 0, (
+            f"Velocity not reversed at half period: dot product = {dot_product:.3f}"
+        )
         
     def test_generate_elliptical_orbit(self):
-        """测试生成椭圆轨道"""
+        """Test generating an elliptical orbit"""
         config = {
             'elements': [
-                7000e3,     # 半长轴 (m)
-                0.2,        # 偏心率 (椭圆轨道)
+                7000e3,     # Semi-major axis (m)
+                0.2,        # Eccentricity (elliptical orbit)
                 np.deg2rad(30.0),
                 np.deg2rad(45.0),
                 np.deg2rad(60.0),
-                np.deg2rad(0.0),
+                0.0,        # Mean anomaly at epoch
             ],
             'epoch': 0.0,
-            'dt': 120.0,            # 时间步长 (s)
-            'sim_time': 3600.0 * 4,  # 4小时（约2.5个周期）
+            'dt': 120.0,            # Time step (s)
+            'sim_time': 3600.0 * 4,  # 4 hours (~2.5 periods)
         }
         
         generator = KeplerianGenerator()
         ephemeris = generator.generate(config)
         
-        # 验证椭圆轨道特性
+        # Verify elliptical orbit properties
         assert isinstance(ephemeris, Ephemeris)
         
-        # 计算轨道半径变化
+        # Calculate orbital radius variation
         positions = ephemeris.states[:, 0:3]
         radii = np.linalg.norm(positions, axis=1)
         
-        # 椭圆轨道半径应有明显变化
+        # Elliptical orbit should have significant radius variation
         radius_variation = np.max(radii) - np.min(radii)
-        assert radius_variation > 1000.0  # 至少1公里变化
+        assert radius_variation > 1000.0  # At least 1 km variation
         
     def test_invalid_parameters(self):
         """测试无效参数"""
