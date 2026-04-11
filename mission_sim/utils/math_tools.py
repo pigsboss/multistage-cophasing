@@ -78,8 +78,8 @@ def elements_to_cartesian(
 
     Args:
         mu: Gravitational parameter of the central body (m³/s²)
-        a: Semi-major axis (m)
-        e: Eccentricity (0 <= e < 1)
+        a: Semi-major axis (m) - must be positive
+        e: Eccentricity (0 <= e < 1 for elliptical orbits)
         i: Inclination (rad)
         Omega: Right ascension of ascending node (rad)
         omega: Argument of periapsis (rad)
@@ -87,7 +87,25 @@ def elements_to_cartesian(
 
     Returns:
         Cartesian state vector [x, y, z, vx, vy, vz] (m, m/s)
+
+    Raises:
+        ValueError: If orbital elements are invalid
     """
+    # Validate input parameters according to MCPC coding standards
+    if a <= 0:
+        raise ValueError(f"Semi-major axis must be positive, got a={a:.6e} m")
+    
+    if e < 0 or e >= 1:
+        raise ValueError(f"Eccentricity must be 0 <= e < 1 for elliptical orbits, got e={e:.6f}")
+    
+    # Additional check for the square root term that caused warnings
+    if abs(e - 1.0) < 1e-12:
+        raise ValueError(f"Parabolic orbits (e=1) are not supported, got e={e:.6f}")
+    
+    # For stability, also check that 1 - e² is not too small to avoid division by zero
+    if abs(1 - e**2) < 1e-12:
+        raise ValueError(f"Nearly parabolic orbit (1 - e² ≈ 0) may cause numerical issues, got e={e:.6f}")
+    
     # 1. Solve Kepler's equation: M = E - e sin(E) using Newton-Raphson
     E = M
     for _ in range(10):
@@ -107,6 +125,10 @@ def elements_to_cartesian(
     y_orb = r * np.sin(nu)
 
     p = a * (1 - e ** 2)
+    # Additional safety check for p to avoid sqrt of negative or zero
+    if p <= 0:
+        raise ValueError(f"Parameter p = a*(1-e²) must be positive, got p={p:.6e} (a={a:.6e}, e={e:.6f})")
+    
     vx_orb = -np.sqrt(mu / p) * np.sin(nu)
     vy_orb = np.sqrt(mu / p) * (e + np.cos(nu))
 
