@@ -542,16 +542,38 @@ class BenchmarkReporter:
             print(f"\n{task_name}:")
             print("-" * 60)
             
-            # 找出最快的实现
-            fastest = min(task_results, key=lambda x: x.execution_time)
+            # 寻找Python内置实现作为基线
+            baseline = None
+            for result in task_results:
+                if result.implementation in ["Pure Python", "Python"]:
+                    baseline = result
+                    break
             
-            for result in sorted(task_results, key=lambda x: x.execution_time):
-                speedup = fastest.execution_time / result.execution_time
-                speedup_str = f" (Relative speedup: {speedup:.2f}x)" if result != fastest else " [Fastest]"
+            # 如果没有找到基线，则使用最快的作为基准（原逻辑）
+            if baseline is None:
+                baseline = min(task_results, key=lambda x: x.execution_time)
+                baseline_is_python = False
+            else:
+                baseline_is_python = True
+            
+            # 排序：按执行时间从快到慢
+            sorted_results = sorted(task_results, key=lambda x: x.execution_time)
+            
+            for result in sorted_results:
+                if result is baseline:
+                    # 基线标记
+                    if baseline_is_python:
+                        marker = " [Baseline - Pure Python]"
+                    else:
+                        marker = " [Baseline - Fastest]"
+                else:
+                    # 计算相对于基线的加速比
+                    speedup = baseline.execution_time / result.execution_time
+                    marker = f" (Speedup vs baseline: {speedup:.2f}x)"
                 
                 print(f"  {result.implementation:25s} | "
                       f"Time: {result.execution_time:.4f}s | "
-                      f"Iter/s: {result.iterations_per_second:.2f}{speedup_str}")
+                      f"Iter/s: {result.iterations_per_second:.2f}{marker}")
                 if result.notes:
                     print(f"    {result.notes}")
     
