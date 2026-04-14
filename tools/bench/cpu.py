@@ -627,8 +627,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --size (5000,500)                     # Set same scale for all tests
+  %(prog)s --size (5000,500)                     # Run all tests with same scale
   %(prog)s --size-traj (5000,500) --size-mc 1000000 --size-nbody (200,20)
+  %(prog)s --test traj --size-traj (5000,500)    # Run only trajectory integral test
+  %(prog)s --test mc --size-mc 1000000           # Run only Monte Carlo test
+  %(prog)s --test nbody --size-nbody (200,20)    # Run only N-body test
   %(prog)s --repeats 10 --output results.json    # Run 10 repeats and save to JSON
   %(prog)s --help                                # Show this help message
   
@@ -670,6 +673,12 @@ Scale parameters:
         help="Path to output JSON file, if not specified print to console"
     )
     
+    # Add --test parameter to support running specific tests
+    parser.add_argument(
+        "--test", type=str, choices=["traj", "mc", "nbody", "all"], default="all",
+        help="Which test to run: 'traj' for trajectory integral, 'mc' for Monte Carlo, 'nbody' for N-body, 'all' for all tests (default)"
+    )
+    
     args = parser.parse_args()
     
     # Parse scale parameters
@@ -691,22 +700,27 @@ Scale parameters:
     if args.size:
         # Uniform scale
         base_m, base_n = parse_tuple(args.size)
-        traj_steps, traj_trajectories = base_m, base_n  # 修改：path → traj
+        traj_steps, traj_trajectories = base_m, base_n
         mc_samples = base_m
         nbody_bodies, nbody_steps = base_m, base_n
     else:
         # Individual settings or defaults
-        # 修改：path → traj
         traj_steps, traj_trajectories = (5000, 500) if not args.size_traj else parse_tuple(args.size_traj)
         mc_samples = 1000000 if not args.size_mc else parse_int(args.size_mc)
         nbody_bodies, nbody_steps = (200, 20) if not args.size_nbody else parse_tuple(args.size_nbody)
     
     print("Starting CPU benchmark...")
     print(f"Configuration:")
-    # 修改：Path Integral → Trajectory Integral
-    print(f"  Trajectory Integral: steps={traj_steps}, trajectories={traj_trajectories}")
-    print(f"  Monte Carlo: samples={mc_samples}")
-    print(f"  N-Body: bodies={nbody_bodies}, steps={nbody_steps}")
+    print(f"  Test mode: {args.test}")
+    
+    # Display configuration based on selected test
+    if args.test in ["traj", "all"]:
+        print(f"  Trajectory Integral: steps={traj_steps}, trajectories={traj_trajectories}")
+    if args.test in ["mc", "all"]:
+        print(f"  Monte Carlo: samples={mc_samples}")
+    if args.test in ["nbody", "all"]:
+        print(f"  N-Body: bodies={nbody_bodies}, steps={nbody_steps}")
+    
     print(f"  Repeats: {args.repeats}")
     
     # Create benchmark instance
@@ -714,137 +728,153 @@ Scale parameters:
     
     all_results = []
     
-    # Test 1: Trajectory Integral (原 Path Integral)
-    print("\n1. Testing complex branching and loops (Trajectory Integral)...")
-    
-    path_integral = PathIntegralBenchmark()
-    
-    # Pure Python implementation
-    result = benchmark.run_benchmark(
-        path_integral.python_implementation,
-        task_name="Trajectory Integral",  # 修改：Path Integral → Trajectory Integral
-        impl_name="Pure Python",
-        steps=traj_steps,
-        paths=traj_trajectories  # 修改：使用traj_trajectories
-    )
-    all_results.append(result)
-    
-    # NumPy/SciPy implementation
-    if NUMPY_AVAILABLE and SCIPY_AVAILABLE:
+    # Function to run trajectory integral test
+    def run_trajectory_test():
+        print("\n1. Testing complex branching and loops (Trajectory Integral)...")
+        
+        path_integral = PathIntegralBenchmark()
+        
+        # Pure Python implementation
         result = benchmark.run_benchmark(
-            path_integral.numpy_scipy_implementation,
-            task_name="Trajectory Integral",  # 修改：Path Integral → Trajectory Integral
-            impl_name="NumPy/SciPy",
+            path_integral.python_implementation,
+            task_name="Trajectory Integral",
+            impl_name="Pure Python",
             steps=traj_steps,
-            paths=traj_trajectories  # 修改：使用traj_trajectories
-        )
-        all_results.append(result)
-    
-    # Numba serial implementation
-    if NUMBA_AVAILABLE:
-        result = benchmark.run_benchmark(
-            path_integral.numba_implementation,
-            task_name="Trajectory Integral",  # 修改：Path Integral → Trajectory Integral
-            impl_name="Numba (Serial)",
-            steps=traj_steps,
-            paths=traj_trajectories  # 修改：使用traj_trajectories
+            paths=traj_trajectories
         )
         all_results.append(result)
         
-        # Numba parallel implementation
+        # NumPy/SciPy implementation
+        if NUMPY_AVAILABLE and SCIPY_AVAILABLE:
+            result = benchmark.run_benchmark(
+                path_integral.numpy_scipy_implementation,
+                task_name="Trajectory Integral",
+                impl_name="NumPy/SciPy",
+                steps=traj_steps,
+                paths=traj_trajectories
+            )
+            all_results.append(result)
+        
+        # Numba serial implementation
+        if NUMBA_AVAILABLE:
+            result = benchmark.run_benchmark(
+                path_integral.numba_implementation,
+                task_name="Trajectory Integral",
+                impl_name="Numba (Serial)",
+                steps=traj_steps,
+                paths=traj_trajectories
+            )
+            all_results.append(result)
+            
+            # Numba parallel implementation
+            result = benchmark.run_benchmark(
+                path_integral.numba_parallel_implementation,
+                task_name="Trajectory Integral",
+                impl_name="Numba (Parallel)",
+                steps=traj_steps,
+                paths=traj_trajectories
+            )
+            all_results.append(result)
+    
+    # Function to run Monte Carlo test
+    def run_monte_carlo_test():
+        print("\n2. Testing large-scale vector operations (Monte Carlo)...")
+        
+        monte_carlo = MonteCarloBenchmark()
+        
+        # Pure Python implementation
         result = benchmark.run_benchmark(
-            path_integral.numba_parallel_implementation,
-            task_name="Trajectory Integral",  # 修改：Path Integral → Trajectory Integral
-            impl_name="Numba (Parallel)",
-            steps=traj_steps,
-            paths=traj_trajectories  # 修改：使用traj_trajectories
-        )
-        all_results.append(result)
-    
-    # Test 2: Monte Carlo simulation
-    print("\n2. Testing large-scale vector operations (Monte Carlo)...")
-    
-    monte_carlo = MonteCarloBenchmark()
-    
-    # Pure Python implementation
-    result = benchmark.run_benchmark(
-        monte_carlo.python_implementation,
-        task_name="Monte Carlo",
-        impl_name="Pure Python",
-        samples=mc_samples
-    )
-    all_results.append(result)
-    
-    # NumPy implementation
-    if NUMPY_AVAILABLE:
-        result = benchmark.run_benchmark(
-            monte_carlo.numpy_implementation,
+            monte_carlo.python_implementation,
             task_name="Monte Carlo",
-            impl_name="NumPy",
-            samples=mc_samples
-        )
-        all_results.append(result)
-    
-    # Numba implementation
-    if NUMBA_AVAILABLE and NUMPY_AVAILABLE:
-        result = benchmark.run_benchmark(
-            monte_carlo.numba_implementation,
-            task_name="Monte Carlo",
-            impl_name="Numba",
+            impl_name="Pure Python",
             samples=mc_samples
         )
         all_results.append(result)
         
-        # Numba parallel implementation
+        # NumPy implementation
+        if NUMPY_AVAILABLE:
+            result = benchmark.run_benchmark(
+                monte_carlo.numpy_implementation,
+                task_name="Monte Carlo",
+                impl_name="NumPy",
+                samples=mc_samples
+            )
+            all_results.append(result)
+        
+        # Numba implementation
+        if NUMBA_AVAILABLE and NUMPY_AVAILABLE:
+            result = benchmark.run_benchmark(
+                monte_carlo.numba_implementation,
+                task_name="Monte Carlo",
+                impl_name="Numba",
+                samples=mc_samples
+            )
+            all_results.append(result)
+            
+            # Numba parallel implementation
+            result = benchmark.run_benchmark(
+                monte_carlo.numba_parallel_implementation,
+                task_name="Monte Carlo",
+                impl_name="Numba (Parallel)",
+                samples=mc_samples
+            )
+            all_results.append(result)
+    
+    # Function to run N-body test
+    def run_nbody_test():
+        print("\n3. Testing large-scale data and synchronization (N-Body)...")
+        
+        nbody = NBodyBenchmark(num_bodies=nbody_bodies, steps=nbody_steps)
+        
+        # Pure Python implementation
         result = benchmark.run_benchmark(
-            monte_carlo.numba_parallel_implementation,
-            task_name="Monte Carlo",
-            impl_name="Numba (Parallel)",
-            samples=mc_samples
-        )
-        all_results.append(result)
-    
-    # Test 3: N-body dynamics
-    print("\n3. Testing large-scale data and synchronization (N-Body)...")
-    
-    nbody = NBodyBenchmark(num_bodies=nbody_bodies, steps=nbody_steps)
-    
-    # Pure Python implementation
-    result = benchmark.run_benchmark(
-        nbody.python_implementation,
-        task_name="N-Body",
-        impl_name="Pure Python"
-    )
-    all_results.append(result)
-    
-    # NumPy implementation
-    if NUMPY_AVAILABLE:
-        result = benchmark.run_benchmark(
-            nbody.numpy_implementation,
+            nbody.python_implementation,
             task_name="N-Body",
-            impl_name="NumPy"
-        )
-        all_results.append(result)
-    
-    # Numba implementation
-    if NUMBA_AVAILABLE and NUMPY_AVAILABLE:
-        result = benchmark.run_benchmark(
-            nbody.numba_implementation,
-            task_name="N-Body",
-            impl_name="Numba (Serial)"
+            impl_name="Pure Python"
         )
         all_results.append(result)
         
-        # Numba parallel implementation
-        result = benchmark.run_benchmark(
-            nbody.numba_parallel_implementation,
-            task_name="N-Body",
-            impl_name="Numba (Parallel)"
-        )
-        all_results.append(result)
+        # NumPy implementation
+        if NUMPY_AVAILABLE:
+            result = benchmark.run_benchmark(
+                nbody.numpy_implementation,
+                task_name="N-Body",
+                impl_name="NumPy"
+            )
+            all_results.append(result)
+        
+        # Numba implementation
+        if NUMBA_AVAILABLE and NUMPY_AVAILABLE:
+            result = benchmark.run_benchmark(
+                nbody.numba_implementation,
+                task_name="N-Body",
+                impl_name="Numba (Serial)"
+            )
+            all_results.append(result)
+            
+            # Numba parallel implementation
+            result = benchmark.run_benchmark(
+                nbody.numba_parallel_implementation,
+                task_name="N-Body",
+                impl_name="Numba (Parallel)"
+            )
+            all_results.append(result)
+    
+    # Run selected tests based on --test argument
+    if args.test in ["traj", "all"]:
+        run_trajectory_test()
+    
+    if args.test in ["mc", "all"]:
+        run_monte_carlo_test()
+    
+    if args.test in ["nbody", "all"]:
+        run_nbody_test()
     
     # Output results
-    BenchmarkReporter.print_results(all_results, output_file=args.output)
+    if all_results:
+        BenchmarkReporter.print_results(all_results, output_file=args.output)
+    else:
+        print("\nNo results to display. Check if all required libraries are installed.")
     
     # Output system information
     print("\n" + "="*80)

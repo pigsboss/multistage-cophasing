@@ -70,23 +70,23 @@ plot_groups:
       steps: [10, 20, 50, 100, 200]
 
 jobs:
-  # 轨迹积分基准测试任务
+  # Trajectory integral benchmark task
   - name: "traj_benchmark"
-    tool: "cpu.py"
+    tool: "cpu.py::traj"  # Use :: syntax to specify only trajectory integral test
     base_args: ["--repeats", "3"]
-    scale_type: "trajectory"  # 用于分组
+    scale_type: "trajectory"
     task: "Trajectory Integral"
 
-  # 蒙特卡洛基准测试任务
+  # Monte Carlo benchmark task
   - name: "mc_benchmark"
-    tool: "cpu.py"
+    tool: "cpu.py::mc"    # Use :: syntax to specify only Monte Carlo test
     base_args: ["--repeats", "3"]
     scale_type: "monte_carlo"
     task: "Monte Carlo"
 
-  # N体问题基准测试任务
+  # N-body benchmark task
   - name: "nbody_benchmark"
-    tool: "cpu.py"
+    tool: "cpu.py::nbody" # Use :: syntax to specify only N-body test
     base_args: ["--repeats", "3"]
     scale_type: "nbody"
     task: "N-Body"

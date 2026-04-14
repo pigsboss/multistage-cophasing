@@ -40,9 +40,11 @@ class BenchmarkJob:
 
 @dataclass
 class BenchmarkResult:
-    """基准测试结果（简化版，用于批量处理）"""
+    """Benchmark result (simplified version for batch processing)"""
     job_name: str
     tool: str
+    tool_name: str  # New: tool name (e.g., cpu.py)
+    test_type: str  # New: test type (e.g., traj, mc, nbody, all)
     task_name: str
     implementation: str
     scale_params: Dict[str, Any]
@@ -104,7 +106,7 @@ class BatchBenchmarkRunner:
             sys.exit(1)
     
     def generate_jobs_from_plot_groups(self):
-        """从绘图组配置生成具体的测试任务"""
+        """Generate specific test tasks from plot group configuration"""
         plot_groups_config = self.config.get('plot_groups', [])
         jobs_config = self.config.get('jobs', [])
         
@@ -112,7 +114,7 @@ class BatchBenchmarkRunner:
             print("No plot groups defined in configuration")
             return
         
-        # 创建任务模板映射
+        # Create job template mapping
         job_templates = {job['name']: job for job in jobs_config}
         
         job_counter = 0
@@ -121,7 +123,7 @@ class BatchBenchmarkRunner:
             task = plot_group['task']
             scale_type = plot_group['scale_type']
             
-            # 找到对应的任务模板
+            # Find corresponding job template
             template = None
             for job_template in jobs_config:
                 if job_template.get('scale_type') == scale_type and job_template.get('task') == task:
@@ -132,20 +134,33 @@ class BatchBenchmarkRunner:
                 print(f"Warning: No job template found for {task} with scale_type {scale_type}")
                 continue
             
-            # 获取变化参数和固定参数
+            # Parse tool string to support cpu.py::traj format
+            tool_str = template['tool']
+            tool_args = []
+            
+            if '::' in tool_str:
+                # Split tool name and test type
+                tool_parts = tool_str.split('::', 1)
+                tool_name = tool_parts[0]
+                test_type = tool_parts[1]
+                tool_args.extend(['--test', test_type])
+            else:
+                tool_name = tool_str
+            
+            # Get varied and fixed parameters
             varied_params = plot_group['varied_params']
             fixed_params = plot_group.get('fixed_params', {})
             
-            # 对于每个变化参数组合生成任务
+            # Generate tasks for each parameter combination
             for param_name, param_values in varied_params.items():
                 for param_value in param_values:
-                    # 构建任务参数
+                    # Build job name
                     job_name = f"{template['name']}_{param_name}_{param_value}"
                     
-                    # 构建命令行参数
-                    args = template['base_args'].copy()
+                    # Build command line arguments
+                    args = template['base_args'].copy() + tool_args
                     
-                    # 添加规模参数
+                    # Add scale parameters
                     if scale_type == 'trajectory':
                         if param_name == 'steps':
                             args.extend(["--size-traj", f"({param_value},{fixed_params.get('trajectories', 500)})"])
@@ -162,23 +177,25 @@ class BatchBenchmarkRunner:
                         elif param_name == 'steps':
                             args.extend(["--size-nbody", f"({fixed_params.get('bodies', 500)},{param_value})"])
                     
-                    # 输出文件
+                    # Output file
                     output_file = self.output_dir / f"{job_name}.json"
                     args.extend(["--output", str(output_file)])
                     
-                    # 元数据
+                    # Metadata
                     metadata = {
                         'plot_group': group_name,
                         'task': task,
                         'scale_type': scale_type,
+                        'tool_name': tool_name,
+                        'test_type': test_type if '::' in tool_str else 'all',
                         param_name: param_value,
                         **fixed_params
                     }
                     
-                    # 创建任务
+                    # Create job
                     job = BenchmarkJob(
                         name=job_name,
-                        tool=template['tool'],
+                        tool=tool_name,
                         args=args,
                         output_file=str(output_file),
                         metadata=metadata
@@ -239,20 +256,22 @@ class BatchBenchmarkRunner:
         print(f"All jobs completed. Total results collected: {len(self.results)}")
     
     def load_job_result(self, job: BenchmarkJob):
-        """加载单个任务的结果文件"""
+        """Load single job result file"""
         try:
             with open(job.output_file, 'r', encoding='utf-8') as f:
                 result_data = json.load(f)
             
-            # 提取基准测试结果
+            # Extract benchmark results
             for benchmark_result in result_data.get('benchmark_results', []):
-                # 提取规模参数
+                # Extract scale parameters
                 scale_params = job.metadata.copy()
                 
-                # 创建结果对象
+                # Create result object
                 result = BenchmarkResult(
                     job_name=job.name,
                     tool=job.tool,
+                    tool_name=job.metadata.get('tool_name', job.tool),
+                    test_type=job.metadata.get('test_type', 'all'),
                     task_name=benchmark_result['task_name'],
                     implementation=benchmark_result['implementation'],
                     scale_params=scale_params,
