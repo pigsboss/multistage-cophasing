@@ -290,7 +290,8 @@ class GPUMonteCarloBenchmark:
         
         # Warm-up runs (single batch for warmup)
         for i in range(warmup_iterations):
-            seed = np.uint32(10000 + i)
+            # 修复：增加 batch 间 seed 间隔，避免序列重叠
+            seed = np.uint32(10000 + i * 100000)
             kernel(self.queue, (global_size,), (local_size,),
                    np.uint64(samples_per_item), np.uint32(num_work_items), 
                    seed, partial_counts_buf,
@@ -307,7 +308,9 @@ class GPUMonteCarloBenchmark:
             
             # Execute multiple batches
             for batch_idx in range(num_batches):
-                seed = np.uint32(12345 + i * num_batches + batch_idx)
+                # 修复：确保不同 batch 的 seed 空间分离，间隔 > max_work_items
+                SEED_STRIDE = 100000
+                seed = np.uint32(12345 + i * num_batches * SEED_STRIDE + batch_idx * SEED_STRIDE)
                 
                 event = kernel(self.queue, (global_size,), (local_size,),
                               np.uint64(samples_per_item), np.uint32(num_work_items),
