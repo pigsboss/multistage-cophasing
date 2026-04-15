@@ -70,47 +70,100 @@ class NumPyDiagnostics:
         )
     
     def detect_blas_lapack(self):
-        """Detect BLAS/LAPACK implementation"""
+        """Detect BLAS/LAPACK implementation with improved methods"""
         blas_info = {}
         lapack_info = {}
         
-        # Method 1: NumPy < 2.0 (numpy.distutils)
+        # Try to get direct config information first
         try:
-            from numpy.distutils.system_info import get_info
-            blas_info = get_info('blas_opt') or {}
-            lapack_info = get_info('lapack_opt') or {}
-        except ImportError:
-            # Method 2: NumPy 2.0+ using __config__ module
+            # Check if numpy was built with MKL by examining __config__
+            if hasattr(np, '__config__'):
+                import numpy.__config__ as npconfig
+                
+                # Capture show_config output for parsing
+                import io
+                import contextlib
+                
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    npconfig.show()
+                config_output = output.getvalue()
+                
+                # Parse for MKL indicators
+                mkl_indicators = [
+                    'mkl', 'intel', 'oneapi', 'intel mkl', 'intel oneapi'
+                ]
+                
+                for line in config_output.split('\n'):
+                    line_lower = line.lower()
+                    if any(indicator in line_lower for indicator in mkl_indicators):
+                        # Found MKL reference
+                        blas_info['detected_by_config'] = line.strip()
+                        if 'mkl' not in blas_info.get('implementation', '').lower():
+                            blas_info['implementation'] = 'Intel MKL (from config)'
+                
+                # Try to get blas_opt_info and lapack_opt_info
+                if hasattr(npconfig, 'blas_opt_info'):
+                    info = npconfig.blas_opt_info
+                    if info:
+                        blas_info.update(dict(info))
+                
+                if hasattr(npconfig, 'lapack_opt_info'):
+                    info = npconfig.lapack_opt_info
+                    if info:
+                        lapack_info.update(dict(info))
+        
+        except Exception as e:
+            if self.verbose:
+                print(f"Direct config detection failed: {e}")
+        
+        # Method 2: Direct MKL path checking
+        mkl_paths = self._check_mkl_paths()
+        if mkl_paths:
+            blas_info['mkl_paths'] = mkl_paths
+            blas_info['implementation'] = 'Intel MKL (from path detection)'
+        
+        # Method 3: numpy.distutils (legacy)
+        if not blas_info.get('implementation'):
             try:
-                import numpy as np
-                config = getattr(np, '__config__', None)
-                if config:
-                    if hasattr(config, 'get_info'):
-                        blas_info = config.get_info('blas') or {}
-                        lapack_info = config.get_info('lapack') or {}
-                    elif hasattr(config, 'build_info'):
-                        build_info = config.build_info
-                        blas_info = build_info.get('blas', {})
-                        lapack_info = build_info.get('lapack', {})
-            except Exception:
+                from numpy.distutils.system_info import get_info
+                blas_opt = get_info('blas_opt') or {}
+                lapack_opt = get_info('lapack_opt') or {}
+                
+                if blas_opt:
+                    blas_info.update(blas_opt)
+                if lapack_opt:
+                    lapack_info.update(lapack_opt)
+            except ImportError:
                 pass
-            
-            # Method 3: Try scipy as fallback
-            if not blas_info:
-                try:
-                    import scipy.linalg.blas as slb
-                    func = slb.get_blas_funcs('gemm')
-                    blas_info = {'libraries': [f'scipy-{func.typecode}'], 'source': 'scipy'}
-                    lapack_info = {'source': 'scipy'}
-                except ImportError:
-                    pass
+        
+        # Method 4: Check for MKL symbols in loaded modules
+        mkl_symbols = self._check_mkl_symbols()
+        if mkl_symbols:
+            blas_info['mkl_symbols'] = mkl_symbols
+            blas_info['implementation'] = 'Intel MKL (from symbol detection)'
+        
+        # Method 5: Check environment variables
+        mkl_env = self._check_mkl_environment()
+        if mkl_env:
+            blas_info['mkl_environment'] = mkl_env
+            if 'implementation' not in blas_info:
+                blas_info['implementation'] = 'Intel MKL (from environment)'
+        
+        # If still no implementation detected, try performance-based inference
+        if not blas_info.get('implementation'):
+            # Run a quick performance test to infer implementation
+            impl_from_perf = self._infer_implementation_from_performance()
+            if impl_from_perf:
+                blas_info['implementation'] = impl_from_perf
+                blas_info['inferred_from_performance'] = True
         
         self.config.blas_info = self._sanitize_dict(blas_info)
         self.config.lapack_info = self._sanitize_dict(lapack_info)
         
-        if not blas_info and not lapack_info:
-            print("Warning: Could not detect BLAS/LAPACK implementation. "
-                  "Install scipy for better detection on NumPy 2.0+.")
+        if not blas_info.get('implementation'):
+            print("Warning: Could not detect BLAS/LAPACK implementation.")
+            print("Run 'np.show_config()' in Python to see detailed configuration.")
     
     def _sanitize_dict(self, d: Dict[str, Any]) -> Dict[str, Any]:
         """清理字典，确保可序列化"""
@@ -227,6 +280,175 @@ class NumPyDiagnostics:
                 dlls[dll_file.name] = str(dll_file)
         
         self.config.build_config["dynamic_libraries"] = dlls
+    
+    def _check_mkl_paths(self):
+        """Check for MKL in common installation paths"""
+        mkl_paths = {}
+        
+        # Common MKL installation paths
+        possible_paths = [
+            '/opt/intel/oneapi',  # User's mentioned path
+            '/opt/intel',
+            '/usr/local/intel',
+            '/opt/intel/compilers_and_libraries',
+            os.environ.get('MKLROOT', ''),
+            os.environ.get('INTEL_ONEAPI_ROOT', ''),
+            os.environ.get('ONEAPI_ROOT', ''),
+        ]
+        
+        for base_path in possible_paths:
+            if not base_path:
+                continue
+            
+            path = Path(base_path)
+            if not path.exists():
+                continue
+            
+            # Look for MKL libraries
+            mkl_lib_patterns = [
+                '**/libmkl_rt.so',
+                '**/libmkl_rt.dylib',
+                '**/mkl/lib/*.so',
+                '**/mkl/lib/*.dylib',
+                '**/mkl/*/lib/*.so',
+            ]
+            
+            found_libs = []
+            for pattern in mkl_lib_patterns:
+                for lib_file in path.glob(pattern):
+                    if lib_file.is_file():
+                        found_libs.append(str(lib_file))
+            
+            if found_libs:
+                mkl_paths[str(path)] = found_libs
+        
+        return mkl_paths
+    
+    def _check_mkl_symbols(self):
+        """Check for MKL symbols in loaded NumPy module"""
+        try:
+            import ctypes
+            import ctypes.util
+            
+            # Try to find MKL library
+            lib_path = None
+            
+            # First try common MKL library names
+            for lib_name in ['libmkl_rt.so', 'libmkl_rt.dylib', 'mkl_rt.dll']:
+                lib_path = ctypes.util.find_library(lib_name)
+                if lib_path:
+                    break
+            
+            # If not found, try to find it in NumPy's dependencies
+            if not lib_path:
+                # Get NumPy's module path and check dependencies
+                numpy_path = Path(np.__file__).parent
+                for ext in ['.so', '.dylib', '.dll']:
+                    for lib_file in numpy_path.glob(f'*{ext}'):
+                        if 'mkl' in lib_file.name.lower():
+                            lib_path = str(lib_file)
+                            break
+                    if lib_path:
+                        break
+            
+            if lib_path:
+                # Try to load the library and check for MKL symbols
+                try:
+                    lib = ctypes.CDLL(lib_path)
+                    # Check for common MKL function names
+                    mkl_functions = [
+                        'MKL_Get_Version',
+                        'MKL_Get_Version_String',
+                        'cblas_dgemm',
+                        'LAPACKE_dgesvd',
+                    ]
+                    
+                    found_symbols = []
+                    for func in mkl_functions:
+                        try:
+                            if hasattr(lib, func):
+                                found_symbols.append(func)
+                        except:
+                            pass
+                    
+                    if found_symbols:
+                        return {
+                            'library_path': lib_path,
+                            'symbols_found': found_symbols
+                        }
+                except:
+                    pass
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"MKL symbol check failed: {e}")
+        
+        return None
+    
+    def _check_mkl_environment(self):
+        """Check for MKL-related environment variables"""
+        mkl_env = {}
+        
+        env_vars = [
+            'MKLROOT',
+            'MKL_NUM_THREADS',
+            'MKL_DYNAMIC',
+            'MKL_INTERFACE_LAYER',
+            'INTEL_ONEAPI_ROOT',
+            'ONEAPI_ROOT',
+            'TBBROOT',  # Intel Threading Building Blocks
+        ]
+        
+        for var in env_vars:
+            value = os.environ.get(var)
+            if value:
+                mkl_env[var] = value
+        
+        return mkl_env
+    
+    def _infer_implementation_from_performance(self):
+        """Infer BLAS implementation from performance characteristics"""
+        try:
+            # Run a small benchmark to distinguish implementations
+            n = 1000
+            A = np.random.randn(n, n).astype(np.float64)
+            B = np.random.randn(n, n).astype(np.float64)
+            
+            # Warm up
+            for _ in range(2):
+                C = A @ B
+            
+            # Measure performance
+            times = []
+            for _ in range(5):
+                start = time.perf_counter()
+                C = A @ B
+                end = time.perf_counter()
+                times.append(end - start)
+                np.sum(C)  # Use result
+            
+            avg_time = sum(times) / len(times)
+            gflops = 2 * n**3 / avg_time / 1e9
+            
+            # Performance characteristics of different implementations
+            # (These are approximate thresholds)
+            if gflops > 50:  # MKL/OpenBLAS with good threading
+                # Check threading behavior
+                cpu_count = os.cpu_count() or 1
+                if gflops > 20 * cpu_count:
+                    return f"Intel MKL (high performance: {gflops:.1f} GFLOPS)"
+                else:
+                    return f"Optimized BLAS (OpenBLAS/MKL, {gflops:.1f} GFLOPS)"
+            elif gflops > 5:
+                return f"Basic BLAS (Netlib/Reference, {gflops:.1f} GFLOPS)"
+            else:
+                return f"Slow BLAS (possibly Python fallback, {gflops:.1f} GFLOPS)"
+                
+        except Exception as e:
+            if self.verbose:
+                print(f"Performance inference failed: {e}")
+        
+        return None
     
     def _is_static_library(self, lib_path: str) -> bool:
         """判断是否为静态库"""
@@ -609,32 +831,70 @@ class NumPyDiagnostics:
         return summary
     
     def _infer_blas_implementation(self) -> str:
-        """推断BLAS实现"""
+        """Infer BLAS implementation with improved MKL detection"""
         blas_info = self.config.blas_info
         
-        # 检查库名
+        # First, check if we already have a detected implementation
+        if 'implementation' in blas_info:
+            impl = blas_info['implementation']
+            if impl:
+                return impl
+        
+        # Check for MKL-specific information
+        mkl_indicators = []
+        
+        # Check implementation field
+        if 'implementation' in blas_info:
+            impl_str = str(blas_info['implementation']).lower()
+            if any(indicator in impl_str for indicator in ['mkl', 'intel']):
+                return blas_info['implementation']
+        
+        # Check libraries
         libraries = blas_info.get("libraries", [])
         for lib in libraries:
             lib_lower = str(lib).lower()
-            if "mkl" in lib_lower:
-                return "Intel MKL"
+            if "mkl" in lib_lower or "intel" in lib_lower:
+                return f"Intel MKL (library: {lib})"
             elif "openblas" in lib_lower:
                 return "OpenBLAS"
             elif "atlas" in lib_lower:
                 return "ATLAS"
             elif "blis" in lib_lower:
                 return "BLIS"
-            elif "accelerate" in lib_lower:
+            elif "accelerate" in lib_lower or "veclib" in lib_lower:
                 return "Apple Accelerate (macOS)"
         
-        # 检查额外信息
-        extra_info = str(blas_info).lower()
-        if "mkl" in extra_info:
-            return "Intel MKL"
-        elif "openblas" in extra_info:
-            return "OpenBLAS"
+        # Check for MKL paths
+        if 'mkl_paths' in blas_info:
+            return "Intel MKL (from path detection)"
         
-        return "Unknown (可能是Netlib参考实现)"
+        # Check for MKL symbols
+        if 'mkl_symbols' in blas_info:
+            return "Intel MKL (from symbol detection)"
+        
+        # Check for MKL environment
+        if 'mkl_environment' in blas_info:
+            return "Intel MKL (from environment)"
+        
+        # Check build configuration
+        if "build_config" in self.config.__dict__:
+            build_config = self.config.build_config
+            if "dynamic_libraries" in build_config:
+                libs = build_config["dynamic_libraries"]
+                for lib_name in libs:
+                    lib_lower = lib_name.lower()
+                    if "mkl" in lib_lower:
+                        return "Intel MKL"
+                    elif "openblas" in lib_lower:
+                        return "OpenBLAS"
+                    elif "atlas" in lib_lower:
+                        return "ATLAS"
+        
+        # Check scipy reference
+        if 'scipy' in str(blas_info).lower():
+            return "SciPy with unknown underlying BLAS"
+        
+        return "Unknown (possibly Netlib reference implementation or custom build)"
     
     def _generate_recommendations(self) -> List[str]:
         """生成优化建议"""
@@ -665,62 +925,104 @@ class NumPyDiagnostics:
         
         return recommendations
     
+    def print_detailed_mkl_info(self):
+        """Print detailed MKL information if detected"""
+        blas_info = self.config.blas_info
+        
+        print("\nDetailed MKL Information:")
+        print("-" * 40)
+        
+        found_mkl = False
+        
+        # Check various MKL indicators
+        if 'mkl_paths' in blas_info:
+            print("MKL installation paths found:")
+            for path, libs in blas_info['mkl_paths'].items():
+                print(f"  {path}")
+                for lib in libs[:3]:  # Show first 3 libraries
+                    print(f"    - {lib}")
+            found_mkl = True
+        
+        if 'mkl_environment' in blas_info:
+            print("\nMKL environment variables:")
+            for var, value in blas_info['mkl_environment'].items():
+                print(f"  {var}={value}")
+            found_mkl = True
+        
+        if 'mkl_symbols' in blas_info:
+            print("\nMKL symbols detected:")
+            symbols = blas_info['mkl_symbols']
+            print(f"  Library: {symbols.get('library_path', 'Unknown')}")
+            print(f"  Symbols found: {symbols.get('symbols_found', [])}")
+            found_mkl = True
+        
+        if not found_mkl:
+            print("No MKL-specific information detected.")
+        
+        # Suggest running np.show_config() for more details
+        print("\nFor complete configuration, run:")
+        print("  python -c \"import numpy as np; np.show_config()\"")
+    
     def print_human_readable_report(self, report: Dict[str, Any]):
-        """打印人类可读的报告"""
+        """Print human-readable diagnostic report"""
         print("\n" + "="*80)
-        print("NumPy诊断报告")
+        print("NumPy Diagnostic Report")
         print("="*80)
         
         # 系统信息
-        print(f"\n系统信息:")
-        print(f"  平台: {report['numpy_config']['runtime_info'].get('platform', 'Unknown')}")
-        print(f"  CPU核心数: {report['numpy_config']['runtime_info'].get('cpu_count', 'Unknown')}")
+        print(f"\nSystem Information:")
+        print(f"  Platform: {report['numpy_config']['runtime_info'].get('platform', 'Unknown')}")
+        print(f"  CPU Cores: {report['numpy_config']['runtime_info'].get('cpu_count', 'Unknown')}")
         
         # NumPy信息
-        print(f"\nNumPy信息:")
-        print(f"  版本: {report['numpy_config']['version']}")
-        print(f"  安装路径: {report['numpy_config']['installation_path']}")
+        print(f"\nNumPy Information:")
+        print(f"  Version: {report['numpy_config']['version']}")
+        print(f"  Installation Path: {report['numpy_config']['installation_path']}")
         
-        # BLAS/LAPACK信息
-        print(f"\nBLAS/LAPACK实现:")
+        # BLAS/LAPACK information
+        print(f"\nBLAS/LAPACK Implementation:")
         blas_impl = report['summary'].get('blas_implementation', 'Unknown')
-        print(f"  推断实现: {blas_impl}")
+        print(f"  Inferred Implementation: {blas_impl}")
+        
+        # If MKL is suspected or detected, show detailed info
+        if 'mkl' in blas_impl.lower() or 'intel' in blas_impl.lower():
+            self.print_detailed_mkl_info()
         
         if report['numpy_config']['blas_info']:
-            print(f"  BLAS库: {report['numpy_config']['blas_info'].get('libraries', [])}")
+            print(f"  BLAS Libraries: {report['numpy_config']['blas_info'].get('libraries', [])}")
         
         # 动态库信息
         if 'dynamic_libraries' in report['numpy_config']['build_config']:
             libs = report['numpy_config']['build_config']['dynamic_libraries']
             if libs:
-                print(f"\n动态库依赖:")
+                print(f"\nDynamic Library Dependencies:")
                 for name, path in libs.items():
                     if not name.endswith('_static'):
                         print(f"  {name}: {path}")
         
         # 线程配置
-        print(f"\n线程配置:")
+        print(f"\nThread Configuration:")
         threads_info = report['numpy_config']['runtime_info'].get('blas_threads', {})
         for key, value in threads_info.items():
             if key != 'inferred_threads':
                 print(f"  {key}: {value}")
         
         if 'inferred_threads' in threads_info and threads_info['inferred_threads']:
-            print(f"  推断线程数: {threads_info['inferred_threads']}")
+            print(f"  Inferred Thread Count: {threads_info['inferred_threads']}")
         
         # 性能摘要
-        print(f"\n性能摘要:")
+        print(f"\nPerformance Summary:")
         perf_by_test = report['summary'].get('performance_by_test', {})
         for test_name, perf_info in perf_by_test.items():
             print(f"  {test_name}:")
-            print(f"    最佳平均时间: {perf_info['best_avg_time']:.4f}s")
+            print(f"    Best Average Time: {perf_info['best_avg_time']:.4f}s")
             if perf_info.get('gflops'):
                 print(f"    GFLOPS: {perf_info['gflops']:.2f}")
         
         # 建议
         recommendations = report['summary'].get('recommendations', [])
         if recommendations:
-            print(f"\n优化建议:")
+            print(f"\nOptimization Recommendations:")
             for i, rec in enumerate(recommendations, 1):
                 print(f"  {i}. {rec}")
         
