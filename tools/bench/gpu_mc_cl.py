@@ -2,6 +2,7 @@
 """
 GPU Monte Carlo Benchmark using OpenCL
 Estimate Pi using Monte Carlo method with FP16/FP32/FP64 precision
+Supports batched execution for handling massive sample counts within memory constraints
 """
 
 import time
@@ -36,6 +37,8 @@ class BenchmarkResult:
     notes: str = ""
     precision: str = ""
     result_value: Optional[float] = None  # Estimated Pi value
+    total_samples: int = 0  # Actual total samples processed
+    num_batches: int = 1    # Number of batches used
     
     def __post_init__(self):
         self.min_time = min(self.execution_times)
@@ -47,6 +50,11 @@ class BenchmarkResult:
     @property
     def iterations_per_second(self) -> float:
         return 1.0 / self.avg_time if self.avg_time > 0 else float('inf')
+    
+    @property
+    def samples_per_second(self) -> float:
+        """Return samples processed per second"""
+        return self.total_samples / self.avg_time if self.avg_time > 0 else 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,9 +68,12 @@ class BenchmarkResult:
             "median_time": self.median_time,
             "std_time": self.std_time,
             "iterations_per_second": self.iterations_per_second,
+            "samples_per_second": self.samples_per_second,
             "memory_usage": self.memory_usage,
             "notes": self.notes,
-            "result_value": self.result_value
+            "result_value": self.result_value,
+            "total_samples": self.total_samples,
+            "num_batches": self.num_batches
         }
 
 
@@ -210,19 +221,6 @@ class GPUMonteCarloBenchmark:
                 partial_counts[get_group_id(0)] = local_counts[0];
             }}
         }}
-        
-        kernel void sum_reduction(
-            global const ulong *input,
-            global ulong *output,
-            const uint n
-        ) {{
-            // Simple parallel sum (assumes single work-group for final reduction)
-            uint gid = get_global_id(0);
-            if (gid >= n) return;
-            
-            // In practice, we perform this on CPU for small arrays
-            // or use another reduction kernel
-        }}
         '''
         return kernel
     
@@ -239,80 +237,108 @@ class GPUMonteCarloBenchmark:
         
         return program
     
-    def run_benchmark(self, precision: str = 'fp32', total_samples: int = 10000000,
+    def run_benchmark(self, precision: str = 'fp32', total_samples: Optional[int] = None,
+                     num_batches: int = 1, samples_per_batch: Optional[int] = None,
                      warmup_iterations: int = 3, test_iterations: int = 10) -> BenchmarkResult:
         """
-        Run GPU Monte Carlo benchmark
+        Run GPU Monte Carlo benchmark with batched execution support
         
         Args:
             precision: 'fp16', 'fp32', or 'fp64'
-            total_samples: Total number of random samples
+            total_samples: Total number of random samples (alternative to batches)
+            num_batches: Number of batches to run (for memory-constrained execution)
+            samples_per_batch: Samples per batch (if None, calculated from total_samples)
             warmup_iterations: Number of warmup runs
             test_iterations: Number of timed test runs
+            
+        Note:
+            Either specify total_samples OR (num_batches, samples_per_batch)
         """
         if not self.check_precision_support(precision):
             raise RuntimeError(f"Precision {precision} not supported by device")
         
+        # Calculate batch parameters
+        if total_samples is not None:
+            # Traditional mode: divide total into batches
+            if samples_per_batch is None:
+                samples_per_batch = (total_samples + num_batches - 1) // num_batches
+            actual_total = samples_per_batch * num_batches
+        else:
+            # Batch mode: total is product of batches and per-batch
+            actual_total = samples_per_batch * num_batches
+        
         program = self.build_program(precision)
         kernel = program.monte_carlo_pi
         
-        # Determine work size
+        # Determine work size (fixed per batch to control memory)
         max_wg_size = min(256, self.device.max_work_group_size)
+        preferred_wi = self.device.max_compute_units * 64
+        # Limit work items to ensure samples_per_item is reasonable
+        num_work_items = min(preferred_wi, max(1024, samples_per_batch // 1000))
+        num_work_items = ((num_work_items + max_wg_size - 1) // max_wg_size) * max_wg_size
         
-        # Use many work-items for better GPU utilization
-        # Each work-item processes multiple samples
-        preferred_wi = self.device.max_compute_units * 64  # Heuristic: 64 items per CU
-        num_work_items = min(preferred_wi, (total_samples + 999) // 1000)  # At least 1000 per item
-        num_work_items = ((num_work_items + max_wg_size - 1) // max_wg_size) * max_wg_size  # Round up
-        
-        samples_per_item = (total_samples + num_work_items - 1) // num_work_items
-        actual_total = samples_per_item * num_work_items
+        samples_per_item = (samples_per_batch + num_work_items - 1) // num_work_items
+        adjusted_batch_samples = samples_per_item * num_work_items
         
         global_size = num_work_items
         local_size = max_wg_size
         num_groups = global_size // local_size
         
-        # Prepare buffers
+        # Prepare buffers (reused across batches)
         partial_counts_np = np.zeros(num_groups, dtype=np.uint64)
         partial_counts_buf = cl.Buffer(self.context, cl.mem_flags.WRITE_ONLY, partial_counts_np.nbytes)
         
-        # Warm-up runs
+        # Warm-up runs (single batch for warmup)
         for i in range(warmup_iterations):
+            seed = np.uint32(10000 + i)
             kernel(self.queue, (global_size,), (local_size,),
                    np.uint64(samples_per_item), np.uint32(num_work_items), 
-                   np.uint32(12345 + i), partial_counts_buf,
+                   seed, partial_counts_buf,
                    cl.LocalMemory(np.dtype(np.uint64).itemsize * local_size))
             self.queue.finish()
         
-        # Test runs
+        # Test runs with batched execution
         execution_times = []
+        batch_inside_totals = []  # Store inside counts for validation
+        
         for i in range(test_iterations):
-            seed = np.uint32(12345 + i + warmup_iterations)
-            
+            total_inside = 0
             start = time.perf_counter()
-            event = kernel(self.queue, (global_size,), (local_size,),
-                          np.uint64(samples_per_item), np.uint32(num_work_items),
-                          seed, partial_counts_buf,
-                          cl.LocalMemory(np.dtype(np.uint64).itemsize * local_size))
-            event.wait()
-            end = time.perf_counter()
             
+            # Execute multiple batches
+            for batch_idx in range(num_batches):
+                seed = np.uint32(12345 + i * num_batches + batch_idx)
+                
+                event = kernel(self.queue, (global_size,), (local_size,),
+                              np.uint64(samples_per_item), np.uint32(num_work_items),
+                              seed, partial_counts_buf,
+                              cl.LocalMemory(np.dtype(np.uint64).itemsize * local_size))
+                event.wait()
+                
+                # Read and accumulate results
+                cl.enqueue_copy(self.queue, partial_counts_np, partial_counts_buf)
+                self.queue.finish()
+                total_inside += np.sum(partial_counts_np)
+            
+            end = time.perf_counter()
             execution_times.append(end - start)
+            batch_inside_totals.append(total_inside)
         
-        # Read results
-        cl.enqueue_copy(self.queue, partial_counts_np, partial_counts_buf)
-        self.queue.finish()
-        
-        total_inside = np.sum(partial_counts_np)
-        pi_estimate = 4.0 * total_inside / actual_total
+        # Calculate final statistics
+        avg_inside = np.mean(batch_inside_totals)
+        pi_estimate = 4.0 * avg_inside / (adjusted_batch_samples * num_batches)
         
         return BenchmarkResult(
-            task_name="Monte Carlo Pi (GPU)",
+            task_name="Monte Carlo Pi (GPU Batched)",
             implementation=f"OpenCL {self.device.name}",
             precision=precision,
             execution_times=execution_times,
-            notes=f"Samples={actual_total}, WorkItems={num_work_items}, Samples/Item={samples_per_item}",
-            result_value=float(pi_estimate)
+            notes=f"TotalSamples={adjusted_batch_samples * num_batches}, "
+                  f"Batches={num_batches}, Samples/Batch={adjusted_batch_samples}, "
+                  f"WorkItems={num_work_items}, Samples/Item={samples_per_item}",
+            result_value=float(pi_estimate),
+            total_samples=adjusted_batch_samples * num_batches,
+            num_batches=num_batches
         )
     
     @staticmethod
@@ -357,9 +383,12 @@ class BenchmarkReporter:
                 print(f"\nPrecision: {result.precision.upper()}")
                 print("-" * 60)
                 print(f"  Device: {result.implementation}")
+                print(f"  Total Samples: {result.total_samples:,}")
+                print(f"  Batches: {result.num_batches}")
                 print(f"  Time: {result.avg_time:.4f}s (min:{result.min_time:.4f}s, "
                       f"max:{result.max_time:.4f}s, med:{result.median_time:.4f}s)")
                 print(f"  Iter/s: {result.iterations_per_second:.2f}")
+                print(f"  Samples/s: {result.samples_per_second:,.0f}")
                 if result.std_time > 0:
                     print(f"  Std dev: {result.std_time:.6f}s")
                 if result.result_value is not None:
@@ -373,14 +402,24 @@ class BenchmarkReporter:
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description="GPU Monte Carlo Benchmark using OpenCL (FP16/FP32/FP64)",
+        description="GPU Monte Carlo Benchmark using OpenCL (FP16/FP32/FP64) with Batched Execution",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --precision fp32 --samples 10000000     # Test FP32 with 10M samples
-  %(prog)s --precision fp64 --samples 5000000      # Test FP64 with 5M samples
-  %(prog)s --precision all                         # Test all supported precisions
-  %(prog)s --output results.json                   # Save results to JSON
+  # Simple mode: 10M samples in single batch
+  %(prog)s --precision fp32 --samples 10000000
+  
+  # Batched mode: 1B samples in 100 batches of 10M each (memory efficient)
+  %(prog)s --precision fp32 --batches 100 --samples-per-batch 10000000
+  
+  # Large scale: 100B samples with small batches
+  %(prog)s --precision fp64 --batches 10000 --samples-per-batch 10000000
+  
+  # Compare all precisions
+  %(prog)s --precision all --samples 100000000
+  
+  # Save results
+  %(prog)s --output results.json
         """
     )
     
@@ -390,9 +429,20 @@ Examples:
         help="Floating point precision to test (default: fp32)"
     )
     
+    # Mutually exclusive group for sample specification
+    sample_group = parser.add_mutually_exclusive_group(required=True)
+    sample_group.add_argument(
+        "--samples", type=int,
+        help="Total number of Monte Carlo samples (single batch mode)"
+    )
+    sample_group.add_argument(
+        "--batches", type=int,
+        help="Number of batches for repeated execution (batch mode)"
+    )
+    
     parser.add_argument(
-        "--samples", type=int, default=10000000,
-        help="Total number of Monte Carlo samples (default: 10000000)"
+        "--samples-per-batch", type=int, default=10000000,
+        help="Samples per batch when using --batches (default: 10000000)"
     )
     
     parser.add_argument(
@@ -427,7 +477,20 @@ Examples:
         sys.exit(1)
     
     print("Starting GPU Monte Carlo Benchmark...")
-    print(f"Configuration: samples={args.samples}, repeats={args.repeats}")
+    
+    # Determine execution mode
+    if args.batches is not None:
+        print(f"Batched mode: {args.batches} batches x {args.samples_per_batch:,} samples")
+        total_samples = None
+        num_batches = args.batches
+        samples_per_batch = args.samples_per_batch
+    else:
+        print(f"Single batch mode: {args.samples:,} samples")
+        total_samples = args.samples
+        num_batches = 1
+        samples_per_batch = None
+    
+    print(f"Repeats: {args.repeats}")
     
     try:
         benchmark = GPUMonteCarloBenchmark(
@@ -455,12 +518,16 @@ Examples:
         try:
             result = benchmark.run_benchmark(
                 precision=precision,
-                total_samples=args.samples,
+                total_samples=total_samples,
+                num_batches=num_batches,
+                samples_per_batch=samples_per_batch,
                 warmup_iterations=args.warmup,
                 test_iterations=args.repeats
             )
             results.append(result)
             print(f"  Average time: {result.avg_time:.4f}s")
+            print(f"  Total samples: {result.total_samples:,}")
+            print(f"  Samples/sec: {result.samples_per_second:,.0f}")
             print(f"  Pi estimate: {result.result_value:.8f}")
         except Exception as e:
             print(f"  Error running {precision}: {e}")
