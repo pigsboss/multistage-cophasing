@@ -212,6 +212,9 @@ class GPUNBodyBenchmark:
     
     def generate_kernel_source(self, precision: str) -> str:
         """
+        
+Warning:
+  For small N (<256), use --chunk-size 1 or --safe-mode to prevent system hangs.
         Generate OpenCL kernel for N-body simulation with tiling optimization
         Reference: SKILL.opencl.md Section 1.1 (Local memory usage)
         """
@@ -226,11 +229,19 @@ class GPUNBodyBenchmark:
         ext_pragma = config['ext_pragma']
         tile_size = self.TILE_SIZE
         
+        # 新增：根据瓦片大小动态调整优化策略
         kernel = f'''
         {ext_pragma}
         
         #define TILE_SIZE {tile_size}
         #define SOFTENING (0.01{suffix} * 0.01{suffix})  // Plummer softening squared
+        
+        // 根据TILE_SIZE调整优化策略
+        #if TILE_SIZE <= 32
+        #define SMALL_TILE 1
+        #else
+        #define SMALL_TILE 0
+        #endif
         
         inline {accum_type}4 compute_acceleration(
             {accum_type}4 pos_i,
@@ -290,9 +301,9 @@ class GPUNBodyBenchmark:
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                     
-                    // Compute interactions with this tile
-                    // Reduced unroll factor to decrease register usage
-                    #pragma unroll 4  // Changed from 8 to 4
+                    // 修改：对小瓦片使用不同的优化策略
+                    #if SMALL_TILE
+                    // 对于小瓦片，使用简单循环
                     for (int k = 0; k < TILE_SIZE; k++) {{
                         if (tile * TILE_SIZE + k == gid) continue;
                         if (tile * TILE_SIZE + k >= n) continue;
@@ -302,6 +313,19 @@ class GPUNBodyBenchmark:
                     
                         acc += compute_acceleration(pos_i, pos_j, mass_j);
                     }}
+                    #else
+                    // 对于大瓦片，使用部分展开
+                    #pragma unroll 2
+                    for (int k = 0; k < TILE_SIZE; k++) {{
+                        if (tile * TILE_SIZE + k == gid) continue;
+                        if (tile * TILE_SIZE + k >= n) continue;
+                    
+                        {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
+                        {accum_type} mass_j = local_mass[k];
+                    
+                        acc += compute_acceleration(pos_i, pos_j, mass_j);
+                    }}
+                    #endif
                     barrier(CLK_LOCAL_MEM_FENCE);
                 }}
                 
@@ -365,9 +389,37 @@ class GPUNBodyBenchmark:
         if not self.check_precision_support(precision):
             raise RuntimeError(f"Precision {precision} not supported by device")
         
-        # Check local memory before building
-        self._check_local_memory(precision)
-        self._debug_print(f"Using TILE_SIZE={self.TILE_SIZE}")
+        # Small N adjustment - 关键修改：对小规模问题使用不同的策略
+        if num_bodies < 256:
+            # 对于小规模问题，使用较小的瓦片大小并调整策略
+            original_tile_size = self.TILE_SIZE
+            self.TILE_SIZE = min(32, self.max_wg_size)
+            
+            # 确保TILE_SIZE是2的幂且不超过粒子数
+            if self.TILE_SIZE > num_bodies:
+                # 找到小于等于num_bodies的最大2的幂
+                new_tile = 1
+                while new_tile * 2 <= num_bodies:
+                    new_tile *= 2
+                self.TILE_SIZE = max(1, new_tile)
+            
+            self._debug_print(f"Small N={num_bodies}, adjusting TILE_SIZE from {original_tile_size} to {self.TILE_SIZE}", "INFO")
+        else:
+            # 对于大规模问题，检查本地内存
+            self._check_local_memory(precision)
+        
+        self._debug_print(f"Final TILE_SIZE={self.TILE_SIZE}")
+        
+        # 修改：对小规模问题强制使用较小的块大小
+        if num_bodies < 200:
+            if steps_per_chunk > 2:
+                steps_per_chunk = 2
+                self._debug_print(f"Force setting steps_per_chunk to {steps_per_chunk} for small N={num_bodies}", "INFO")
+        
+        # 修改：对小规模问题减少预热迭代次数
+        if num_bodies < 200:
+            warmup_iterations = min(1, warmup_iterations)
+            self._debug_print(f"Reducing warmup iterations to {warmup_iterations} for small N={num_bodies}", "INFO")
         
         # More strict automatic adjustment of chunk size
         if steps_per_chunk > 10:
@@ -421,14 +473,34 @@ class GPUNBodyBenchmark:
         vel_buf = cl.Buffer(self.context, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=velocities)
         mass_buf = cl.Buffer(self.context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=masses)
         
-        # Work group sizing with validation
+        # 工作组分派 - 关键修改：确保配置有效
         local_size = min(self.TILE_SIZE, self.max_wg_size, 256)
-        if local_size > self.max_wg_size:
-            self._debug_print(f"ERROR: local_size {local_size} > max_wg_size {self.max_wg_size}", "ERROR")
-            local_size = self.max_wg_size
         
+        # 确保本地大小不超过全局大小
+        if local_size > num_bodies:
+            # 找到小于num_bodies的最大2的幂
+            new_local = 1
+            while new_local * 2 <= num_bodies:
+                new_local *= 2
+            local_size = max(1, new_local)
+            self._debug_print(f"Adjusting local_size to {local_size} (num_bodies={num_bodies})", "INFO")
+        
+        # 确保本地大小至少为1
+        local_size = max(1, local_size)
+        
+        # 计算全局大小（必须是本地大小的整数倍）
         global_size = ((num_bodies + local_size - 1) // local_size) * local_size
+        
+        # 验证配置
+        if global_size == 0:
+            global_size = local_size = 1
+            self._debug_print(f"Warning: Adjusted to global_size={global_size}, local_size={local_size}", "WARN")
+        
         self._debug_print(f"Work group: global={global_size}, local={local_size}")
+        
+        # 修改：添加额外安全检查
+        if global_size > 1000000:  # 避免过大的全局工作大小
+            self._debug_print(f"Warning: Large global_size {global_size}, consider reducing problem size", "WARN")
         
         G = np_dtype(6.67430e-11)
         dt = np_dtype(dt)
@@ -659,8 +731,14 @@ Examples:
     )
     
     parser.add_argument(
-        "--chunk-size", type=int, default=2,
-        help="Steps per kernel launch (smaller values prevent hangs, default: 2)"
+        "--chunk-size", type=int, default=5,
+        help="Steps per kernel launch (smaller values prevent hangs, default: 5)"
+    )
+    
+    # 添加新参数
+    parser.add_argument(
+        "--min-tile-size", type=int, default=16,
+        help="Minimum tile size for small N problems (default: 16)"
     )
     
     parser.add_argument(
