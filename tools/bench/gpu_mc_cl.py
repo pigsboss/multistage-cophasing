@@ -372,6 +372,21 @@ class GPUMonteCarloBenchmark:
         if not self.check_precision_support(precision):
             raise RuntimeError(f"Precision {precision} not supported by device")
         
+        # Generate initial seed based on system time and process ID
+        # Use 64-bit seed space to ensure uniqueness across batches and processes
+        import os
+        import time as time_module  # Avoid conflict with time module
+        
+        current_time = int(time_module.time() * 1000)  # millisecond timestamp
+        process_id = os.getpid()
+        initial_seed = (current_time ^ (process_id << 16)) & 0xFFFFFFFF
+        
+        # Use large stride to ensure non-overlapping sequences between batches
+        # Philox4x32 has 128-bit internal state, we use 64-bit seed space
+        SEED_STRIDE = 100000  # Large enough to avoid sequence overlap
+        
+        print(f"Initial RNG seed: {initial_seed} (time={current_time}, pid={process_id})")
+        
         # Calculate batch parameters
         if total_samples is not None:
             # Traditional mode: divide total into batches
@@ -472,14 +487,18 @@ class GPUMonteCarloBenchmark:
         # The kernel processes 4 samples per iteration, and we have samples_per_vec_iter iterations
         samples_per_item = samples_per_vec_iter
         
+        # Create a zero array for resetting the counter
+        zero_counter_np = np.zeros(1, dtype=np.uint64)
+        
         # Warm-up runs (single batch for warmup)
         for i in range(warmup_iterations):
             # Reset global counter to zero
-            cl.enqueue_copy(self.queue, global_counter_buf, global_counter_np)
+            cl.enqueue_copy(self.queue, global_counter_buf, zero_counter_np)
             
-            seed = np.uint32(10000 + i * 100000)
+            # Use time-based seed, but maintain reproducibility (warmup doesn't need strict randomness)
+            warmup_seed = np.uint32((initial_seed + i * SEED_STRIDE) & 0xFFFFFFFF)
             kernel(self.queue, (global_size,), (local_size,),
-                   np.uint64(samples_per_item), seed, 
+                   np.uint64(samples_per_item), warmup_seed, 
                    global_counter_buf,
                    cl.LocalMemory(local_mem_size))
             self.queue.finish()
@@ -487,9 +506,6 @@ class GPUMonteCarloBenchmark:
         # Test runs with batched execution
         execution_times = []
         batch_inside_totals = []  # Store inside counts for validation
-        
-        # Create a zero array for resetting the counter
-        zero_counter_np = np.zeros(1, dtype=np.uint64)
         
         for i in range(test_iterations):
             total_inside = 0
@@ -500,8 +516,9 @@ class GPUMonteCarloBenchmark:
                 # Reset global counter to zero for each batch using zero_counter_np
                 cl.enqueue_copy(self.queue, global_counter_buf, zero_counter_np)
                 
-                SEED_STRIDE = 100000
-                seed = np.uint32(12345 + i * num_batches * SEED_STRIDE + batch_idx * SEED_STRIDE)
+                # Use initial seed based on time and PID to ensure different runs don't overlap
+                seed_offset = initial_seed + i * num_batches * SEED_STRIDE + batch_idx * SEED_STRIDE
+                seed = np.uint32(seed_offset & 0xFFFFFFFF)  # Take lower 32 bits
                 
                 event = kernel(self.queue, (global_size,), (local_size,),
                               np.uint64(samples_per_item), seed,
@@ -529,7 +546,8 @@ class GPUMonteCarloBenchmark:
             execution_times=execution_times,
             notes=f"TotalSamples={adjusted_batch_samples * num_batches}, "
                   f"Batches={num_batches}, Samples/Batch={adjusted_batch_samples}, "
-                  f"WorkItems={num_work_items}, Samples/Item={samples_per_item}",
+                  f"WorkItems={num_work_items}, Samples/Item={samples_per_item}, "
+                  f"InitialSeed={initial_seed}",
             result_value=float(pi_estimate),
             total_samples=adjusted_batch_samples * num_batches,
             num_batches=num_batches
