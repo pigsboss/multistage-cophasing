@@ -301,31 +301,19 @@ Warning:
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                     
-                    // 修改：对小瓦片使用不同的优化策略
-                    #if SMALL_TILE
-                    // 对于小瓦片，使用简单循环
+                    // 增强的边界检查循环
                     for (int k = 0; k < TILE_SIZE; k++) {{
-                        if (tile * TILE_SIZE + k == gid) continue;
-                        if (tile * TILE_SIZE + k >= n) continue;
+                        int j_idx = tile * TILE_SIZE + k;
+                        
+                        // 提前检查边界：跳过无效粒子和自身
+                        if (j_idx >= n) break;  // 使用break而不是continue
+                        if (j_idx == gid) continue;
                     
                         {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
                         {accum_type} mass_j = local_mass[k];
                     
                         acc += compute_acceleration(pos_i, pos_j, mass_j);
                     }}
-                    #else
-                    // 对于大瓦片，使用部分展开
-                    #pragma unroll 2
-                    for (int k = 0; k < TILE_SIZE; k++) {{
-                        if (tile * TILE_SIZE + k == gid) continue;
-                        if (tile * TILE_SIZE + k >= n) continue;
-                    
-                        {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
-                        {accum_type} mass_j = local_mass[k];
-                    
-                        acc += compute_acceleration(pos_i, pos_j, mass_j);
-                    }}
-                    #endif
                     barrier(CLK_LOCAL_MEM_FENCE);
                 }}
                 
@@ -391,19 +379,19 @@ Warning:
         
         # Small N adjustment - 关键修改：对小规模问题使用不同的策略
         if num_bodies < 256:
-            # 对于小规模问题，使用较小的瓦片大小并调整策略
-            original_tile_size = self.TILE_SIZE
-            self.TILE_SIZE = min(32, self.max_wg_size)
+            # 对于小规模问题，直接计算合适的瓦片大小
+            # 找到小于等于num_bodies的最大2的幂
+            self.TILE_SIZE = 1
+            while self.TILE_SIZE * 2 <= num_bodies:
+                self.TILE_SIZE *= 2
             
-            # 确保TILE_SIZE是2的幂且不超过粒子数
-            if self.TILE_SIZE > num_bodies:
-                # 找到小于等于num_bodies的最大2的幂
-                new_tile = 1
-                while new_tile * 2 <= num_bodies:
-                    new_tile *= 2
-                self.TILE_SIZE = max(1, new_tile)
+            # 确保不超过设备限制
+            self.TILE_SIZE = min(self.TILE_SIZE, self.max_wg_size)
             
-            self._debug_print(f"Small N={num_bodies}, adjusting TILE_SIZE from {original_tile_size} to {self.TILE_SIZE}", "INFO")
+            # 确保至少为1且为2的幂
+            self.TILE_SIZE = max(1, self.TILE_SIZE)
+            
+            self._debug_print(f"Small N={num_bodies}, setting TILE_SIZE={self.TILE_SIZE}", "INFO")
         else:
             # 对于大规模问题，检查本地内存
             self._check_local_memory(precision)
@@ -488,15 +476,30 @@ Warning:
         # 确保本地大小至少为1
         local_size = max(1, local_size)
         
+        # 验证和调整工作组件配置
+        if local_size > self.max_wg_size:
+            self._debug_print(f"ERROR: local_size={local_size} exceeds max_wg_size={self.max_wg_size}", "ERROR")
+            local_size = min(local_size, self.max_wg_size)
+
+        # 确保local_size至少为1
+        if local_size < 1:
+            self._debug_print(f"WARNING: local_size={local_size} is invalid, setting to 1", "WARN")
+            local_size = 1
+
+        # 验证TILE_SIZE和local_size的关系
+        if self.TILE_SIZE != local_size:
+            self._debug_print(f"WARNING: TILE_SIZE={self.TILE_SIZE} != local_size={local_size}, adjusting TILE_SIZE", "WARN")
+            self.TILE_SIZE = local_size
+
         # 计算全局大小（必须是本地大小的整数倍）
         global_size = ((num_bodies + local_size - 1) // local_size) * local_size
         
-        # 验证配置
+        # 最终验证
         if global_size == 0:
             global_size = local_size = 1
-            self._debug_print(f"Warning: Adjusted to global_size={global_size}, local_size={local_size}", "WARN")
-        
-        self._debug_print(f"Work group: global={global_size}, local={local_size}")
+            self._debug_print(f"CRITICAL: Work size validation failed, using minimal configuration", "ERROR")
+
+        self._debug_print(f"Validated work group: global={global_size}, local={local_size}, TILE_SIZE={self.TILE_SIZE}")
         
         # 修改：添加额外安全检查
         if global_size > 1000000:  # 避免过大的全局工作大小
