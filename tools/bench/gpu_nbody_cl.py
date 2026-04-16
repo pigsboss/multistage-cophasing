@@ -711,6 +711,14 @@ Examples:
         print(f"Error initializing OpenCL: {e}")
         sys.exit(1)
     
+    # Safe mode options
+    if args.safe_mode:
+        print("Safe mode enabled: using conservative settings")
+        args.chunk_size = max(1, args.chunk_size // 2)
+        if args.bodies > 500:
+            args.bodies = 500  # Limit number of bodies
+            print(f"  Limited to {args.bodies} bodies for safety")
+    
     # Determine precisions to test
     if args.precision == 'all':
         precisions_to_test = ['fp16', 'fp32', 'fp64']
