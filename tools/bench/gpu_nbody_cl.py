@@ -319,23 +319,15 @@ class GPUNBodyBenchmark:
                               suffix: str, zero: str, accum_type: str,
                               convert_in: str, convert_out: str, ext_pragma: str) -> str:
         """
-        生成原有的tile优化内核
+        生成修复后的tile优化内核
         """
         tile_size = self.TILE_SIZE
         
-        # 新增：根据瓦片大小动态调整优化策略
         kernel = f'''
         {ext_pragma}
         
         #define TILE_SIZE {tile_size}
         #define SOFTENING (0.01{suffix} * 0.01{suffix})  // Plummer softening squared
-        
-        // 根据TILE_SIZE调整优化策略
-        #if TILE_SIZE <= 32
-        #define SMALL_TILE 1
-        #else
-        #define SMALL_TILE 0
-        #endif
         
         inline {accum_type}4 compute_acceleration(
             {accum_type}4 pos_i,
@@ -360,14 +352,27 @@ class GPUNBodyBenchmark:
             int steps
         ) {{
             int gid = get_global_id(0);
-            if (gid >= n) return;
+            
+            // 检查是否是有效粒子
+            bool valid_particle = (gid < n);
+            
+            // 为所有工作项（包括额外项）声明变量
+            {vec_type} pos_i_vec, vel_i_vec;
+            {ctype} mass_i;
+            
+            if (valid_particle) {{
+                // 仅对有效粒子加载数据
+                pos_i_vec = positions[gid];
+                vel_i_vec = velocities[gid];
+                mass_i = masses[gid];
+            }} else {{
+                // 对于额外工作项，使用零值
+                pos_i_vec = ({vec_type})({zero});
+                vel_i_vec = ({vec_type})({zero});
+                mass_i = {zero};
+            }}
             
             int lid = get_local_id(0);
-            
-            // Load particle i data
-            {vec_type} pos_i_vec = positions[gid];
-            {vec_type} vel_i_vec = velocities[gid];
-            {ctype} mass_i = masses[gid];
             
             // Convert to accumulation type for computation (mixed precision for fp16)
             {accum_type}4 pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
@@ -377,48 +382,60 @@ class GPUNBodyBenchmark:
             __local {vec_type} local_pos[TILE_SIZE];
             __local {ctype} local_mass[TILE_SIZE];
             
-            // Simulation loop
+            // Simulation loop - 所有工作项都执行，但只有有效粒子更新
             for (int s = 0; s < steps; s++) {{
                 {accum_type}4 acc = ({accum_type}4)({zero}, {zero}, {zero}, {zero});
                 
-                // Tiling loop over all particles
-                for (int tile = 0; tile < (n + TILE_SIZE - 1) / TILE_SIZE; tile++) {{
-                    int j = tile * TILE_SIZE + lid;
-                    
-                    // Load tile into local memory (coalesced access)
-                    if (j < n) {{
-                        local_pos[lid] = positions[j];
-                        local_mass[lid] = masses[j];
-                    }} else {{
-                        local_pos[lid] = ({vec_type})({zero});
-                        local_mass[lid] = {zero};
-                    }}
-                    barrier(CLK_LOCAL_MEM_FENCE);
-                    
-                    // 增强的边界检查循环
-                    for (int k = 0; k < TILE_SIZE; k++) {{
-                        int j_idx = tile * TILE_SIZE + k;
+                if (valid_particle) {{
+                    // Tiling loop over all particles - 仅有效粒子计算加速度
+                    for (int tile = 0; tile < (n + TILE_SIZE - 1) / TILE_SIZE; tile++) {{
+                        int j = tile * TILE_SIZE + lid;
                         
-                        // 提前检查边界：跳过无效粒子和自身
-                        if (j_idx >= n) break;  // 使用break而不是continue
-                        if (j_idx == gid) continue;
-                    
-                        {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
-                        {accum_type} mass_j = local_mass[k];
-                    
-                        acc += compute_acceleration(pos_i, pos_j, mass_j);
+                        // Load tile into local memory (coalesced access)
+                        if (j < n) {{
+                            local_pos[lid] = positions[j];
+                            local_mass[lid] = masses[j];
+                        }} else {{
+                            local_pos[lid] = ({vec_type})({zero});
+                            local_mass[lid] = {zero};
+                        }}
+                        barrier(CLK_LOCAL_MEM_FENCE);
+                        
+                        // 计算当前瓦片对所有粒子的贡献
+                        int tile_end = min((tile + 1) * TILE_SIZE, n);
+                        
+                        for (int k = 0; k < TILE_SIZE; k++) {{
+                            int j_idx = tile * TILE_SIZE + k;
+                            
+                            // 检查边界
+                            if (j_idx >= tile_end) break;
+                            if (j_idx == gid) continue;  // 跳过自身
+                        
+                            {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
+                            {accum_type} mass_j = local_mass[k];
+                        
+                            acc += compute_acceleration(pos_i, pos_j, mass_j);
+                        }}
+                        barrier(CLK_LOCAL_MEM_FENCE);
                     }}
-                    barrier(CLK_LOCAL_MEM_FENCE);
+                    
+                    // Update velocity and position (semi-implicit Euler) - 仅有效粒子更新
+                    vel_i += G * acc * dt;
+                    pos_i += vel_i * dt;
+                }} else {{
+                    // 对于额外工作项，仍然执行同步但跳过计算
+                    for (int tile = 0; tile < (n + TILE_SIZE - 1) / TILE_SIZE; tile++) {{
+                        barrier(CLK_LOCAL_MEM_FENCE);
+                        barrier(CLK_LOCAL_MEM_FENCE);
+                    }}
                 }}
-                
-                // Update velocity and position (semi-implicit Euler)
-                vel_i += G * acc * dt;
-                pos_i += vel_i * dt;
             }}
             
-            // Store back
-            positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
-            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            // Store back - 仅有效粒子写回
+            if (valid_particle) {{
+                positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
+                velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            }}
         }}
         '''
         return kernel
@@ -589,7 +606,7 @@ class GPUNBodyBenchmark:
                 while new_local * 2 <= num_bodies:
                     new_local *= 2
                 local_size = max(1, new_local)
-                self._debug_print(f"Adjusting local_size to {local_size} (num_bodies={num_bodies})", "INFO")
+                self._debug_print(f"Small N adjustment: local_size={local_size} (num_bodies={num_bodies})", "INFO")
             
             # 确保本地大小至少为1
             local_size = max(1, local_size)
@@ -604,10 +621,8 @@ class GPUNBodyBenchmark:
                 self._debug_print(f"WARNING: local_size={local_size} is invalid, setting to 1", "WARN")
                 local_size = 1
 
-            # 验证TILE_SIZE和local_size的关系
-            if self.TILE_SIZE != local_size:
-                self._debug_print(f"WARNING: TILE_SIZE={self.TILE_SIZE} != local_size={local_size}, adjusting TILE_SIZE", "WARN")
-                self.TILE_SIZE = local_size
+            # 确保TILE_SIZE与local_size一致
+            self.TILE_SIZE = local_size
 
         # 计算全局大小（必须是本地大小的整数倍）
         global_size = ((num_bodies + local_size - 1) // local_size) * local_size
