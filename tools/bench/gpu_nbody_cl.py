@@ -112,7 +112,8 @@ class GPUNBodyBenchmark:
     # Tile size for shared memory optimization - reduced from 256 to 128 for safety
     TILE_SIZE = 128
     
-    def __init__(self, platform_idx: Optional[int] = None, device_idx: Optional[int] = None, verbose: str = "INFO"):
+    def __init__(self, platform_idx: Optional[int] = None, device_idx: Optional[int] = None, 
+                 verbose: str = "INFO", no_tile: bool = False):
         if not PYOPENCL_AVAILABLE:
             raise RuntimeError("PyOpenCL not available")
         
@@ -159,6 +160,11 @@ class GPUNBodyBenchmark:
         self._debug_print(f"Max work group size: {self.max_wg_size}")
         self._debug_print(f"Local memory size: {self.local_mem_size} bytes")
         self._debug_print(f"Using conservative TILE_SIZE: {self.TILE_SIZE}", "INFO")
+        
+        # 添加no_tile标志
+        self.no_tile = no_tile
+        if no_tile:
+            self._debug_print("No-tile mode enabled: using naive global memory computation", "INFO")
     
     def _debug_print(self, msg: str, level: str = "INFO") -> None:
         """Debug output with timestamp and level"""
@@ -212,11 +218,7 @@ class GPUNBodyBenchmark:
     
     def generate_kernel_source(self, precision: str) -> str:
         """
-        
-Warning:
-  For small N (<256), use --chunk-size 1 or --safe-mode to prevent system hangs.
-        Generate OpenCL kernel for N-body simulation with tiling optimization
-        Reference: SKILL.opencl.md Section 1.1 (Local memory usage)
+        Generate OpenCL kernel for N-body simulation
         """
         config = self.PRECISION_CONFIG[precision]
         ctype = config['ctype']
@@ -227,6 +229,98 @@ Warning:
         convert_in = config['convert_in']
         convert_out = config['convert_out']
         ext_pragma = config['ext_pragma']
+        
+        if self.no_tile:
+            # 简化的全局内存内核（不使用tile机制）
+            return self._generate_naive_kernel(
+                precision, config, ctype, vec_type, suffix, 
+                zero, accum_type, convert_in, convert_out, ext_pragma
+            )
+        else:
+            # 原有的tile优化内核
+            return self._generate_tiled_kernel(
+                precision, config, ctype, vec_type, suffix, 
+                zero, accum_type, convert_in, convert_out, ext_pragma
+            )
+
+    def _generate_naive_kernel(self, precision: str, config: Dict, ctype: str, vec_type: str, 
+                              suffix: str, zero: str, accum_type: str, 
+                              convert_in: str, convert_out: str, ext_pragma: str) -> str:
+        """
+        生成简化的全局内存内核（不使用tile优化）
+        """
+        kernel = f'''
+        {ext_pragma}
+        
+        #define SOFTENING (0.01{suffix} * 0.01{suffix})  // Plummer softening squared
+        
+        inline {accum_type}4 compute_acceleration(
+            {accum_type}4 pos_i,
+            {accum_type}4 pos_j,
+            {accum_type} mass_j
+        ) {{
+            {accum_type}4 r_vec = pos_j - pos_i;
+            {accum_type} r2 = r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z + SOFTENING;
+            {accum_type} inv_r = rsqrt(r2);  // Fast inverse sqrt
+            {accum_type} inv_r3 = inv_r * inv_r * inv_r;
+            
+            return mass_j * inv_r3 * r_vec;
+        }}
+        
+        __kernel void nbody_simulation(
+            __global {vec_type}* positions,
+            __global {vec_type}* velocities,
+            __global {ctype}* masses,
+            int n,
+            {ctype} G,
+            {ctype} dt,
+            int steps
+        ) {{
+            int gid = get_global_id(0);
+            if (gid >= n) return;
+            
+            // Load particle i data
+            {vec_type} pos_i_vec = positions[gid];
+            {vec_type} vel_i_vec = velocities[gid];
+            {ctype} mass_i = masses[gid];
+            
+            // Convert to accumulation type for computation
+            {accum_type}4 pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
+            {accum_type}4 vel_i = {"convert_float4(vel_i_vec)" if precision == "fp16" else "vel_i_vec"};
+            
+            // Simulation loop
+            for (int s = 0; s < steps; s++) {{
+                {accum_type}4 acc = ({accum_type}4)({zero}, {zero}, {zero}, {zero});
+                
+                // Naive O(N²) loop over all particles
+                for (int j = 0; j < n; j++) {{
+                    if (j == gid) continue;  // Skip self-interaction
+                    
+                    {vec_type} pos_j_vec = positions[j];
+                    {ctype} mass_j = masses[j];
+                    
+                    {accum_type}4 pos_j = {"convert_float4(pos_j_vec)" if precision == "fp16" else "pos_j_vec"};
+                    acc += compute_acceleration(pos_i, pos_j, mass_j);
+                }}
+                
+                // Update velocity and position (semi-implicit Euler)
+                vel_i += G * acc * dt;
+                pos_i += vel_i * dt;
+            }}
+            
+            // Store back
+            positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
+            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+        }}
+        '''
+        return kernel
+
+    def _generate_tiled_kernel(self, precision: str, config: Dict, ctype: str, vec_type: str,
+                              suffix: str, zero: str, accum_type: str,
+                              convert_in: str, convert_out: str, ext_pragma: str) -> str:
+        """
+        生成原有的tile优化内核
+        """
         tile_size = self.TILE_SIZE
         
         # 新增：根据瓦片大小动态调整优化策略
@@ -340,8 +434,11 @@ Warning:
         build_options = [
             '-cl-fast-relaxed-math',
             '-cl-mad-enable',
-            f'-DWORK_GROUP_SIZE={min(self.TILE_SIZE, self.max_wg_size)}'
         ]
+        
+        # 只有在tile模式下才添加WORK_GROUP_SIZE定义
+        if not self.no_tile:
+            build_options.append(f'-DWORK_GROUP_SIZE={min(self.TILE_SIZE, self.max_wg_size)}')
         
         self._debug_print(f"Build options: {' '.join(build_options)}", "DEBUG")
         
@@ -377,24 +474,30 @@ Warning:
         if not self.check_precision_support(precision):
             raise RuntimeError(f"Precision {precision} not supported by device")
         
-        # Small N adjustment - 关键修改：对小规模问题使用不同的策略
-        if num_bodies < 256:
-            # 对于小规模问题，直接计算合适的瓦片大小
-            # 找到小于等于num_bodies的最大2的幂
-            self.TILE_SIZE = 1
-            while self.TILE_SIZE * 2 <= num_bodies:
-                self.TILE_SIZE *= 2
-            
-            # 确保不超过设备限制
-            self.TILE_SIZE = min(self.TILE_SIZE, self.max_wg_size)
-            
-            # 确保至少为1且为2的幂
-            self.TILE_SIZE = max(1, self.TILE_SIZE)
-            
-            self._debug_print(f"Small N={num_bodies}, setting TILE_SIZE={self.TILE_SIZE}", "INFO")
+        # 添加no_tile模式检查
+        if self.no_tile:
+            self._debug_print("Using naive global memory computation (no tiling)", "INFO")
+            # 在no-tile模式下，跳过tile相关的调整
+            self.TILE_SIZE = 1  # 设置为1以简化后续逻辑
         else:
-            # 对于大规模问题，检查本地内存
-            self._check_local_memory(precision)
+            # Small N adjustment - 关键修改：对小规模问题使用不同的策略
+            if num_bodies < 256:
+                # 对于小规模问题，直接计算合适的瓦片大小
+                # 找到小于等于num_bodies的最大2的幂
+                self.TILE_SIZE = 1
+                while self.TILE_SIZE * 2 <= num_bodies:
+                    self.TILE_SIZE *= 2
+                
+                # 确保不超过设备限制
+                self.TILE_SIZE = min(self.TILE_SIZE, self.max_wg_size)
+                
+                # 确保至少为1且为2的幂
+                self.TILE_SIZE = max(1, self.TILE_SIZE)
+                
+                self._debug_print(f"Small N={num_bodies}, setting TILE_SIZE={self.TILE_SIZE}", "INFO")
+            else:
+                # 对于大规模问题，检查本地内存
+                self._check_local_memory(precision)
         
         self._debug_print(f"Final TILE_SIZE={self.TILE_SIZE}")
         
@@ -461,35 +564,50 @@ Warning:
         vel_buf = cl.Buffer(self.context, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=velocities)
         mass_buf = cl.Buffer(self.context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=masses)
         
-        # 工作组分派 - 关键修改：确保配置有效
-        local_size = min(self.TILE_SIZE, self.max_wg_size, 256)
-        
-        # 确保本地大小不超过全局大小
-        if local_size > num_bodies:
-            # 找到小于num_bodies的最大2的幂
-            new_local = 1
-            while new_local * 2 <= num_bodies:
-                new_local *= 2
-            local_size = max(1, new_local)
-            self._debug_print(f"Adjusting local_size to {local_size} (num_bodies={num_bodies})", "INFO")
-        
-        # 确保本地大小至少为1
-        local_size = max(1, local_size)
-        
-        # 验证和调整工作组件配置
-        if local_size > self.max_wg_size:
-            self._debug_print(f"ERROR: local_size={local_size} exceeds max_wg_size={self.max_wg_size}", "ERROR")
-            local_size = min(local_size, self.max_wg_size)
+        # 工作组分派 - 根据no_tile模式调整
+        if self.no_tile:
+            # 在no-tile模式下，使用简单的工作组配置
+            # 优先使用256作为工作组大小，但不超过设备限制
+            local_size = min(256, self.max_wg_size, num_bodies)
+            
+            # 确保本地大小至少为1且是2的幂
+            local_size = max(1, local_size)
+            
+            # 对于小规模问题，使用粒子数作为工作组大小
+            if num_bodies < local_size:
+                local_size = num_bodies
+            
+            self._debug_print(f"No-tile mode: using local_size={local_size}", "INFO")
+        else:
+            # 原有的tile模式工作组配置逻辑保持不变
+            local_size = min(self.TILE_SIZE, self.max_wg_size, 256)
+            
+            # 确保本地大小不超过全局大小
+            if local_size > num_bodies:
+                # 找到小于num_bodies的最大2的幂
+                new_local = 1
+                while new_local * 2 <= num_bodies:
+                    new_local *= 2
+                local_size = max(1, new_local)
+                self._debug_print(f"Adjusting local_size to {local_size} (num_bodies={num_bodies})", "INFO")
+            
+            # 确保本地大小至少为1
+            local_size = max(1, local_size)
+            
+            # 验证和调整工作组件配置
+            if local_size > self.max_wg_size:
+                self._debug_print(f"ERROR: local_size={local_size} exceeds max_wg_size={self.max_wg_size}", "ERROR")
+                local_size = min(local_size, self.max_wg_size)
 
-        # 确保local_size至少为1
-        if local_size < 1:
-            self._debug_print(f"WARNING: local_size={local_size} is invalid, setting to 1", "WARN")
-            local_size = 1
+            # 确保local_size至少为1
+            if local_size < 1:
+                self._debug_print(f"WARNING: local_size={local_size} is invalid, setting to 1", "WARN")
+                local_size = 1
 
-        # 验证TILE_SIZE和local_size的关系
-        if self.TILE_SIZE != local_size:
-            self._debug_print(f"WARNING: TILE_SIZE={self.TILE_SIZE} != local_size={local_size}, adjusting TILE_SIZE", "WARN")
-            self.TILE_SIZE = local_size
+            # 验证TILE_SIZE和local_size的关系
+            if self.TILE_SIZE != local_size:
+                self._debug_print(f"WARNING: TILE_SIZE={self.TILE_SIZE} != local_size={local_size}, adjusting TILE_SIZE", "WARN")
+                self.TILE_SIZE = local_size
 
         # 计算全局大小（必须是本地大小的整数倍）
         global_size = ((num_bodies + local_size - 1) // local_size) * local_size
@@ -765,6 +883,11 @@ Examples:
     )
     
     parser.add_argument(
+        "--no-tile", action="store_true",
+        help="Disable tiling optimization, use naive global memory computation"
+    )
+        
+    parser.add_argument(
         "--verbose", "-v", action="count", default=0,
         help="Verbose output level (use -v for INFO, -vv for DEBUG)"
     )
@@ -786,7 +909,8 @@ Examples:
         benchmark = GPUNBodyBenchmark(
             platform_idx=args.platform,
             device_idx=args.device,
-            verbose=current_level
+            verbose=current_level,
+            no_tile=args.no_tile  # 添加no_tile参数
         )
     except Exception as e:
         print(f"Error initializing OpenCL: {e}")
