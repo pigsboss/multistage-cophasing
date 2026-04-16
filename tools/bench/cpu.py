@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CPU性能基准测试工具
+CPU performance benchmark tool
 测试三类计算任务在不同实现下的性能表现
 """
 
