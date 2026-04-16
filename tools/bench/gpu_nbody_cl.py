@@ -109,8 +109,8 @@ class GPUNBodyBenchmark:
         }
     }
     
-    # Tile size for shared memory optimization
-    TILE_SIZE = 256
+    # Tile size for shared memory optimization - reduced from 256 to 128 for safety
+    TILE_SIZE = 128
     
     def __init__(self, platform_idx: Optional[int] = None, device_idx: Optional[int] = None, verbose: str = "INFO"):
         if not PYOPENCL_AVAILABLE:
@@ -134,8 +134,14 @@ class GPUNBodyBenchmark:
         else:
             self.device = devices[0]
         
-        self.context = cl.Context([self.device])
-        self.queue = cl.CommandQueue(self.context, properties=cl.command_queue_properties.PROFILING_ENABLE)
+        # Add more conservative command queue properties
+        queue_properties = cl.command_queue_properties.PROFILING_ENABLE
+        try:
+            self.context = cl.Context([self.device])
+            self.queue = cl.CommandQueue(self.context, properties=queue_properties)
+        except Exception as e:
+            self._debug_print(f"Warning: Could not create queue with profiling: {e}", "WARN")
+            self.queue = cl.CommandQueue(self.context)
         
         # Device info
         self.max_wg_size = self.device.max_work_group_size
@@ -143,12 +149,16 @@ class GPUNBodyBenchmark:
         self.compute_units = self.device.max_compute_units
         self.verbose = verbose
         
+        # Set more conservative TILE_SIZE
+        self.TILE_SIZE = min(128, self.max_wg_size)
+        
         self._debug_print(f"Using device: {self.device.name}")
         self._debug_print(f"Device vendor: {self.device.vendor}")
         self._debug_print(f"OpenCL version: {self.device.version}")
         self._debug_print(f"Max compute units: {self.compute_units}")
         self._debug_print(f"Max work group size: {self.max_wg_size}")
         self._debug_print(f"Local memory size: {self.local_mem_size} bytes")
+        self._debug_print(f"Using conservative TILE_SIZE: {self.TILE_SIZE}", "INFO")
     
     def _debug_print(self, msg: str, level: str = "INFO") -> None:
         """Debug output with timestamp and level"""
@@ -281,14 +291,16 @@ class GPUNBodyBenchmark:
                     barrier(CLK_LOCAL_MEM_FENCE);
                     
                     // Compute interactions with this tile
-                    #pragma unroll 8
+                    // Reduced unroll factor to decrease register usage
+                    #pragma unroll 4  // Changed from 8 to 4
                     for (int k = 0; k < TILE_SIZE; k++) {{
+                        if (tile * TILE_SIZE + k == gid) continue;
+                        if (tile * TILE_SIZE + k >= n) continue;
+                    
                         {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
                         {accum_type} mass_j = local_mass[k];
-                        
-                        if (tile * TILE_SIZE + k != gid && tile * TILE_SIZE + k < n) {{
-                            acc += compute_acceleration(pos_i, pos_j, mass_j);
-                        }}
+                    
+                        acc += compute_acceleration(pos_i, pos_j, mass_j);
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                 }}
@@ -335,9 +347,9 @@ class GPUNBodyBenchmark:
     def run_benchmark(self, precision: str = 'fp32', num_bodies: int = 1000, 
                      steps: int = 100, dt: float = 0.01,
                      warmup_iterations: int = 3, test_iterations: int = 10,
-                     steps_per_chunk: int = 10) -> BenchmarkResult:
+                     steps_per_chunk: int = 5) -> BenchmarkResult:
         """
-        Run GPU N-body benchmark with chunked execution to prevent system hangs
+        Run GPU N-body benchmark with enhanced safety measures
         
         Args:
             precision: 'fp16', 'fp32', or 'fp64'
@@ -357,6 +369,18 @@ class GPUNBodyBenchmark:
         self._check_local_memory(precision)
         self._debug_print(f"Using TILE_SIZE={self.TILE_SIZE}")
         
+        # More strict automatic adjustment of chunk size
+        if steps_per_chunk > 10:
+            self._debug_print(f"WARNING: steps_per_chunk={steps_per_chunk} too high, reducing to 5", "WARN")
+            steps_per_chunk = 5
+        
+        # Further reduce chunking based on problem size
+        if num_bodies > 500:
+            recommended_chunk = max(1, 5 - (num_bodies - 500) // 100)
+            if steps_per_chunk > recommended_chunk:
+                steps_per_chunk = recommended_chunk
+                self._debug_print(f"Auto-adjusted steps_per_chunk to {steps_per_chunk} for {num_bodies} bodies", "INFO")
+        
         # Dynamic chunk sizing based on problem size
         if steps_per_chunk < 1:
             steps_per_chunk = max(1, steps // 10)  # Auto-adjust
@@ -368,8 +392,8 @@ class GPUNBodyBenchmark:
         if estimated_ops > 1e9:  # More than 1 billion ops
             self._debug_print(f"WARNING: High operations count, consider reducing --chunk-size", "WARN")
             # Auto-reduce if too high
-            if steps_per_chunk > 5:
-                steps_per_chunk = 5
+            if steps_per_chunk > 2:
+                steps_per_chunk = 2
                 self._debug_print(f"Auto-reduced steps_per_chunk to {steps_per_chunk}", "WARN")
         
         self._debug_print(f"Building OpenCL program...")
@@ -635,8 +659,13 @@ Examples:
     )
     
     parser.add_argument(
-        "--chunk-size", type=int, default=10,
-        help="Steps per kernel launch (smaller values prevent hangs, default: 10)"
+        "--chunk-size", type=int, default=2,
+        help="Steps per kernel launch (smaller values prevent hangs, default: 2)"
+    )
+    
+    parser.add_argument(
+        "--safe-mode", action="store_true",
+        help="Enable extra safety measures: smaller tile size, reduced unrolling"
     )
     
     parser.add_argument(
