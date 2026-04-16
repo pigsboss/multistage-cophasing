@@ -112,7 +112,7 @@ class GPUNBodyBenchmark:
     # Tile size for shared memory optimization
     TILE_SIZE = 256
     
-    def __init__(self, platform_idx: Optional[int] = None, device_idx: Optional[int] = None):
+    def __init__(self, platform_idx: Optional[int] = None, device_idx: Optional[int] = None, verbose: str = "INFO"):
         if not PYOPENCL_AVAILABLE:
             raise RuntimeError("PyOpenCL not available")
         
@@ -141,12 +141,52 @@ class GPUNBodyBenchmark:
         self.max_wg_size = self.device.max_work_group_size
         self.local_mem_size = self.device.local_mem_size
         self.compute_units = self.device.max_compute_units
+        self.verbose = verbose
         
-        print(f"Using device: {self.device.name}")
-        print(f"Device vendor: {self.device.vendor}")
-        print(f"OpenCL version: {self.device.version}")
-        print(f"Max compute units: {self.compute_units}")
-        print(f"Max work group size: {self.max_wg_size}")
+        self._debug_print(f"Using device: {self.device.name}")
+        self._debug_print(f"Device vendor: {self.device.vendor}")
+        self._debug_print(f"OpenCL version: {self.device.version}")
+        self._debug_print(f"Max compute units: {self.compute_units}")
+        self._debug_print(f"Max work group size: {self.max_wg_size}")
+        self._debug_print(f"Local memory size: {self.local_mem_size} bytes")
+    
+    def _debug_print(self, msg: str, level: str = "INFO") -> None:
+        """Debug output with timestamp and level"""
+        # Only print if message level is at or above current verbosity level
+        level_priority = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
+        current_priority = level_priority.get(self.verbose, 2)
+        msg_priority = level_priority.get(level, 2)
+        
+        if msg_priority <= current_priority:
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[{timestamp}] [{level}] {msg}")
+    
+    def _check_local_memory(self, precision: str) -> None:
+        """Check if local memory usage exceeds device limits"""
+        config = self.PRECISION_CONFIG[precision]
+        
+        # Calculate memory per work-item in local memory
+        if config['ctype'] == 'float':
+            vec_size = 16  # bytes for float4
+            scalar_size = 4
+        elif config['ctype'] == 'double':
+            vec_size = 32  # bytes for double4  
+            scalar_size = 8
+        else:  # half
+            vec_size = 8   # bytes for half4
+            scalar_size = 2
+        
+        local_mem_required = self.TILE_SIZE * (vec_size + scalar_size)
+        local_mem_available = self.local_mem_size
+        
+        self._debug_print(f"Local memory check: required={local_mem_required}B, available={local_mem_available}B")
+        
+        if local_mem_required > local_mem_available:
+            self._debug_print(f"WARNING: Local memory requirement ({local_mem_required}B) exceeds device limit ({local_mem_available}B)", "WARN")
+            # Auto-adjust tile size
+            new_tile = min(self.TILE_SIZE, local_mem_available // (vec_size + scalar_size))
+            self._debug_print(f"Auto-adjusting TILE_SIZE from {self.TILE_SIZE} to {new_tile}", "WARN")
+            self.TILE_SIZE = new_tile
     
     def check_precision_support(self, precision: str) -> bool:
         """Check if device supports specific floating point precision"""
@@ -266,8 +306,11 @@ class GPUNBodyBenchmark:
         return kernel
     
     def build_program(self, precision: str):
-        """Build OpenCL program"""
+        """Build OpenCL program with detailed error reporting"""
+        self._debug_print(f"Generating kernel source for {precision}...", "DEBUG")
         source = self.generate_kernel_source(precision)
+        
+        self._debug_print(f"Building OpenCL program...")
         program = cl.Program(self.context, source)
         
         build_options = [
@@ -276,10 +319,15 @@ class GPUNBodyBenchmark:
             f'-DWORK_GROUP_SIZE={min(self.TILE_SIZE, self.max_wg_size)}'
         ]
         
+        self._debug_print(f"Build options: {' '.join(build_options)}", "DEBUG")
+        
         try:
             program.build(options=' '.join(build_options))
+            self._debug_print("Program built successfully")
         except cl.RuntimeError as e:
             build_log = program.get_build_info(self.device, cl.program_build_info.LOG)
+            self._debug_print(f"ERROR: OpenCL build failed", "ERROR")
+            self._debug_print(f"Build log:\n{build_log}", "ERROR")
             raise RuntimeError(f"OpenCL build error: {e}\nBuild log:\n{build_log}")
         
         return program
@@ -300,28 +348,42 @@ class GPUNBodyBenchmark:
             test_iterations: Number of timed test runs
             steps_per_chunk: Steps per kernel launch (prevents hangs)
         """
+        self._debug_print(f"Starting benchmark: precision={precision}, bodies={num_bodies}, steps={steps}")
+        
         if not self.check_precision_support(precision):
             raise RuntimeError(f"Precision {precision} not supported by device")
         
+        # Check local memory before building
+        self._check_local_memory(precision)
+        self._debug_print(f"Using TILE_SIZE={self.TILE_SIZE}")
+        
+        # Dynamic chunk sizing based on problem size
         if steps_per_chunk < 1:
-            steps_per_chunk = steps
+            steps_per_chunk = max(1, steps // 10)  # Auto-adjust
         
-        # Warn if chunk size is too large
-        estimated_time_per_chunk = (num_bodies * steps_per_chunk) / 1e6  # Rough estimate
-        if estimated_time_per_chunk > 0.5:  # More than 0.5 seconds per chunk
-            print(f"Warning: steps_per_chunk={steps_per_chunk} may cause long kernel execution.")
-            print("  Reduce --chunk-size if system becomes unresponsive.")
+        # Estimate kernel runtime
+        estimated_ops = num_bodies * num_bodies * steps_per_chunk
+        self._debug_print(f"Estimated operations per chunk: {estimated_ops:,}")
         
+        if estimated_ops > 1e9:  # More than 1 billion ops
+            self._debug_print(f"WARNING: High operations count, consider reducing --chunk-size", "WARN")
+            # Auto-reduce if too high
+            if steps_per_chunk > 5:
+                steps_per_chunk = 5
+                self._debug_print(f"Auto-reduced steps_per_chunk to {steps_per_chunk}", "WARN")
+        
+        self._debug_print(f"Building OpenCL program...")
         program = self.build_program(precision)
         kernel = program.nbody_simulation
         
         config = self.PRECISION_CONFIG[precision]
         np_dtype = config['np_dtype']
         
-        # Generate initial conditions (reproducible)
+        # Generate initial conditions
+        self._debug_print(f"Generating initial conditions for {num_bodies} bodies...")
         np.random.seed(42)
         positions = np.random.randn(num_bodies, 4).astype(np_dtype)
-        positions[:, 3] = 0.0  # w component unused but needed for float4 alignment
+        positions[:, 3] = 0.0
         
         velocities = np.random.randn(num_bodies, 4).astype(np_dtype) * 0.1
         velocities[:, 3] = 0.0
@@ -329,45 +391,55 @@ class GPUNBodyBenchmark:
         masses = np.random.rand(num_bodies).astype(np_dtype) * 10.0 + 1.0
         
         # OpenCL buffers
+        self._debug_print(f"Allocating GPU buffers...")
         mf = cl.mem_flags
         pos_buf = cl.Buffer(self.context, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=positions)
         vel_buf = cl.Buffer(self.context, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=velocities)
         mass_buf = cl.Buffer(self.context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=masses)
         
-        # Work group size (must be <= TILE_SIZE and device limit)
-        local_size = min(self.TILE_SIZE, self.max_wg_size)
-        local_size = min(local_size, 256)  # Cap at 256 for better occupancy
-        global_size = ((num_bodies + local_size - 1) // local_size) * local_size
+        # Work group sizing with validation
+        local_size = min(self.TILE_SIZE, self.max_wg_size, 256)
+        if local_size > self.max_wg_size:
+            self._debug_print(f"ERROR: local_size {local_size} > max_wg_size {self.max_wg_size}", "ERROR")
+            local_size = self.max_wg_size
         
-        G = np_dtype(6.67430e-11)  # Gravitational constant
+        global_size = ((num_bodies + local_size - 1) // local_size) * local_size
+        self._debug_print(f"Work group: global={global_size}, local={local_size}")
+        
+        G = np_dtype(6.67430e-11)
         dt = np_dtype(dt)
         
-        # Warm-up runs (using chunked execution as well)
-        for _ in range(warmup_iterations):
+        # Warm-up runs with progress
+        self._debug_print(f"Starting {warmup_iterations} warmup iterations...")
+        for i in range(warmup_iterations):
+            self._debug_print(f"  Warmup iteration {i+1}/{warmup_iterations}")
             steps_done = 0
+            chunk_count = 0
             while steps_done < steps:
                 current_steps = min(steps_per_chunk, steps - steps_done)
-                kernel(self.queue, (global_size,), (local_size,),
-                       pos_buf, vel_buf, mass_buf,
-                       np.int32(num_bodies), G, dt, np.int32(current_steps))
+                chunk_count += 1
+                self._debug_print(f"    Chunk {chunk_count}: steps={current_steps}", "DEBUG")
+                
+                try:
+                    kernel(self.queue, (global_size,), (local_size,),
+                           pos_buf, vel_buf, mass_buf,
+                           np.int32(num_bodies), G, dt, np.int32(current_steps))
+                except Exception as e:
+                    self._debug_print(f"ERROR during kernel execution: {e}", "ERROR")
+                    raise
+                
                 steps_done += current_steps
+            
             self.queue.finish()
+            self._debug_print(f"  Warmup iteration {i+1} completed")
         
-        # Reset to initial conditions for actual test
-        np.random.seed(42)
-        positions = np.random.randn(num_bodies, 4).astype(np_dtype)
-        positions[:, 3] = 0.0
-        velocities = np.random.randn(num_bodies, 4).astype(np_dtype) * 0.1
-        velocities[:, 3] = 0.0
-        
-        cl.enqueue_copy(self.queue, pos_buf, positions)
-        cl.enqueue_copy(self.queue, vel_buf, velocities)
-        self.queue.finish()
-        
-        # Test runs
+        # Test runs with timing
+        self._debug_print(f"Starting {test_iterations} test iterations...")
         execution_times = []
         
         for iteration in range(test_iterations):
+            self._debug_print(f"Test iteration {iteration+1}/{test_iterations}")
+            
             # Reset state
             np.random.seed(42)
             pos_init = np.random.randn(num_bodies, 4).astype(np_dtype)
@@ -375,31 +447,49 @@ class GPUNBodyBenchmark:
             vel_init = np.random.randn(num_bodies, 4).astype(np_dtype) * 0.1
             vel_init[:, 3] = 0.0
             
+            self._debug_print("  Copying data to GPU...")
             cl.enqueue_copy(self.queue, pos_buf, pos_init)
             cl.enqueue_copy(self.queue, vel_buf, vel_init)
             self.queue.finish()
             
             start = time.perf_counter()
             
-            # Chunked execution to prevent hangs
+            # Chunked execution with progress reporting
             steps_done = 0
+            chunk_count = 0
+            chunk_times = []
+            
             while steps_done < steps:
                 current_steps = min(steps_per_chunk, steps - steps_done)
+                chunk_start = time.perf_counter()
+                chunk_count += 1
                 
-                event = kernel(self.queue, (global_size,), (local_size,),
-                              pos_buf, vel_buf, mass_buf,
-                              np.int32(num_bodies), G, dt, np.int32(current_steps))
-                event.wait()
+                self._debug_print(f"  Running chunk {chunk_count}: {current_steps} steps", "DEBUG")
+                
+                try:
+                    event = kernel(self.queue, (global_size,), (local_size,),
+                                  pos_buf, vel_buf, mass_buf,
+                                  np.int32(num_bodies), G, dt, np.int32(current_steps))
+                    event.wait()
+                except cl.RuntimeError as e:
+                    self._debug_print(f"ERROR: Kernel execution failed: {e}", "ERROR")
+                    self._debug_print(f"Try reducing --chunk-size (current: {steps_per_chunk})", "ERROR")
+                    raise
                 
                 steps_done += current_steps
-                if test_iterations == 1:  # Only show progress for single test iteration
-                    print(f"\r  Progress: {steps_done}/{steps} steps", end="")
-            
-            if test_iterations == 1:
-                print()  # New line after progress
+                chunk_time = time.perf_counter() - chunk_start
+                chunk_times.append(chunk_time)
+                
+                # Report progress every few chunks
+                if chunk_count % 5 == 0:
+                    avg_chunk_time = sum(chunk_times[-5:]) / min(5, len(chunk_times))
+                    self._debug_print(f"  Progress: {steps_done}/{steps} steps, avg chunk time: {avg_chunk_time:.3f}s")
             
             end = time.perf_counter()
-            execution_times.append(end - start)
+            iteration_time = end - start
+            execution_times.append(iteration_time)
+            
+            self._debug_print(f"  Iteration {iteration+1} completed in {iteration_time:.3f}s")
         
         # Read final state for validation (optional)
         final_pos = np.empty_like(positions)
@@ -564,7 +654,16 @@ Examples:
         help="OpenCL device index (default: 0)"
     )
     
+    parser.add_argument(
+        "--verbose", "-v", action="count", default=0,
+        help="Verbose output level (use -v for INFO, -vv for DEBUG)"
+    )
+    
     args = parser.parse_args()
+    
+    # Set debug level
+    debug_levels = {0: "ERROR", 1: "INFO", 2: "DEBUG"}
+    current_level = debug_levels.get(min(args.verbose, 2), "INFO")
     
     if not PYOPENCL_AVAILABLE:
         print("Error: PyOpenCL not installed. Please install: pip install pyopencl")
@@ -576,7 +675,8 @@ Examples:
     try:
         benchmark = GPUNBodyBenchmark(
             platform_idx=args.platform,
-            device_idx=args.device
+            device_idx=args.device,
+            verbose=current_level
         )
     except Exception as e:
         print(f"Error initializing OpenCL: {e}")
