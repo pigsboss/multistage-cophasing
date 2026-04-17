@@ -421,7 +421,7 @@ class GPUNBodyBenchmark:
             
             // 写回结果
             positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
-            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            velocities[gid] = {"convert_half4(vel_i)" if precision == "vel_i"};
         }}
         '''
         return kernel
@@ -613,17 +613,47 @@ class GPUNBodyBenchmark:
             self._debug_print(f"  Warmup iteration {i+1}/{warmup_iterations}")
             steps_done = 0
             chunk_count = 0
+            chunk_times = []  # 记录每个 chunk 的执行时间
             while steps_done < steps:
                 current_steps = min(steps_per_chunk, steps - steps_done)
                 chunk_count += 1
                 self._debug_print(f"    Chunk {chunk_count}: steps={current_steps}", "DEBUG")
                 
                 try:
+                    chunk_start = time.perf_counter()
+                    
                     event = kernel(self.queue, (global_size,), (local_size,),
                                    pos_buf, vel_buf, mass_buf,
                                    np.int32(num_bodies), G, dt, np.int32(current_steps))
                     # FIX: 添加 flush 让 GPU 开始执行
                     self.queue.flush()
+                    
+                    # FIX: 立即等待此 kernel 完成，测量实际执行时间
+                    event.wait()
+                    self.queue.finish()
+                    
+                    chunk_end = time.perf_counter()
+                    chunk_time = chunk_end - chunk_start
+                    chunk_times.append(chunk_time)
+                    
+                    # 警告：如果单个 chunk 超过 1 秒，可能触发 TDR
+                    if chunk_time > 1.0:
+                        self._debug_print(f"    WARNING: Chunk {chunk_count} took {chunk_time:.2f}s (risk of TDR/timeout)", "WARN")
+                    
+                    # 如果平均时间过高，建议增加 chunk size
+                    if len(chunk_times) >= 3 and chunk_count <= 5:
+                        avg_time = statistics.mean(chunk_times)
+                        if avg_time > 0.5 and steps_per_chunk < 10:
+                            self._debug_print(f"    Average chunk time {avg_time:.2f}s, consider increasing --chunk-size", "WARN")
+                    
+                    # 读取 profiling 信息（如果可用）
+                    try:
+                        gpu_start = event.get_profiling_info(cl.profiling_info.START)
+                        gpu_end = event.get_profiling_info(cl.profiling_info.END)
+                        gpu_time_ms = (gpu_end - gpu_start) / 1e6
+                        self._debug_print(f"    GPU time: {gpu_time_ms:.1f}ms", "DEBUG")
+                    except Exception:
+                        pass  # Profiling 可能不可用
                     
                     # FIX: 每10个 chunk 强制同步，防止资源累积
                     if chunk_count % 10 == 0:
@@ -631,7 +661,8 @@ class GPUNBodyBenchmark:
                         self.queue.finish()
                         
                 except Exception as e:
-                    self._debug_print(f"ERROR during kernel execution: {e}", "ERROR")
+                    self._debug_print(f"ERROR during kernel execution at chunk {chunk_count}: {e}", "ERROR")
+                    self._debug_print(f"  Last successful chunk: {chunk_count-1}, steps_done: {steps_done}", "ERROR")
                     raise
                 
                 steps_done += current_steps
@@ -671,19 +702,25 @@ class GPUNBodyBenchmark:
                 self._debug_print(f"  Running chunk {chunk_count}: {current_steps} steps", "DEBUG")
                 
                 try:
+                    chunk_start = time.perf_counter()
+                    
                     event = kernel(self.queue, (global_size,), (local_size,),
                                   pos_buf, vel_buf, mass_buf,
                                   np.int32(num_bodies), G, dt, np.int32(current_steps))
                     # FIX: 添加 flush
                     self.queue.flush()
                     
-                    # FIX: 定期同步
-                    if chunk_count % 10 == 0:
-                        event.wait()
-                        
+                    # FIX: 立即同步，不累积
+                    event.wait()
+                    self.queue.finish()
+                    
+                    chunk_time = time.perf_counter() - chunk_start
+                    if chunk_time > 1.0:
+                        self._debug_print(f"    Chunk {chunk_count} slow: {chunk_time:.2f}s", "WARN")
+                    
                 except cl.RuntimeError as e:
-                    self._debug_print(f"ERROR: Kernel execution failed: {e}", "ERROR")
-                    self._debug_print(f"Try reducing --chunk-size (current: {steps_per_chunk})", "ERROR")
+                    self._debug_print(f"ERROR: Kernel execution failed at chunk {chunk_count}: {e}", "ERROR")
+                    self._debug_print(f"  Try increasing --chunk-size (current: {steps_per_chunk})", "ERROR")
                     raise
                 
                 steps_done += current_steps
@@ -897,6 +934,11 @@ Examples:
     
     print("Starting GPU N-Body Benchmark...")
     print(f"Configuration: bodies={args.bodies}, steps={args.steps}, dt={args.dt}, repeats={args.repeats}")
+    
+    # DEBUG: 强制 chunk size 防止 TDR
+    if args.bodies >= 500 and args.chunk_size < 10:
+        print(f"DEBUG: Forcing chunk-size to 10 for {args.bodies} bodies to prevent TDR")
+        args.chunk_size = 10
     
     try:
         benchmark = GPUNBodyBenchmark(
