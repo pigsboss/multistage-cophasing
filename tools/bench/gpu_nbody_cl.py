@@ -576,7 +576,7 @@ class GPUNBodyBenchmark:
                 self._debug_print(f"Intel GPU: Reduced TILE_SIZE to {self.TILE_SIZE} for stability", "INFO")
             
             # 对于Intel GPU使用更小的工作组
-            local_size = min(self.TILE_SIZE, num_bodies)
+            local_size = min(self.TILE_SIZE, self.max_wg_size)
             local_size = min(local_size, 32)  # 进一步限制最大32
             
             # 确保local_size至少为1
@@ -950,6 +950,30 @@ Examples:
   %(prog)s --precision fp16 --bodies 512 --steps 200     # Test FP16
   %(prog)s --precision all --bodies 1020 --steps 100     # Test all precisions
   %(prog)s --output results.json                         # Save to file
+
+Tile Mode Configuration:
+  Default behavior (auto-mode enabled):
+    - Non-Intel GPUs: Use tiled kernel with TILE_SIZE=128 (default)
+    - Intel GPUs: Use optimized tiled kernel with TILE_SIZE=32 (auto-safety mode)
+  
+  To enable/disable tile mode explicitly:
+    --no-tile                    Disable tile optimization (naive kernel)
+    --no-auto-mode               Disable auto-safety mode for Intel GPUs
+                                 (Use standard tile kernel instead of optimized one)
+  
+  To test tile mode on Intel GPUs (with auto-safety disabled):
+    %(prog)s --precision fp32 --bodies 500 --steps 50 --no-auto-mode
+    %(prog)s --precision fp32 --bodies 500 --steps 50 --no-tile    # Disable tile mode
+  
+  Safe mode options:
+    --safe-mode                  Enable extra safety measures
+    --chunk-size 2               Smaller chunks for better stability
+    --min-tile-size 8            Use smaller tile size for problematic GPUs
+
+Performance Tips:
+  - Start with small N (<500) when testing tile mode on Intel GPUs
+  - Use --chunk-size 1-5 for large N to prevent TDR timeouts
+  - For Intel GPUs, use --bodies <500 and --steps <100 initially
         """
     )
     
@@ -986,18 +1010,18 @@ Examples:
     
     parser.add_argument(
         "--chunk-size", type=int, default=5,
-        help="Steps per kernel launch (smaller values prevent hangs, default: 5)"
+        help="Steps per kernel launch (prevents TDR timeouts, default: 5, Intel GPUs: use 1-3 for large N)"
     )
     
     # 添加新参数
     parser.add_argument(
         "--min-tile-size", type=int, default=16,
-        help="Minimum tile size for small N problems (default: 16)"
+        help="Minimum tile size for small N problems (default: 16, Intel GPUs: auto-adjusted to 32)"
     )
     
     parser.add_argument(
         "--safe-mode", action="store_true",
-        help="Enable extra safety measures: smaller tile size, reduced unrolling"
+        help="Enable extra safety measures: smaller tile size, reduced unrolling (recommended for Intel GPUs)"
     )
     
     parser.add_argument(
@@ -1017,12 +1041,12 @@ Examples:
     
     parser.add_argument(
         "--no-tile", action="store_true",
-        help="Disable tiling optimization, use naive global memory computation"
+        help="Disable tiling optimization, use naive global memory computation (default: enabled)"
     )
     
     parser.add_argument(
         "--no-auto-mode", action="store_true",
-        help="Disable automatic safety mode for Intel GPUs"
+        help="Disable automatic safety mode for Intel GPUs (default: enabled, uses optimized kernels for Intel)"
     )
         
     parser.add_argument(
