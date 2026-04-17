@@ -421,7 +421,7 @@ class GPUNBodyBenchmark:
             
             // 写回结果
             positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
-            velocities[gid] = {"convert_half4(vel_i)" if precision == "vel_i"};
+            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
         }}
         '''
         return kernel
@@ -840,7 +840,7 @@ Examples:
   %(prog)s --precision fp32 --bodies 1000 --steps 100    # Test FP32
   %(prog)s --precision fp64 --bodies 2048 --steps 50     # Test FP64
   %(prog)s --precision fp16 --bodies 512 --steps 200     # Test FP16
-  %(prog)s --precision all --bodies 1024 --steps 100     # Test all precisions
+  %(prog)s --precision all --bodies 1020 --steps 100     # Test all precisions
   %(prog)s --output results.json                         # Save to file
         """
     )
