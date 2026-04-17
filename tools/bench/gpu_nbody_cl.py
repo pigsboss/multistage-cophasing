@@ -478,7 +478,7 @@ class GPUNBodyBenchmark:
             raise RuntimeError(f"Precision {precision} not supported by device")
         
         # Intel GPU specific: use no-tile mode for large N to reduce resource usage
-        if num_bodies >= 500 and not self.no_tile:
+        if num_bodies >= 5000 and not self.no_tile:
             self._debug_print(f"Large N={num_bodies}, switching to no-tile mode to reduce resource usage", "INFO")
             self.no_tile = True
         
