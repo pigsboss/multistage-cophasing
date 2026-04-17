@@ -830,6 +830,11 @@ class GPUBaseCapability:
         
         self._print("Generating optimized batch test configuration...")
         
+        # 修复：确保全局内存大小是合理的
+        if self.report.device_info.global_mem_size <= 0:
+            self._print("Warning: global_mem_size is 0 or negative, updating to 4GB", "WARN")
+            self.report.device_info.global_mem_size = 4 * 1024**3  # 4GB
+        
         # Calculate device capability scores
         capability_scores = self._calculate_capability_scores()
         
@@ -887,10 +892,11 @@ class GPUBaseCapability:
         info = self.report.device_info
         
         # Memory capability score (0-1)
-        # 修复：检查全局内存大小是否为0
+        # 修复：如果全局内存大小为0或负数，更新它为默认值
         if info.global_mem_size <= 0:
-            # 如果全局内存大小为0，使用默认值4GB
-            self._print("Warning: global_mem_size is 0 or negative, using default 4GB for memory score", "WARN")
+            # 如果全局内存大小为0或负数，使用默认值4GB
+            self._print("Warning: global_mem_size is 0 or negative, using default 4GB", "WARN")
+            info.global_mem_size = 4 * 1024**3  # 4GB
             mem_score = 0.5  # 中等内存评分
         else:
             mem_score = min(1.0, info.global_mem_size / (4 * 1024**3))  # Normalize to 4GB
@@ -936,7 +942,7 @@ class GPUBaseCapability:
         info = self.report.device_info
         
         # Determine precision based on device support
-        precision = "fp32"  # Default
+        precision = "fp32"  # Default recommendation
         if scores["precisions"]["fp64"] > 0.5:
             precision = "fp64"
         
@@ -1050,9 +1056,24 @@ class GPUBaseCapability:
         estimated_memory = samples * 2 * precision_size  # x and y coordinates
         max_memory = info.global_mem_size * self.config_params["memory_safety_factor"]
         
+        # 修复：检查 max_memory 是否为0或负数
+        if max_memory <= 0:
+            # 如果最大内存为0或负数，使用最小安全值
+            max_memory = 100 * 1024 * 1024  # 100 MB 作为最小安全值
+            self._print(f"  Warning: max_memory is 0 or negative, using {max_memory/1024/1024:.0f} MB as minimum", "WARN")
+        
         if estimated_memory > max_memory:
-            samples = int(max_memory / (2 * precision_size))
-            self._print(f"  Reduced Monte Carlo samples to {samples} due to memory constraints", "WARN")
+            # 修复：确保除数不为0
+            if max_memory > 0:
+                samples = int(max_memory / (2 * precision_size))
+                self._print(f"  Reduced Monte Carlo samples to {samples} due to memory constraints", "WARN")
+            else:
+                # 如果max_memory为0，设置最小样本数
+                samples = 1_000_000
+                self._print(f"  Warning: max_memory is 0, using minimum samples: {samples}", "WARN")
+        
+        # 修复：重新计算估计内存使用量
+        estimated_memory = samples * 2 * precision_size
         
         # Ensure reasonable bounds
         samples = max(1_000_000, samples)
@@ -1073,7 +1094,12 @@ class GPUBaseCapability:
         
         # Calculate confidence and safety
         confidence = min(1.0, compute_score * 0.7 + bw_score * 0.3)
-        safety = min(1.0, 1.0 - (estimated_memory / max_memory))
+        
+        # 修复：避免除零错误
+        if max_memory <= 0:
+            safety = 0.0
+        else:
+            safety = min(1.0, 1.0 - (estimated_memory / max_memory))
         
         # Determine batching strategy
         if samples > 10_000_000:
