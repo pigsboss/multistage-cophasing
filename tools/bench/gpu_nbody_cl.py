@@ -267,7 +267,7 @@ class GPUNBodyBenchmark:
                               suffix: str, zero: str, accum_type: str, 
                               convert_in: str, convert_out: str, ext_pragma: str) -> str:
         """
-        生成简化的全局内存内核（不使用tile优化）
+        生成简化的全局内存内核（不使用tile优化） - 修复版
         """
         kernel = f'''
         {ext_pragma}
@@ -297,6 +297,8 @@ class GPUNBodyBenchmark:
             int steps
         ) {{
             int gid = get_global_id(0);
+            
+            // 只有有效粒子才执行
             if (gid >= n) return;
             
             // Load particle i data
@@ -339,10 +341,7 @@ class GPUNBodyBenchmark:
                                               suffix: str, zero: str, accum_type: str,
                                               convert_in: str, convert_out: str, ext_pragma: str) -> str:
         """
-        为Intel GPU特别优化的tile内核
-        - 使用更小的TILE_SIZE
-        - 减少寄存器压力
-        - 避免复杂的宏和函数
+        为Intel GPU特别优化的tile内核 - 修复版，确保所有工作项参与同步
         """
         tile_size = self.TILE_SIZE
         
@@ -364,14 +363,19 @@ class GPUNBodyBenchmark:
             int gid = get_global_id(0);
             int lid = get_local_id(0);
             
-            if (gid >= n) return;
+            // 只有有效粒子才加载数据
+            {vec_type} pos_i_vec, vel_i_vec;
+            {ctype} mass_i;
+            {accum_type}4 pos_i, vel_i;
             
-            // 加载数据
-            {vec_type} pos_i_vec = positions[gid];
-            {vec_type} vel_i_vec = velocities[gid];
-            
-            {accum_type}4 pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
-            {accum_type}4 vel_i = {"convert_float4(vel_i_vec)" if precision == "fp16" else "vel_i_vec"};
+            bool valid_particle = (gid < n);
+            if (valid_particle) {{
+                pos_i_vec = positions[gid];
+                vel_i_vec = velocities[gid];
+                mass_i = masses[gid];
+                pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
+                vel_i = {"convert_float4(vel_i_vec)" if precision == "fp16" else "vel_i_vec"};
+            }}
             
             __local {vec_type} local_pos[TILE_SIZE];
             __local {ctype} local_mass[TILE_SIZE];
@@ -393,35 +397,41 @@ class GPUNBodyBenchmark:
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                     
-                    // 计算当前瓦片的贡献
-                    int tile_end = min(TILE_SIZE, n - tile * TILE_SIZE);
-                    
-                    // 不使用unroll，减少寄存器压力
-                    for (int k = 0; k < tile_end; k++) {{
-                        int j_idx = tile * TILE_SIZE + k;
-                        if (j_idx == gid) continue;
+                    // 计算当前瓦片的贡献（仅由有效粒子计算）
+                    if (valid_particle) {{
+                        int tile_end = min(TILE_SIZE, n - tile * TILE_SIZE);
                         
-                        {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
-                        {accum_type} mass_j = local_mass[k];
-                        
-                        // 内联计算，避免函数调用开销
-                        {accum_type}4 r_vec = pos_j - pos_i;
-                        {accum_type} r2 = r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z + SOFTENING;
-                        {accum_type} inv_r = rsqrt(r2);
-                        {accum_type} inv_r3 = inv_r * inv_r * inv_r;
-                        acc += mass_j * inv_r3 * r_vec;
+                        // 不使用unroll，减少寄存器压力
+                        for (int k = 0; k < tile_end; k++) {{
+                            int j_idx = tile * TILE_SIZE + k;
+                            if (j_idx == gid) continue;
+                            
+                            {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
+                            {accum_type} mass_j = local_mass[k];
+                            
+                            // 内联计算，避免函数调用开销
+                            {accum_type}4 r_vec = pos_j - pos_i;
+                            {accum_type} r2 = r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z + SOFTENING;
+                            {accum_type} inv_r = rsqrt(r2);
+                            {accum_type} inv_r3 = inv_r * inv_r * inv_r;
+                            acc += mass_j * inv_r3 * r_vec;
+                        }}
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                 }}
                 
-                // 更新速度和位置
-                vel_i += G * acc * dt;
-                pos_i += vel_i * dt;
+                // 更新速度和位置（仅由有效粒子更新）
+                if (valid_particle) {{
+                    vel_i += G * acc * dt;
+                    pos_i += vel_i * dt;
+                }}
             }}
             
-            // 写回结果
-            positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
-            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            // 写回结果（仅由有效粒子写回）
+            if (valid_particle) {{
+                positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
+                velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            }}
         }}
         '''
         return kernel
@@ -430,7 +440,7 @@ class GPUNBodyBenchmark:
                               suffix: str, zero: str, accum_type: str,
                               convert_in: str, convert_out: str, ext_pragma: str) -> str:
         """
-        生成修复后的tile优化内核 - 减少寄存器压力
+        生成修复后的tile优化内核 - 确保所有工作项都参与barrier同步
         """
         tile_size = self.TILE_SIZE
         
@@ -452,14 +462,19 @@ class GPUNBodyBenchmark:
             int gid = get_global_id(0);
             int lid = get_local_id(0);
             
-            if (gid >= n) return;
+            // 只有有效粒子才加载数据
+            {vec_type} pos_i_vec, vel_i_vec;
+            {ctype} mass_i;
+            {accum_type}4 pos_i, vel_i;
             
-            // 加载数据
-            {vec_type} pos_i_vec = positions[gid];
-            {vec_type} vel_i_vec = velocities[gid];
-            
-            {accum_type}4 pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
-            {accum_type}4 vel_i = {"convert_float4(vel_i_vec)" if precision == "fp16" else "vel_i_vec"};
+            bool valid_particle = (gid < n);
+            if (valid_particle) {{
+                pos_i_vec = positions[gid];
+                vel_i_vec = velocities[gid];
+                mass_i = masses[gid];
+                pos_i = {"convert_float4(pos_i_vec)" if precision == "fp16" else "pos_i_vec"};
+                vel_i = {"convert_float4(vel_i_vec)" if precision == "fp16" else "vel_i_vec"};
+            }}
             
             __local {vec_type} local_pos[TILE_SIZE];
             __local {ctype} local_mass[TILE_SIZE];
@@ -481,33 +496,39 @@ class GPUNBodyBenchmark:
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                     
-                    // 计算当前瓦片的贡献
-                    int tile_end = min(TILE_SIZE, n - tile * TILE_SIZE);
-                    
-                    #pragma unroll 2
-                    for (int k = 0; k < tile_end; k++) {{
-                        int j_idx = tile * TILE_SIZE + k;
-                        if (j_idx == gid) continue;
+                    // 计算当前瓦片的贡献（仅由有效粒子计算）
+                    if (valid_particle) {{
+                        int tile_end = min(TILE_SIZE, n - tile * TILE_SIZE);
                         
-                        {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
-                        {accum_type} mass_j = local_mass[k];
-                        {accum_type}4 r_vec = pos_j - pos_i;
-                        {accum_type} r2 = r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z + SOFTENING;
-                        {accum_type} inv_r = rsqrt(r2);
-                        {accum_type} inv_r3 = inv_r * inv_r * inv_r;
-                        acc += mass_j * inv_r3 * r_vec;
+                        #pragma unroll 2
+                        for (int k = 0; k < tile_end; k++) {{
+                            int j_idx = tile * TILE_SIZE + k;
+                            if (j_idx == gid) continue;
+                            
+                            {accum_type}4 pos_j = {"convert_float4(local_pos[k])" if precision == "fp16" else "local_pos[k]"};
+                            {accum_type} mass_j = local_mass[k];
+                            {accum_type}4 r_vec = pos_j - pos_i;
+                            {accum_type} r2 = r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z + SOFTENING;
+                            {accum_type} inv_r = rsqrt(r2);
+                            {accum_type} inv_r3 = inv_r * inv_r * inv_r;
+                            acc += mass_j * inv_r3 * r_vec;
+                        }}
                     }}
                     barrier(CLK_LOCAL_MEM_FENCE);
                 }}
                 
-                // 更新速度和位置
-                vel_i += G * acc * dt;
-                pos_i += vel_i * dt;
+                // 更新速度和位置（仅由有效粒子更新）
+                if (valid_particle) {{
+                    vel_i += G * acc * dt;
+                    pos_i += vel_i * dt;
+                }}
             }}
             
-            // 写回结果
-            positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
-            velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            // 写回结果（仅由有效粒子写回）
+            if (valid_particle) {{
+                positions[gid] = {"convert_half4(pos_i)" if precision == "fp16" else "pos_i"};
+                velocities[gid] = {"convert_half4(vel_i)" if precision == "fp16" else "vel_i"};
+            }}
         }}
         '''
         return kernel
@@ -822,7 +843,8 @@ class GPUNBodyBenchmark:
                     event.wait()
                     self.queue.finish()
                     
-                    chunk_time = time.perf_counter() - chunk_start
+                    chunk_end = time.perf_counter()
+                    chunk_time = chunk_end - chunk_start
                     if chunk_time > 1.0:
                         self._debug_print(f"    Chunk {chunk_count} slow: {chunk_time:.2f}s", "WARN")
                     
