@@ -13,11 +13,16 @@ import platform
 import subprocess
 import numpy as np
 import json
+import os
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional, Union
 import dataclasses
 from dataclasses import dataclass, field
 import warnings
+
+# Set default environment variables for logging
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')  # Default: only show warnings and errors
+os.environ.setdefault('JAX_LOG_LEVEL', 'WARNING')   # Default: warning level
 
 # Suppress specific deprecation warnings
 warnings.filterwarnings('ignore', 
@@ -26,6 +31,13 @@ warnings.filterwarnings('ignore',
 warnings.filterwarnings('ignore',
                        category=UserWarning,
                        message='pkg_resources is deprecated')
+# Filter experimental warnings
+warnings.filterwarnings('ignore', 
+                       message='.*experimental.*')
+warnings.filterwarnings('ignore', 
+                       message='.*Experimental.*')
+warnings.filterwarnings('ignore',
+                       message='All log messages before absl::InitializeLog')
 
 
 def print_section(title: str, width: int = 70) -> None:
@@ -914,16 +926,83 @@ def export_results_to_json(system_info: Dict, packages: Dict,
         "metal_info": metal_info,
         "jax_info": jax_info,
         "benchmark_results": benchmark_results,
+        "command_line_args": sys.argv[1:],  # Add command line arguments for record
     }
     
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(export_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"\nResults exported to: {output_file}")
+    try:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"\nResults exported to: {output_file}")
+        if os.path.getsize(output_file) > 0:
+            print(f"File size: {os.path.getsize(output_file)/1024:.2f} KB")
+    except Exception as e:
+        print(f"Error exporting results: {e}")
 
 
 def main():
     """Main function to run all checks and benchmarks."""
+    # Add command line argument parsing
+    import argparse
+    import logging
+    
+    parser = argparse.ArgumentParser(
+        description="Metal & JAX Environment Detection and Performance Benchmark",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                          # Default mode: show important info, filter experimental warnings
+  %(prog)s --verbose               # Verbose mode: show all logs and warnings
+  %(prog)s --quiet                 # Quiet mode: only show essential output and errors
+  %(prog)s --verbose --output results.json  # Verbose mode with output to JSON
+        """
+    )
+    
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable verbose output, show all warnings and logs"
+    )
+    
+    parser.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Enable quiet mode, only show essential output and errors"
+    )
+    
+    parser.add_argument(
+        "--output", type=str,
+        help="Output JSON file path"
+    )
+    
+    args = parser.parse_args()
+    
+    # Check mutually exclusive arguments
+    if args.verbose and args.quiet:
+        print("Error: Cannot specify both --verbose and --quiet")
+        return
+    
+    # Set logging level based on arguments
+    if args.verbose:
+        # Verbose mode: show all logs and warnings
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
+        os.environ['JAX_LOG_LEVEL'] = 'INFO'
+        warnings.resetwarnings()  # Reset all warning filters
+        logging.basicConfig(level=logging.INFO)
+        print(f"Verbose mode enabled - showing all logs and warnings")
+    elif args.quiet:
+        # Quiet mode: only show errors
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+        os.environ['JAX_LOG_LEVEL'] = 'ERROR'
+        # Enable all warning filters
+        warnings.filterwarnings('ignore')
+        logging.basicConfig(level=logging.ERROR)
+    else:
+        # Default mode: filter known harmless warnings
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+        os.environ['JAX_LOG_LEVEL'] = 'WARNING'
+        # Only filter experimental warnings, keep other warnings
+        logging.basicConfig(level=logging.WARNING)
+        print(f"Default mode - filtering experimental warnings only")
+    
     print_section("Metal & JAX Environment Detection and Performance Benchmark")
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -1066,13 +1145,20 @@ def main():
     # Print final summary
     print_summary(system_info, packages, metal_info, jax_info, benchmark_results)
     
-    # Ask about exporting results
+    # Handle exporting results
     if benchmark_results:
-        response = input(f"\nExport results to JSON file? [y/N]: ").strip().lower()
-        if response == 'y':
-            output_file = f"metal_jax_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            export_results_to_json(system_info, packages, metal_info, jax_info, 
+        # If output file is specified via command line, export directly
+        if args.output:
+            output_file = args.output
+            export_results_to_json(system_info, packages, metal_info, jax_info,
                                  benchmark_results, output_file)
+        elif not args.quiet:  # Don't ask in quiet mode
+            response = input(f"\nExport results to JSON file? [y/N]: ").strip().lower()
+            if response == 'y':
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                output_file = f"metal_jax_benchmark_{timestamp}.json"
+                export_results_to_json(system_info, packages, metal_info, jax_info,
+                                     benchmark_results, output_file)
     
     print_section("Benchmark Complete")
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
