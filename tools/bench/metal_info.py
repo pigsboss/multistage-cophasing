@@ -17,6 +17,15 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional, Union
 import dataclasses
 from dataclasses import dataclass, field
+import warnings
+
+# Suppress specific deprecation warnings
+warnings.filterwarnings('ignore', 
+                       category=DeprecationWarning,
+                       message='jax.lib.xla_bridge.get_backend is deprecated')
+warnings.filterwarnings('ignore',
+                       category=UserWarning,
+                       message='pkg_resources is deprecated')
 
 
 def print_section(title: str, width: int = 70) -> None:
@@ -157,14 +166,24 @@ def check_metal_installation() -> Dict[str, Any]:
     except ImportError:
         packages['jax'] = {'available': False, 'error': 'Not installed'}
     
-    # Check JAX Metal backend
+    # Check JAX Metal backend - use case-insensitive comparison
     try:
         import jax
-        backend = jax.lib.xla_bridge.get_backend().platform
+        
+        # Use new API if available, fall back to old API
+        try:
+            # New API in jax >= 0.5.0
+            from jax.extend import backend
+            backend_obj = backend.get_backend()
+        except (ImportError, AttributeError):
+            # Fall back to old API
+            backend_obj = jax.lib.xla_bridge.get_backend()
+        
+        backend_platform = backend_obj.platform
         packages['jax_backend'] = {
-            'platform': backend,
+            'platform': backend_platform,
             'available': True,
-            'is_metal': backend == 'metal'
+            'is_metal': backend_platform.lower() == 'metal'
         }
     except Exception as e:
         packages['jax_backend'] = {
@@ -182,19 +201,30 @@ def check_metal_installation() -> Dict[str, Any]:
     except ImportError:
         packages['jaxlib'] = {'available': False, 'error': 'Not installed'}
     
-    # Check if we have jax-metal package
+    # Check if we have jax-metal package using importlib.metadata
     try:
-        import pkg_resources
+        # Try importlib.metadata first (Python 3.8+)
+        import importlib.metadata
         try:
-            jax_metal_version = pkg_resources.get_distribution("jax-metal").version
+            jax_metal_version = importlib.metadata.version("jax-metal")
             packages['jax_metal'] = {
                 'version': jax_metal_version,
                 'available': True
             }
-        except pkg_resources.DistributionNotFound:
-            packages['jax_metal'] = {'available': False, 'error': 'Not installed'}
+        except importlib.metadata.PackageNotFoundError:
+            # Fall back to pkg_resources
+            try:
+                import pkg_resources
+                jax_metal_version = pkg_resources.get_distribution("jax-metal").version
+                packages['jax_metal'] = {
+                    'version': jax_metal_version,
+                    'available': True
+                }
+            except pkg_resources.DistributionNotFound:
+                packages['jax_metal'] = {'available': False, 'error': 'Not installed'}
     except ImportError:
-        packages['jax_metal'] = {'available': False, 'error': 'pkg_resources not available'}
+        # Both importlib.metadata and pkg_resources not available
+        packages['jax_metal'] = {'available': False, 'error': 'Package metadata not available'}
     
     # Check NumPy
     try:
@@ -311,12 +341,19 @@ def get_jax_device_info() -> Dict[str, Any]:
         import jax
         import jax.numpy as jnp
         
-        # Get backend info
-        backend = jax.lib.xla_bridge.get_backend()
+        # Get backend info - use new API if available
+        try:
+            # New API in jax >= 0.5.0
+            from jax.extend import backend
+            backend_obj = backend.get_backend()
+        except (ImportError, AttributeError):
+            # Fall back to old API
+            backend_obj = jax.lib.xla_bridge.get_backend()
+        
         info['backend'] = {
-            'platform': backend.platform,
-            'platform_version': backend.platform_version,
-            'device_count': backend.device_count(),
+            'platform': backend_obj.platform,
+            'platform_version': backend_obj.platform_version,
+            'device_count': backend_obj.device_count(),
         }
         
         # Get device info
@@ -346,8 +383,8 @@ def get_jax_device_info() -> Dict[str, Any]:
         info['devices'] = device_list
         info['device_count'] = len(devices)
         
-        # Check if Metal is being used
-        info['using_metal'] = backend.platform == 'metal'
+        # Check if Metal is being used - case-insensitive comparison
+        info['using_metal'] = backend_obj.platform.lower() == 'metal'
         
         # Test device capabilities
         try:
@@ -726,10 +763,13 @@ def run_jax_benchmarks(device_idx: int = 0) -> Dict[str, Any]:
     
     results['device_info'] = jax_info
     
-    # Check if using Metal
-    if not jax_info.get('using_metal', False):
+    # Check if using Metal - use case-insensitive comparison
+    using_metal = jax_info.get('using_metal', False)
+    if not using_metal:
         print("  Note: JAX is not using Metal backend")
         results['backend_warning'] = 'Not using Metal backend'
+    else:
+        print("  Note: JAX is using Metal backend")
     
     # Run benchmarks
     print("  Running vector operations benchmark...")
@@ -796,6 +836,7 @@ def print_summary(system_info: Dict, packages: Dict,
             platform_name = backend_info.get('platform', 'Unknown')
             summary_points.append(f"• JAX Backend: {platform_name}")
             
+            # Fix: use case-insensitive comparison
             if backend_info.get('is_metal', False):
                 summary_points.append(f"• JAX-Metal: Active")
             else:
@@ -846,7 +887,10 @@ def print_summary(system_info: Dict, packages: Dict,
     # Recommendations
     print("\nRecommendations:")
     if platform.system() == 'Darwin':
-        if packages.get('jax_backend', {}).get('is_metal', False):
+        backend_info = packages.get('jax_backend', {})
+        # Fix: use case-insensitive comparison
+        is_metal = backend_info.get('is_metal', False)
+        if is_metal:
             print("1. JAX-Metal is active. Good for macOS GPU acceleration.")
         else:
             print("1. Consider enabling JAX-Metal for better GPU performance on macOS.")
