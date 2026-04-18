@@ -1290,7 +1290,7 @@ class GPUBaseCapability:
         job = {
             "name": name,
             "tool": "gpu_traj_cl.py",
-            "task": "trajectory",
+            "task": "Trajectory Integral (GPU)",
             "scale_type": "trajectory",
             "base_args": [
                 "--precision", config.precision,
@@ -1311,7 +1311,7 @@ class GPUBaseCapability:
         job = {
             "name": name,
             "tool": "gpu_mc_cl.py",
-            "task": "monte_carlo",
+            "task": "Monte Carlo Pi (GPU Batched)",
             "scale_type": "monte_carlo",
             "base_args": [
                 "--precision", config.precision,
@@ -1339,7 +1339,7 @@ class GPUBaseCapability:
         job = {
             "name": name,
             "tool": "gpu_nbody_cl.py",
-            "task": "nbody",
+            "task": "N-Body Simulation (GPU)",
             "scale_type": "nbody",
             "base_args": [
                 "--precision", config.precision,
