@@ -113,8 +113,8 @@ def _integrate_single_path(steps: int, key: jax.Array) -> jnp.float32:
 
         return (x, integral), None
 
-    _, integral = jax.lax.scan(body_fn, (0.0, 0.0), jnp.arange(steps))
-    return integral
+    carry, _ = jax.lax.scan(body_fn, (0.0, 0.0), jnp.arange(steps))
+    return carry[1]
 
 
 _vmap_integrate = jax.vmap(_integrate_single_path, in_axes=(None, 0))
