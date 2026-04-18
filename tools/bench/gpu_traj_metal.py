@@ -29,6 +29,7 @@ except ImportError:
 # ---------- shared result container (identical to cpu.py) ---------- #
 @dataclass
 class BenchmarkResult:
+    """Benchmark result data class"""
     task_name: str
     implementation: str
     execution_times: List[float]  # seconds
@@ -75,7 +76,7 @@ class BenchmarkResult:
 
 
 # ---------- core computation – single path, JAX jit ---------- #
-@jax.jit
+@jax.jit(static_argnames=('steps',))
 def _integrate_single_path(steps: int, key: jax.Array) -> jnp.float32:
     """Integrate a single path; 100 % match to OpenCL kernel logic."""
     def body_fn(carry, step):
