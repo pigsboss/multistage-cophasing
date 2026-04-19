@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-JAX Compilation System and Hardware Backend Detection
+JAX Compilation Stack and Hardware Backend Detection
 ======================================================================
 Detects JAX compilation system, XLA runtime, PJRT plugins for various
-hardware accelerators (NVIDIA GPU, Intel Arc GPU, AMD GPU, Apple Silicon,
-Apple Metal GPU). Displays available compute devices for JIT acceleration.
+hardware accelerators. Displays available compute devices for JIT acceleration.
 All output is in English per MCPC coding standards.
 """
 
@@ -18,8 +17,7 @@ import warnings
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass, field
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import io
+from contextlib import contextmanager
 
 # Suppress noisy warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -29,26 +27,11 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # Environment variables for JAX/XLA logging control
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 os.environ.setdefault('JAX_LOG_LEVEL', 'WARNING')
-os.environ.setdefault('XLA_FLAGS', '--xla_cpu_enable_fast_math=false')
-
-
-def print_section(title: str, width: int = 70) -> None:
-    """Print a formatted section title."""
-    print(f"\n{'=' * width}")
-    print(f" {title.upper()}")
-    print(f"{'=' * width}")
-
-
-def print_subsection(title: str) -> None:
-    """Print a formatted subsection title."""
-    print(f"\n{'-' * 50}")
-    print(f" {title}")
-    print(f"{'-' * 50}")
 
 
 @contextmanager
-def suppress_jax_warnings():
-    """Context manager to suppress JAX initialization warnings."""
+def suppress_stderr():
+    """Suppress stderr output (for C++ library logs)."""
     with open(os.devnull, 'w') as devnull:
         old_stderr = os.dup(2)
         os.dup2(devnull.fileno(), 2)
@@ -65,13 +48,13 @@ class BackendInfo:
     name: str
     platform: str
     available: bool
+    device_kind: str = "Unknown"
     version: str = "Unknown"
     device_count: int = 0
     devices: List[Dict[str, Any]] = field(default_factory=list)
-    pjrt_plugin: Optional[str] = None
-    xla_flags: List[str] = field(default_factory=list)
+    pjrt_source: str = ""  # Package providing the plugin
+    priority: int = 0  # Lower = higher priority
     error: Optional[str] = None
-    priority: int = 0  # Lower number = higher priority for auto-selection
 
 
 def get_system_info() -> Dict[str, str]:
@@ -79,581 +62,297 @@ def get_system_info() -> Dict[str, str]:
     info = {
         'python_version': platform.python_version(),
         'platform': platform.system(),
-        'platform_release': platform.release(),
         'architecture': platform.machine(),
-        'processor': platform.processor() or 'Unknown',
+        'cpu_cores': 'Unknown',
+        'total_ram_gb': 'Unknown',
     }
     
-    # OS-specific info
-    if platform.system() == 'Darwin':
-        info['mac_ver'] = platform.mac_ver()[0]
-        if platform.machine() == 'arm64':
-            info['apple_silicon'] = 'Yes'
-        else:
-            info['apple_silicon'] = 'No (Intel)'
-    elif platform.system() == 'Linux':
-        try:
-            with open('/etc/os-release', 'r') as f:
-                for line in f:
-                    if line.startswith('PRETTY_NAME='):
-                        info['linux_distro'] = line.split('=', 1)[1].strip().strip('"')
-                        break
-        except:
-            info['linux_distro'] = 'Unknown'
-    elif platform.system() == 'Windows':
-        info['windows_ver'] = platform.version()
-    
-    # Get memory information if available
     try:
         import psutil
         mem = psutil.virtual_memory()
         info['total_ram_gb'] = f"{mem.total / (1024**3):.2f}"
-        info['available_ram_gb'] = f"{mem.available / (1024**3):.2f}"
-        
-        # Get swap memory separately
-        swap = psutil.swap_memory()
-        info['swap_total_gb'] = f"{swap.total / (1024**3):.2f}" if swap.total > 0 else '0.00'
-        
-        # CPU info
-        info['cpu_cores'] = psutil.cpu_count(logical=False) or 'Unknown'
-        info['cpu_threads'] = psutil.cpu_count(logical=True) or 'Unknown'
-        cpu_freq = psutil.cpu_freq()
-        if cpu_freq:
-            info['cpu_freq_mhz'] = f"{cpu_freq.current:.1f}"
-    except ImportError:
-        info['total_ram_gb'] = 'Unknown (install psutil)'
-        info['available_ram_gb'] = 'Unknown (install psutil)'
-        info['swap_total_gb'] = 'Unknown (install psutil)'
-    except Exception as e:
-        # Handle any other exceptions gracefully
-        info['total_ram_gb'] = f'Error: {e}'
-        info['available_ram_gb'] = f'Error: {e}'
-        info['swap_total_gb'] = f'Error: {e}'
+        info['cpu_cores'] = str(psutil.cpu_count(logical=False) or 'Unknown')
+    except:
+        pass
+    
+    if platform.system() == 'Darwin':
+        info['macos_version'] = platform.mac_ver()[0]
+        info['apple_silicon'] = 'Yes' if platform.machine() == 'arm64' else 'No'
     
     return info
 
 
-def check_jax_installation() -> Dict[str, Any]:
-    """Check JAX core installation and dependencies."""
-    info = {
-        'jax_available': False,
-        'jax_version': None,
-        'jaxlib_version': None,
-        'xla_build_info': {},
-        'dependencies': {},
+def detect_jax_stack() -> Dict[str, Any]:
+    """Detect JAX compilation stack: JAX → XLA → PJRT → Hardware."""
+    stack = {
+        'jax': {'available': False, 'version': None},
+        'xla': {'backend': None, 'platform': None, 'x64_enabled': False},
+        'pjrt_plugins': {},
+        'devices': [],
     }
     
     try:
-        # First try to import without triggering warnings
-        with suppress_jax_warnings():
-            import jax
-            import jaxlib
-        
-        info['jax_available'] = True
-        info['jax_version'] = jax.__version__
-        
-        # Get jaxlib version
-        try:
-            info['jaxlib_version'] = jaxlib.__version__
-        except:
-            info['jaxlib_version'] = 'Unknown'
-        
-        # Get XLA build info
-        try:
-            from jax.lib import xla_bridge
-            info['xla_build_info'] = {
-                'backend': xla_bridge.get_backend().platform,
-                'xla_version': getattr(xla_bridge, 'XLA_VERSION', 'Unknown'),
-            }
-        except:
-            pass
-        
-        # Check for GPU-related packages
-        try:
-            import tensorflow as tf
-            info['dependencies']['tensorflow'] = {
-                'version': tf.__version__,
-                'available': True
-            }
-        except ImportError:
-            info['dependencies']['tensorflow'] = {'available': False}
-        
-        # Check for PyTorch (sometimes used with JAX)
-        try:
-            import torch
-            info['dependencies']['pytorch'] = {
-                'version': torch.__version__,
-                'cuda_available': torch.cuda.is_available() if hasattr(torch, 'cuda') else False,
-                'available': True
-            }
-        except ImportError:
-            info['dependencies']['pytorch'] = {'available': False}
-        
-        # Check for cuDNN
-        try:
-            result = subprocess.run(['whereis', 'cudnn'], capture_output=True, text=True, timeout=2)
-            if result.returncode == 0 and result.stdout.strip():
-                info['dependencies']['cudnn'] = {'available': True, 'path': result.stdout.strip()}
-            else:
-                info['dependencies']['cudnn'] = {'available': False}
-        except:
-            info['dependencies']['cudnn'] = {'available': False, 'error': 'Check failed'}
-        
-        # Check for NCCL
-        try:
-            result = subprocess.run(['whereis', 'nccl'], capture_output=True, text=True, timeout=2)
-            if result.returncode == 0 and result.stdout.strip():
-                info['dependencies']['nccl'] = {'available': True, 'path': result.stdout.strip()}
-            else:
-                info['dependencies']['nccl'] = {'available': False}
-        except:
-            info['dependencies']['nccl'] = {'available': False, 'error': 'Check failed'}
-        
-    except ImportError as e:
-        info['error'] = f'JAX not installed: {e}'
-    
-    return info
-
-
-def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
-    """Detect available PJRT plugins for different hardware."""
-    plugins = {}
-    
-    try:
-        with suppress_jax_warnings():
-            import jax
-        
-        # Get all devices
-        all_devices = jax.devices()
-        
-        # DEBUG: Print all devices for troubleshooting
-        print(f"\nDEBUG: Found {len(all_devices)} JAX devices:")
-        for i, d in enumerate(all_devices):
-            print(f"  Device {i}: platform='{d.platform}', kind='{d.device_kind}', id='{d.id}'")
-        
-        # CPU devices - use case-insensitive comparison
-        cpu_info = BackendInfo(
-            name='CPU',
-            platform='cpu',
-            available=False,
-            pjrt_plugin='Built-in CPU PJRT (jaxlib)',
-            priority=100
-        )
-        
-        cpu_devices = [d for d in all_devices if d.platform.lower() == 'cpu']
-        if cpu_devices:
-            cpu_info.available = True
-            cpu_info.device_count = len(cpu_devices)
-            cpu_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-            } for d in cpu_devices]
-        
-        plugins['cpu'] = cpu_info
-        
-        # Check for CUDA (NVIDIA GPU) - case-insensitive
-        cuda_info = BackendInfo(
-            name='NVIDIA GPU (CUDA)',
-            platform='cuda',
-            available=False,
-            pjrt_plugin='CUDA PJRT (via jax[cuda])',
-            priority=10
-        )
-        
-        cuda_devices = [d for d in all_devices if d.platform.lower() == 'cuda']
-        if cuda_devices:
-            cuda_info.available = True
-            cuda_info.device_count = len(cuda_devices)
-            cuda_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-                'memory': getattr(d, 'memory', 'Unknown'),
-            } for d in cuda_devices]
-            
-            # Try to get CUDA version
-            try:
-                from jax.lib import cuda
-                if hasattr(cuda, 'cuda_version'):
-                    cuda_info.version = str(cuda.cuda_version())
-            except:
-                pass
-        
-        plugins['cuda'] = cuda_info
-        
-        # Check for ROCm (AMD GPU) - case-insensitive
-        rocm_info = BackendInfo(
-            name='AMD GPU (ROCm)',
-            platform='rocm',
-            available=False,
-            pjrt_plugin='ROCm PJRT (via jax-rocm)',
-            priority=20
-        )
-        
-        rocm_devices = [d for d in all_devices if d.platform.lower() == 'rocm']
-        if rocm_devices:
-            rocm_info.available = True
-            rocm_info.device_count = len(rocm_devices)
-            rocm_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-            } for d in rocm_devices]
-        
-        plugins['rocm'] = rocm_info
-        
-        # Check for Metal (Apple GPU) - case-insensitive
-        metal_info = BackendInfo(
-            name='Apple Metal GPU',
-            platform='metal',
-            available=False,
-            pjrt_plugin='Metal PJRT (via jax-metal)',
-            priority=30
-        )
-        
-        metal_devices = [d for d in all_devices if d.platform.lower() == 'metal']
-        if metal_devices:
-            metal_info.available = True
-            metal_info.device_count = len(metal_devices)
-            metal_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-            } for d in metal_devices]
-        elif all_devices:
-            # If we have devices but none are marked as 'metal', check if any might be Metal
-            # Apple Silicon devices might show up as 'gpu' or other platform names
-            potential_metal = [d for d in all_devices 
-                              if any(keyword in d.device_kind.lower() 
-                                     for keyword in ['apple', 'm1', 'm2', 'm3', 'metal'])]
-            if potential_metal:
-                metal_info.available = True
-                metal_info.device_count = len(potential_metal)
-                metal_info.devices = [{
-                    'id': d.id,
-                    'kind': d.device_kind,
-                    'platform': d.platform,
-                } for d in potential_metal]
-                metal_info.notes = f"Detected as {potential_metal[0].platform}, assumed to be Metal"
-        
-        plugins['metal'] = metal_info
-        
-        # Check for TPU - case-insensitive
-        tpu_info = BackendInfo(
-            name='Google Cloud TPU',
-            platform='tpu',
-            available=False,
-            pjrt_plugin='TPU PJRT (via jax[tpu])',
-            priority=40
-        )
-        
-        tpu_devices = [d for d in all_devices if d.platform.lower() == 'tpu']
-        if tpu_devices:
-            tpu_info.available = True
-            tpu_info.device_count = len(tpu_devices)
-            tpu_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-            } for d in tpu_devices]
-        
-        plugins['tpu'] = tpu_info
-        
-        # Check for Intel GPU (via oneAPI/SYCL) - case-insensitive
-        intel_info = BackendInfo(
-            name='Intel GPU (Arc/Data Center)',
-            platform='intel',
-            available=False,
-            pjrt_plugin='Intel GPU PJRT (via intel-extension-for-jax)',
-            priority=50
-        )
-        
-        # Intel devices might appear under various platforms
-        intel_devices = []
-        for d in all_devices:
-            platform_lower = d.platform.lower()
-            device_kind_lower = d.device_kind.lower()
-            
-            if (platform_lower in ['gpu', 'sycl', 'opencl', 'intel'] and 
-                any(keyword in device_kind_lower for keyword in ['intel', 'arc', 'xe'])):
-                intel_devices.append(d)
-        
-        if intel_devices:
-            intel_info.available = True
-            intel_info.device_count = len(intel_devices)
-            intel_info.devices = [{
-                'id': d.id,
-                'kind': d.device_kind,
-                'platform': d.platform,
-            } for d in intel_devices]
-        
-        plugins['intel_gpu'] = intel_info
-        
-    except ImportError as e:
-        plugins['error'] = f'JAX not available: {e}'
-    
-    return plugins
-
-
-def get_xla_runtime_info() -> Dict[str, Any]:
-    """Get XLA runtime information and configuration."""
-    info = {
-        'xla_flags': [],
-        'compilation_cache': {},
-        'precision_config': {},
-        'optimization_flags': {},
-    }
-    
-    # Get XLA_FLAGS from environment
-    xla_flags = os.environ.get('XLA_FLAGS', '')
-    if xla_flags:
-        info['xla_flags'] = xla_flags.split()
-    
-    # Check compilation cache
-    cache_dir = os.environ.get('JAX_COMPILATION_CACHE_DIR', '')
-    if cache_dir:
-        info['compilation_cache'] = {
-            'enabled': True,
-            'directory': cache_dir,
-        }
-        # Check if directory exists and is writable
-        if os.path.exists(cache_dir):
-            info['compilation_cache']['exists'] = True
-            info['compilation_cache']['writable'] = os.access(cache_dir, os.W_OK)
-        else:
-            info['compilation_cache']['exists'] = False
-    else:
-        info['compilation_cache'] = {'enabled': False}
-    
-    try:
-        with suppress_jax_warnings():
-            import jax
-            
-            # Check precision configuration
-            info['precision_config'] = {
-                'float64_enabled': jax.config.x64_enabled,
-                'default_dtype': 'float64' if jax.config.x64_enabled else 'float32',
-            }
-            
-            # Check if running with debug mode
-            debug_mode = os.environ.get('JAX_DEBUG', '').lower() in ['1', 'true', 'yes']
-            info['debug_mode'] = debug_mode
-            
-            # Check JAX_TRACEBACK_FILTERING
-            traceback_filtering = os.environ.get('JAX_TRACEBACK_FILTERING', 'on')
-            info['traceback_filtering'] = traceback_filtering
-            
-    except ImportError:
-        info['error'] = 'JAX not available'
-    
-    return info
-
-
-def check_device_capabilities(backend_info: BackendInfo) -> Dict[str, Any]:
-    """Check capabilities of devices in a backend."""
-    capabilities = {
-        'precision_support': {},
-        'memory_info': {},
-        'compute_capability': {},
-    }
-    
-    if not backend_info.available or not backend_info.devices:
-        return capabilities
-    
-    try:
-        with suppress_jax_warnings():
+        with suppress_stderr():
             import jax
             import jax.numpy as jnp
             
-            # Test device with a simple computation
-            device = jax.devices(backend_info.platform)[0]
+            # 1. JAX Frontend Layer
+            stack['jax'] = {
+                'available': True,
+                'version': jax.__version__,
+                'python_version': platform.python_version(),
+            }
             
-            # Test different precisions
-            for dtype_name, dtype in [('fp32', jnp.float32), ('fp64', jnp.float64), ('fp16', jnp.float16)]:
-                try:
-                    # Create array with the dtype
-                    test_array = jnp.array([1.0, 2.0, 3.0], dtype=dtype)
-                    # Try a simple operation
-                    result = test_array * 2.0
-                    jax.block_until_ready(result)
-                    capabilities['precision_support'][dtype_name] = True
-                except:
-                    capabilities['precision_support'][dtype_name] = False
+            # 2. XLA Runtime Layer
+            backend = jax.lib.xla_bridge.get_backend()
+            stack['xla'] = {
+                'backend': backend.platform,
+                'platform_version': getattr(backend, 'platform_version', 'Unknown'),
+                'device_count': backend.device_count(),
+                'x64_enabled': jax.config.x64_enabled,
+                'default_dtype': 'float64' if jax.config.x64_enabled else 'float32',
+            }
             
-            # Test memory allocation (small test)
-            try:
-                test_size = 1024 * 1024  # 1MB
-                test_array = jnp.ones((test_size,), dtype=jnp.float32)
-                jax.block_until_ready(test_array)
-                capabilities['memory_info']['allocation_test'] = 'Passed'
-            except Exception as e:
-                capabilities['memory_info']['allocation_test'] = f'Failed: {e}'
+            # 3. PJRT Plugin Layer & Hardware Devices
+            all_devices = jax.devices()
+            stack['devices'] = []
             
-            # Test JIT compilation
-            try:
-                @jax.jit
-                def test_func(x):
-                    return x * 2.0 + 1.0
-                
-                test_input = jnp.array([1.0, 2.0, 3.0])
-                result = test_func(test_input)
-                jax.block_until_ready(result)
-                capabilities['jit_compilation'] = 'Working'
-            except Exception as e:
-                capabilities['jit_compilation'] = f'Failed: {e}'
+            for device in all_devices:
+                dev_info = {
+                    'id': device.id,
+                    'platform': device.platform,
+                    'kind': device.device_kind,
+                    'local_hardware_id': getattr(device, 'local_hardware_id', None),
+                }
+                stack['devices'].append(dev_info)
+            
+            # Identify backend plugins by platform
+            platforms = {d.platform.lower(): d for d in all_devices}
+            
+            # Metal (Apple)
+            if 'metal' in platforms:
+                dev = platforms['metal']
+                stack['pjrt_plugins']['metal'] = BackendInfo(
+                    name='Apple Metal GPU',
+                    platform='metal',
+                    available=True,
+                    device_kind=dev.device_kind,
+                    pjrt_source='jax-metal',
+                    priority=10
+                )
+            
+            # CUDA (NVIDIA)
+            if 'cuda' in platforms:
+                dev = platforms['cuda']
+                stack['pjrt_plugins']['cuda'] = BackendInfo(
+                    name='NVIDIA GPU (CUDA)',
+                    platform='cuda',
+                    available=True,
+                    device_kind=dev.device_kind,
+                    pjrt_source='jax[cuda]',
+                    priority=10
+                )
+            
+            # ROCm (AMD)
+            if 'rocm' in platforms:
+                dev = platforms['rocm']
+                stack['pjrt_plugins']['rocm'] = BackendInfo(
+                    name='AMD GPU (ROCm)',
+                    platform='rocm',
+                    available=True,
+                    device_kind=dev.device_kind,
+                    pjrt_source='jax-rocm',
+                    priority=10
+                )
+            
+            # CPU (Always available as fallback)
+            if 'cpu' in platforms:
+                dev = platforms['cpu']
+                stack['pjrt_plugins']['cpu'] = BackendInfo(
+                    name='CPU (Host)',
+                    platform='cpu',
+                    available=True,
+                    device_kind=dev.device_kind,
+                    pjrt_source='jaxlib (built-in)',
+                    priority=100
+                )
+            
+            # TPU
+            if 'tpu' in platforms:
+                dev = platforms['tpu']
+                stack['pjrt_plugins']['tpu'] = BackendInfo(
+                    name='Google Cloud TPU',
+                    platform='tpu',
+                    available=True,
+                    device_kind=dev.device_kind,
+                    pjrt_source='jax[tpu]',
+                    priority=5
+                )
+            
+            # Intel GPU
+            intel_devices = [d for d in all_devices 
+                           if any(x in d.device_kind.lower() for x in ['intel', 'arc', 'xe'])]
+            if intel_devices:
+                stack['pjrt_plugins']['intel'] = BackendInfo(
+                    name='Intel GPU',
+                    platform=intel_devices[0].platform,
+                    available=True,
+                    device_kind=intel_devices[0].device_kind,
+                    pjrt_source='intel-extension-for-jax',
+                    priority=20
+                )
+            
+    except ImportError:
+        stack['error'] = 'JAX not installed'
     
-    except Exception as e:
-        capabilities['error'] = f'Capability check failed: {e}'
-    
-    return capabilities
+    return stack
 
 
-def print_backend_summary(plugins: Dict[str, BackendInfo]) -> None:
-    """Print summary of available backends."""
-    print_section("Available JAX Backends for JIT Acceleration")
+def print_hierarchy(stack: Dict[str, Any], verbose: bool = False) -> None:
+    """Print JAX compilation stack in hierarchical format."""
     
-    # Filter out non-BackendInfo objects (like error strings)
-    backend_objects = []
-    for p in plugins.values():
-        if isinstance(p, BackendInfo):
-            backend_objects.append(p)
-        elif isinstance(p, str):
-            # If there's a string-type error, print it
-            print(f"Error detected: {p}")
+    print("\n┌─────────────────────────────────────────────────────────────────┐")
+    print("│              JAX COMPILATION STACK                              │")
+    print("└─────────────────────────────────────────────────────────────────┘")
     
-    available_backends = [p for p in backend_objects if p.available]
-    unavailable_backends = [p for p in backend_objects if not p.available]
-    
-    if available_backends:
-        print("\n✓ Active Backends (Ready for JIT Compilation):")
-        for backend in sorted(available_backends, key=lambda x: x.priority):
-            print(f"\n  {backend.name}:")
-            print(f"    Platform: {backend.platform}")
-            print(f"    Devices: {backend.device_count}")
-            if backend.pjrt_plugin:
-                print(f"    PJRT Plugin: {backend.pjrt_plugin}")
-            
-            # List devices
-            for i, device in enumerate(backend.devices[:3]):  # Show first 3 devices
-                device_str = f"      [{i}] {device.get('kind', 'Unknown')}"
-                if 'memory' in device and device['memory'] != 'Unknown':
-                    if isinstance(device['memory'], (int, float)):
-                        mem_gb = device['memory'] / (1024**3)
-                        device_str += f" ({mem_gb:.2f} GB)"
-                print(device_str)
-            
-            if backend.device_count > 3:
-                print(f"      ... and {backend.device_count - 3} more devices")
-    
-    if unavailable_backends:
-        print("\n✗ Unavailable Backends (Install Required Plugins):")
-        for backend in unavailable_backends:
-            print(f"\n  {backend.name}:")
-            if backend.error:
-                print(f"    Reason: {backend.error}")
-            else:
-                print(f"    Install plugin: {backend.pjrt_plugin or 'Check installation'}")
-
-
-def print_installation_instructions(plugins: Dict[str, BackendInfo], 
-                                   system_info: Dict[str, str]) -> None:
-    """Print installation instructions for missing backends."""
-    print_section("Installation Instructions for Missing Backends")
-    
-    platform_system = system_info.get('platform', '').lower()
-    
-    instructions = []
-    
-    # CPU backend (should always be available if JAX is installed)
-    if not plugins.get('cpu', BackendInfo('', '', False)).available:
-        instructions.append("• CPU Backend: Install JAX core - pip install jax jaxlib")
-    
-    # CUDA backend
-    cuda_backend = plugins.get('cuda')
-    if cuda_backend and not cuda_backend.available:
-        if platform_system in ['linux', 'windows']:
-            instructions.append("• NVIDIA CUDA: Install CUDA-enabled JAX - pip install \"jax[cuda12]\"")
-            instructions.append("  PJRT Plugin: CUDA PJRT (via jaxlib-cuda)")
-            instructions.append("  Requires: CUDA 11.8/12.x, cuDNN 8.6+, NCCL 2.16+")
-            instructions.append("  Verify: nvidia-smi shows compatible GPU")
-        else:
-            instructions.append("• NVIDIA CUDA: Only available on Linux/Windows with NVIDIA GPU")
-    
-    # Metal backend
-    metal_backend = plugins.get('metal')
-    if metal_backend and not metal_backend.available:
-        if platform_system == 'darwin' and system_info.get('apple_silicon') == 'Yes':
-            instructions.append("• Apple Metal: Install jax-metal - pip install jax-metal")
-            instructions.append("  PJRT Plugin: Metal PJRT (via jax-metal)")
-            instructions.append("  Note: Only for Apple Silicon (M1/M2/M3) GPUs")
-        else:
-            instructions.append("• Apple Metal: Requires macOS with Apple Silicon GPU")
-    
-    # ROCm backend
-    rocm_backend = plugins.get('rocm')
-    if rocm_backend and not rocm_backend.available:
-        if platform_system == 'linux':
-            instructions.append("• AMD ROCm: Install ROCm-enabled JAX - pip install jax-rocm")
-            instructions.append("  PJRT Plugin: ROCm PJRT (via jax-rocm)")
-            instructions.append("  Requires: ROCm 5.7+, compatible AMD GPU (RDNA2/RDNA3)")
-        else:
-            instructions.append("• AMD ROCm: Only available on Linux with AMD GPU")
-    
-    # Intel GPU backend
-    intel_backend = plugins.get('intel_gpu')
-    if intel_backend and not intel_backend.available:
-        instructions.append("• Intel GPU: Install Intel Extension for JAX")
-        instructions.append("  PJRT Plugin: Intel GPU PJRT (via intel-extension-for-jax)")
-        instructions.append("  Available for: Intel Arc, Data Center GPU Max/Series")
-        instructions.append("  Installation: See https://github.com/intel/intel-extension-for-jax")
-    
-    # TPU backend
-    tpu_backend = plugins.get('tpu')
-    if tpu_backend and not tpu_backend.available:
-        instructions.append("• Google TPU: Requires Google Cloud TPU access")
-        instructions.append("  PJRT Plugin: TPU PJRT (via jax[tpu])")
-        instructions.append("  Installation: pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html")
-    
-    if instructions:
-        for instruction in instructions:
-            print(instruction)
+    # Layer 1: JAX Frontend
+    jax_info = stack.get('jax', {})
+    if jax_info.get('available'):
+        print("\n▶ Layer 1: JAX Frontend (Python API)")
+        print(f"  Version: {jax_info.get('version')}")
+        if verbose:
+            print(f"  Python: {jax_info.get('python_version')}")
     else:
-        print("All desired backends are available. No installation needed.")
-
-
-def export_results_to_json(system_info: Dict, jax_info: Dict, 
-                          plugins: Dict[str, BackendInfo], 
-                          xla_info: Dict, output_file: str) -> None:
-    """Export detection results to JSON file."""
-    export_data = {
-        "timestamp": datetime.now().isoformat(),
-        "system_info": system_info,
-        "jax_installation": jax_info,
-        "backends": {},
-        "xla_runtime": xla_info,
-    }
+        print("\n▶ Layer 1: JAX Frontend [NOT INSTALLED]")
+        print("  Install: pip install jax jaxlib")
+        return
     
-    for name, plugin in plugins.items():
-        export_data["backends"][name] = {
-            "name": plugin.name,
-            "platform": plugin.platform,
-            "available": plugin.available,
-            "device_count": plugin.device_count,
-            "devices": plugin.devices,
-            "pjrt_plugin": plugin.pjrt_plugin,
-            "error": plugin.error,
-        }
+    # Layer 2: XLA Runtime
+    xla_info = stack.get('xla', {})
+    print("\n▶ Layer 2: XLA Runtime (Accelerated Linear Algebra)")
+    if xla_info.get('backend'):
+        print(f"  Active Backend: {xla_info['backend'].upper()}")
+        print(f"  Platform Version: {xla_info.get('platform_version', 'Unknown')}")
+        print(f"  Default Precision: {xla_info.get('default_dtype', 'float32')}")
+        if verbose:
+            print(f"  X64 (Float64) Support: {'Enabled' if xla_info.get('x64_enabled') else 'Disabled'}")
+            print(f"  Device Count: {xla_info.get('device_count', 0)}")
     
-    try:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(export_data, f, indent=2, ensure_ascii=False)
+    # Layer 3: PJRT Plugins
+    plugins = stack.get('pjrt_plugins', {})
+    active_plugins = [p for p in plugins.values() if p.available]
+    
+    print("\n▶ Layer 3: PJRT Plugins (Hardware Interface)")
+    if active_plugins:
+        sorted_plugins = sorted(active_plugins, key=lambda x: x.priority)
+        for plugin in sorted_plugins:
+            status = "✓ ACTIVE" if plugin.priority <= 30 else "○ Available"
+            print(f"  [{status}] {plugin.name}")
+            print(f"           Source: {plugin.pjrt_source}")
+            print(f"           Platform: {plugin.platform}")
+            if plugin.device_kind and plugin.device_kind != 'Unknown':
+                print(f"           Hardware: {plugin.device_kind}")
+    else:
+        print("  No active hardware plugins detected")
+    
+    # Layer 4: Compute Devices (JIT-ready)
+    devices = stack.get('devices', [])
+    if devices:
+        print("\n▶ Layer 4: Compute Devices (JIT-ready)")
+        for i, dev in enumerate(devices[:4]):
+            platform = dev['platform']
+            kind = dev['kind']
+            
+            accel_marker = "[CPU]" if platform.lower() == 'cpu' else "[GPU]"
+            print(f"  {accel_marker} {kind} (platform={platform}, id={dev['id']})")
+            if verbose and dev.get('local_hardware_id') is not None:
+                print(f"           Hardware ID: {dev['local_hardware_id']}")
         
-        print(f"\n✓ Results exported to: {output_file}")
-        file_size = os.path.getsize(output_file) / 1024
-        print(f"  File size: {file_size:.2f} KB")
-    except Exception as e:
-        print(f"✗ Error exporting results: {e}")
+        if len(devices) > 4:
+            print(f"  ... and {len(devices) - 4} more devices")
+
+
+def print_quick_summary(stack: Dict[str, Any]) -> None:
+    """Print quick summary of available compute capabilities."""
+    plugins = stack.get('pjrt_plugins', {})
+    xla_info = stack.get('xla', {})
+    
+    accelerators = [p for p in plugins.values() 
+                   if p.available and p.platform.lower() != 'cpu']
+    
+    print("\n" + "="*70)
+    print("SUMMARY")
+    print("="*70)
+    
+    if accelerators:
+        best = min(accelerators, key=lambda x: x.priority)
+        print(f"✓ Primary Accelerator: {best.name} ({best.device_kind})")
+        print(f"✓ XLA Backend: {xla_info.get('backend', 'Unknown')}")
+        print(f"✓ JIT Compilation: Ready")
+        
+        other = [p for p in accelerators if p.platform != best.platform]
+        if other:
+            print(f"✓ Additional Backends: {', '.join(p.name for p in other)}")
+    else:
+        cpu_plugin = plugins.get('cpu')
+        if cpu_plugin and cpu_plugin.available:
+            print(f"✓ Available: CPU only ({cpu_plugin.device_kind})")
+            print("⚠ No GPU/Accelerator detected")
+        else:
+            print("✗ No compute backends available")
+    
+    print("\nQuick Start:")
+    print("  >>> import jax")
+    print("  >>> jax.devices()  # List available devices")
+    if accelerators:
+        best = min(accelerators, key=lambda x: x.priority)
+        if best.platform.lower() == 'metal':
+            print("  # JAX-Metal active: Use float32 for best performance")
+        elif best.platform.lower() == 'cuda':
+            print("  # JAX-CUDA active: GPU acceleration ready")
+    print("="*70)
+
+
+def print_verbose_details(stack: Dict[str, Any], system_info: Dict) -> None:
+    """Print verbose system and configuration details."""
+    print("\n" + "="*70)
+    print("SYSTEM ENVIRONMENT (Verbose)")
+    print("="*70)
+    
+    print(f"Operating System: {system_info.get('platform', 'Unknown')}")
+    if 'macos_version' in system_info:
+        print(f"macOS Version: {system_info['macos_version']}")
+        print(f"Apple Silicon: {system_info.get('apple_silicon', 'Unknown')}")
+    print(f"CPU Cores: {system_info.get('cpu_cores', 'Unknown')}")
+    print(f"Total RAM: {system_info.get('total_ram_gb', 'Unknown')} GB")
+    
+    xla_info = stack.get('xla', {})
+    print("\nXLA Configuration:")
+    print(f"  XLA_FLAGS: {os.environ.get('XLA_FLAGS', 'Not set')}")
+    print(f"  TF_CPP_MIN_LOG_LEVEL: {os.environ.get('TF_CPP_MIN_LOG_LEVEL', 'Not set')}")
+    cache_dir = os.environ.get('JAX_COMPILATION_CACHE_DIR', '')
+    print(f"  Compilation Cache: {'Enabled' if cache_dir else 'Disabled'}")
+    
+    print("\n" + "="*70)
+    print("INSTALLATION GUIDE")
+    print("="*70)
+    
+    plugins = stack.get('pjrt_plugins', {})
+    active_platforms = {p.platform.lower() for p in plugins.values() if p.available}
+    
+    if 'metal' not in active_platforms and system_info.get('apple_silicon') == 'Yes':
+        print("• Apple Metal: pip install jax-metal")
+    if 'cuda' not in active_platforms:
+        print("• NVIDIA CUDA: pip install 'jax[cuda12]' (Linux/Windows)")
+    if 'rocm' not in active_platforms:
+        print("• AMD ROCm: pip install jax-rocm (Linux only)")
+    if 'tpu' not in active_platforms:
+        print("• Google TPU: pip install jax[tpu] (GCP only)")
+    print("• Intel GPU: https://github.com/intel/intel-extension-for-jax")
+    
+    print("\nArchitecture Notes:")
+    print("  JAX (Python) → XLA (Graph Compiler) → PJRT (Plugin API) → Driver → Hardware")
+    print("  PJRT = Portable Runtime for JAX hardware plugins")
 
 
 def main():
@@ -661,224 +360,68 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="JAX Compilation System and Hardware Backend Detection",
+        description="JAX Compilation Stack and Hardware Detection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                           # Default: show all information
-  %(prog)s --quiet                   # Quiet mode: essential info only
-  %(prog)s --output results.json     # Export to JSON file
-  %(prog)s --check-cuda              # Specifically check CUDA capabilities
-  %(prog)s --check-metal             # Specifically check Metal capabilities
+  %(prog)s              # Default: hierarchical stack view
+  %(prog)s --verbose    # Full system details and installation guide
+  %(prog)s --json       # Machine-readable JSON output
         """
     )
     
     parser.add_argument(
-        "--quiet", "-q", action="store_true",
-        help="Quiet mode: show only essential information"
+        "--verbose", "-v", action="store_true",
+        help="Show detailed system environment and installation guide"
+    )
+    
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Output JSON format for programmatic use"
     )
     
     parser.add_argument(
         "--output", type=str,
-        help="Output JSON file path"
-    )
-    
-    parser.add_argument(
-        "--check-cuda", action="store_true",
-        help="Perform detailed CUDA capability check"
-    )
-    
-    parser.add_argument(
-        "--check-metal", action="store_true",
-        help="Perform detailed Metal capability check"
-    )
-    
-    parser.add_argument(
-        "--check-all", action="store_true",
-        help="Perform detailed checks on all available backends"
+        help="Output file (default: stdout)"
     )
     
     args = parser.parse_args()
     
-    if not args.quiet:
-        print_section("JAX Compilation System and Hardware Backend Detection")
-        print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    with suppress_stderr():
+        stack = detect_jax_stack()
+        system_info = get_system_info() if args.verbose else {}
     
-    # Get system information
-    if not args.quiet:
-        print_section("System Information")
-    system_info = get_system_info()
-    if not args.quiet:
-        for key, value in system_info.items():
-            if key not in ['error']:
-                # 特殊处理键名，确保缩写为大写
-                display_key = key.replace('_', ' ').title()
-                # 修复常见缩写
-                display_key = display_key.replace('Cpu', 'CPU')
-                display_key = display_key.replace('Ram', 'RAM')
-                display_key = display_key.replace('Gb', 'GB')
-                display_key = display_key.replace('Mhz', 'MHz')
-                display_key = display_key.replace('Mac', 'macOS')
-                print(f"{display_key}: {value}")
-    
-    # Check JAX installation
-    if not args.quiet:
-        print_section("JAX Installation Check")
-    
-    with suppress_jax_warnings():
-        jax_info = check_jax_installation()
-    
-    if jax_info.get('jax_available', False):
-        if not args.quiet:
-            print(f"✓ JAX Version: {jax_info.get('jax_version', 'Unknown')}")
-            print(f"✓ JAXLIB Version: {jax_info.get('jaxlib_version', 'Unknown')}")
-            
-            xla_build = jax_info.get('xla_build_info', {})
-            if xla_build.get('backend'):
-                print(f"✓ XLA Backend: {xla_build['backend']}")
-            
-            # Show dependencies
-            deps = jax_info.get('dependencies', {})
-            if any(d.get('available', False) for d in deps.values()):
-                print("\n  Additional Dependencies:")
-                for dep_name, dep_info in deps.items():
-                    if dep_info.get('available', False):
-                        version = dep_info.get('version', 'Available')
-                        print(f"    • {dep_name}: {version}")
-    else:
-        print(f"✗ JAX not installed: {jax_info.get('error', 'Unknown error')}")
-        print("  Install with: pip install jax jaxlib")
+    if args.json:
+        output = {
+            'jax_version': stack.get('jax', {}).get('version'),
+            'xla_backend': stack.get('xla', {}).get('backend'),
+            'devices': stack.get('devices', []),
+            'plugins': {
+                k: {
+                    'name': v.name,
+                    'platform': v.platform,
+                    'available': v.available,
+                    'source': v.pjrt_source
+                } for k, v in stack.get('pjrt_plugins', {}).items()
+            }
+        }
+        
+        json_str = json.dumps(output, indent=2)
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(json_str)
+            print(f"Results saved to: {args.output}")
+        else:
+            print(json_str)
         return
     
-    # Detect PJRT plugins
-    if not args.quiet:
-        print_section("PJRT Runtime Plugins Detection")
+    print_hierarchy(stack, verbose=args.verbose)
+    print_quick_summary(stack)
     
-    with suppress_jax_warnings():
-        plugins = detect_pjrt_plugins()
+    if args.verbose:
+        print_verbose_details(stack, system_info)
     
-    # Print backend summary
-    print_backend_summary(plugins)
-    
-    # PJRT Architecture Explanation
-    if not args.quiet:
-        print_section("PJRT (Public JAX Runtime) Architecture")
-        print("""PJRT is JAX's unified plugin interface for hardware accelerators:
-
-1. **PJRT C API**: Standard interface defined by JAX
-2. **Plugin Implementation**: Hardware-specific implementation by vendors:
-   - Apple Metal: Provided by 'jax-metal' Python package
-   - NVIDIA CUDA: Provided by 'jaxlib-cuda' or 'jax[cuda]' packages
-   - AMD ROCm: Provided by 'jax-rocm' package
-   - Intel GPU: Provided by 'intel-extension-for-jax'
-   - Google TPU: Provided by 'jax[tpu]' package
-   - CPU: Built-in default backend in JAX
-
-3. **Plugin Files**: Typically dynamic libraries (loaded automatically):
-   - macOS: libjax_plugins_metal.dylib, libjax_plugins_cpu.dylib
-   - Linux: libjax_plugins_cuda.so, libjax_plugins_cpu.so
-   - Windows: jax_plugins_cuda.dll, jax_plugins_cpu.dll
-
-4. **Platform Identification**: Each plugin registers with a platform name:
-   - CPU → platform='cpu' (or 'CPU')
-   - Metal → platform='metal' (or 'METAL')
-   - CUDA → platform='cuda'
-   - ROCm → platform='rocm'
-   - TPU → platform='tpu'
-   - Intel GPU → platform may be 'gpu', 'sycl', 'opencl', or 'intel'
-
-Note: JAX automatically loads available plugins at startup via PJRT C API.
-""")
-    
-    # Get XLA runtime info
-    if not args.quiet:
-        print_section("XLA Runtime Configuration")
-        xla_info = get_xla_runtime_info()
-        
-        print(f"X64 (Float64) Support: {xla_info.get('precision_config', {}).get('float64_enabled', 'Unknown')}")
-        print(f"Default Dtype: {xla_info.get('precision_config', {}).get('default_dtype', 'Unknown')}")
-        
-        cache_info = xla_info.get('compilation_cache', {})
-        if cache_info.get('enabled', False):
-            print(f"Compilation Cache: Enabled ({cache_info.get('directory', 'Unknown')})")
-            if cache_info.get('exists', False):
-                print(f"  Directory exists: Yes, Writable: {cache_info.get('writable', 'Unknown')}")
-        else:
-            print(f"Compilation Cache: Disabled (set JAX_COMPILATION_CACHE_DIR to enable)")
-        
-        xla_flags = xla_info.get('xla_flags', [])
-        if xla_flags:
-            print(f"XLA_FLAGS: {' '.join(xla_flags)}")
-    
-    # Perform detailed checks if requested
-    if args.check_all or args.check_cuda or args.check_metal:
-        print_section("Detailed Device Capability Checks")
-        
-        backends_to_check = []
-        if args.check_all:
-            backends_to_check = [p for p in plugins.values() if p.available]
-        else:
-            if args.check_cuda and plugins.get('cuda', BackendInfo('', '', False)).available:
-                backends_to_check.append(plugins['cuda'])
-            if args.check_metal and plugins.get('metal', BackendInfo('', '', False)).available:
-                backends_to_check.append(plugins['metal'])
-        
-        for backend in backends_to_check:
-            print_subsection(f"Checking {backend.name}")
-            capabilities = check_device_capabilities(backend)
-            
-            # Print precision support
-            precision = capabilities.get('precision_support', {})
-            if precision:
-                print("  Precision Support:")
-                for dtype, supported in precision.items():
-                    status = "✓" if supported else "✗"
-                    print(f"    {status} {dtype.upper()}")
-            
-            # Print other capabilities
-            for key, value in capabilities.items():
-                if key not in ['precision_support', 'error'] and value:
-                    if isinstance(value, dict):
-                        print(f"  {key.replace('_', ' ').title()}:")
-                        for subkey, subvalue in value.items():
-                            print(f"    • {subkey}: {subvalue}")
-                    else:
-                        print(f"  {key.replace('_', ' ').title()}: {value}")
-            
-            if 'error' in capabilities:
-                print(f"  Error: {capabilities['error']}")
-    
-    # Print installation instructions for missing backends
-    if not args.quiet:
-        print_installation_instructions(plugins, system_info)
-    
-    # Export to JSON if requested
-    if args.output:
-        with suppress_jax_warnings():
-            xla_info = get_xla_runtime_info()
-        export_results_to_json(system_info, jax_info, plugins, xla_info, args.output)
-    
-    # Final summary
-    if not args.quiet:
-        print_section("Summary")
-        
-        available_count = sum(1 for p in plugins.values() if p.available and p.name != 'CPU')
-        print(f"Available GPU/Accelerator Backends: {available_count}")
-        
-        if available_count > 0:
-            print("\nFor optimal performance:")
-            print("1. Use jax.jit() to compile computational graphs")
-            print("2. Use appropriate data types (float32 for GPU, float64 for CPU if needed)")
-            print("3. Enable compilation cache for repeated computations")
-            print("4. Consider batch size optimization for memory-bound operations")
-        else:
-            print("\nNote: Only CPU backend available.")
-            print("For GPU acceleration, install appropriate plugins as shown above.")
-        
-        print("\nAll output is in English per MCPC coding standards.")
-        
-        print_section("Detection Complete")
-        print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("\nAll output is in English per MCPC coding standards.")
 
 
 if __name__ == "__main__":
