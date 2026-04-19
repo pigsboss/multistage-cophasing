@@ -287,89 +287,104 @@ class VectorizedNumPyStyle:
     
     @staticmethod
     def create_compute_function(steps: int, paths: int, use_lcg: bool = False):
-        """创建向量化计算函数"""
+        """创建向量化计算函数 - 修复版本"""
         import jax
         import jax.numpy as jnp
         from jax import random
         
-        @jax.jit
-        def compute_vectorized(key):
-            """向量化计算主函数"""
-            if use_lcg:
-                # LCG向量化实现
-                def lcg_next_vec(states):
-                    return states * jnp.uint32(1103515245) + jnp.uint32(12345)
-                
-                def lcg_random_vec(states):
-                    new_states = lcg_next_vec(states)
-                    vals = (new_states & jnp.uint32(0x7fffffff)).astype(jnp.float32)
-                    return vals / jnp.float32(2147483647.0), new_states
-                
-                # 初始化状态
+        if use_lcg:
+            # LCG实现
+            @jax.jit
+            def compute_lcg(key):
                 base_seed = key.astype(jnp.uint32)
                 lcg_states = base_seed + jnp.arange(paths, dtype=jnp.uint32)
                 
-                # 初始化x和integral（向量形式）
                 x = jnp.zeros((paths,), dtype=jnp.float32)
                 integral = jnp.zeros((paths,), dtype=jnp.float32)
                 
-                # 对时间步循环（显式循环，但内部是向量化操作）
-                for step in range(steps):
-                    # 分支逻辑（向量化版本）
+                def body_fun(step, carry):
+                    x, integral, states = carry
+                    
+                    # LCG随机数生成
+                    new_states = states * jnp.uint32(1103515245) + jnp.uint32(12345)
+                    rand_vals = (new_states & jnp.uint32(0x7fffffff)).astype(jnp.float32)
+                    rand_vals = rand_vals / jnp.float32(2147483647.0)
+                    
+                    # 分支逻辑
                     weight = jnp.where(
                         x < -1.0, 0.1,
                         jnp.where(x < 0.0, 0.3 * x + 0.4,
                             jnp.where(x < 1.0, 0.5 * (1.0 - x * x), 0.2))
                     )
                     
-                    # 交替因子（向量化）
-                    factor = jnp.where(step % 2 == 0, 
-                                      1.0 + 0.1 * x, 
-                                      1.0 - 0.1 * x)
+                    # 交替因子
+                    factor = jnp.where((step % 2) == 0, 1.0 + 0.1 * x, 1.0 - 0.1 * x)
                     
                     delta = 1.0 / steps
-                    integral += weight * delta * factor
+                    integral = integral + weight * delta * factor
                     
-                    # 生成随机数并更新x
-                    rand_vals, lcg_states = lcg_random_vec(lcg_states)
-                    x += rand_vals * 0.1
-                    x = jnp.clip(x, -2.0, 2.0)
+                    # 更新x
+                    x = jnp.clip(x + rand_vals * 0.1, -2.0, 2.0)
+                    
+                    return (x, integral, new_states)
                 
-            else:
-                # JAX随机数生成器向量化实现
-                # 初始化x和integral（向量形式）
-                x = jnp.zeros((paths,), dtype=jnp.float32)
-                integral = jnp.zeros((paths,), dtype=jnp.float32)
+                # 执行循环
+                final_x, final_integral, _ = jax.lax.fori_loop(
+                    0, steps, body_fun, (x, integral, lcg_states)
+                )
                 
-                # 对时间步循环
-                for step in range(steps):
-                    # 分支逻辑（向量化版本）
-                    weight = jnp.where(
-                        x < -1.0, 0.1,
-                        jnp.where(x < 0.0, 0.3 * x + 0.4,
-                            jnp.where(x < 1.0, 0.5 * (1.0 - x * x), 0.2))
-                    )
-                    
-                    # 交替因子（向量化）
-                    factor = jnp.where(step % 2 == 0, 
-                                      1.0 + 0.1 * x, 
-                                      1.0 - 0.1 * x)
-                    
-                    delta = 1.0 / steps
-                    integral += weight * delta * factor
-                    
-                    # 为当前时间步生成所有路径的随机数
-                    step_key = jax.random.fold_in(key, step)
-                    subkeys = jax.random.split(step_key, paths)
-                    rand_vals = jax.vmap(lambda k: jax.random.uniform(k, dtype=jnp.float32))(subkeys)
-                    
-                    x += rand_vals * 0.1
-                    x = jnp.clip(x, -2.0, 2.0)
+                return jnp.mean(final_integral)
             
-            # 返回所有路径的平均积分值
-            return jnp.mean(integral)
+            return compute_lcg
         
-        return compute_vectorized
+        else:
+            # JAX随机数生成器实现
+            @jax.jit
+            def compute_jax(key):
+                # 一次性生成所有随机数
+                step_keys = random.split(key, steps)
+                
+                def generate_step_random(step_key):
+                    subkeys = random.split(step_key, paths)
+                    return jax.vmap(lambda k: random.uniform(k, dtype=jnp.float32))(subkeys)
+                
+                all_rand_vals = jax.vmap(generate_step_random)(step_keys)
+                
+                x = jnp.zeros((paths,), dtype=jnp.float32)
+                integral = jnp.zeros((paths,), dtype=jnp.float32)
+                
+                def body_fun(carry, step_data):
+                    x, integral = carry
+                    step_idx, rand_vals = step_data
+                    
+                    # 分支逻辑
+                    weight = jnp.where(
+                        x < -1.0, 0.1,
+                        jnp.where(x < 0.0, 0.3 * x + 0.4,
+                            jnp.where(x < 1.0, 0.5 * (1.0 - x * x), 0.2))
+                    )
+                    
+                    # 交替因子
+                    factor = jnp.where((step_idx % 2) == 0, 1.0 + 0.1 * x, 1.0 - 0.1 * x)
+                    
+                    delta = 1.0 / steps
+                    integral = integral + weight * delta * factor
+                    
+                    # 更新x
+                    x = jnp.clip(x + rand_vals * 0.1, -2.0, 2.0)
+                    
+                    return (x, integral), None
+                
+                step_indices = jnp.arange(steps)
+                step_data = (step_indices, all_rand_vals)
+                
+                (final_x, final_integral), _ = jax.lax.scan(
+                    body_fun, (x, integral), step_data
+                )
+                
+                return jnp.mean(final_integral)
+            
+            return compute_jax
 
 
 # ---------- public benchmark routine ---------- #
@@ -406,6 +421,11 @@ def run_benchmark(
     platform = device.platform if device else "unknown"
     device_kind = device.device_kind if device else "unknown"
     
+    # 添加编译时间监控
+    print(f"Creating {method_type} compute function with steps={steps}, paths={paths}...")
+    import time as time_module
+    start_compile = time_module.time()
+
     # 选择计算方法
     if method_type == "scalar":
         compute_func = ScalarOpenCLStyle.create_compute_function(steps, paths, use_lcg)
@@ -415,6 +435,9 @@ def run_benchmark(
         method_desc = "Vectorized (NumPy-style vector ops)"
     else:
         raise ValueError(f"Unknown method_type: {method_type}")
+
+    end_compile = time_module.time()
+    print(f"Compilation time: {end_compile - start_compile:.2f}s")
     
     # 准备随机种子
     if use_lcg:
@@ -603,6 +626,11 @@ Available backends: {', '.join(available_backends)}
         action="store_true",
         help="列出所有可用的JAX后端并退出",
     )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="快速测试模式（使用较小的问题规模）",
+    )
 
     args = parser.parse_args()
     
@@ -619,11 +647,18 @@ Available backends: {', '.join(available_backends)}
         size_str = size_str[1:-1]
     steps, paths = map(int, size_str.split(","))
     
+    # 快速测试模式
+    if args.quick:
+        print("Quick mode enabled - reducing problem size")
+        steps, paths = min(steps, 1000), min(paths, 100)
+    
     print("Starting GPU Path-Integral Benchmark - JAX通用后端")
     print(f"Configuration: steps={steps}, paths={paths}, repeats={args.repeats}")
     print(f"Method: {args.method}")
     print(f"Backend: {args.backend}")
     print(f"RNG: {'LCG' if args.use_lcg else 'JAX-RNG'}")
+    if args.quick:
+        print("Quick mode: ON")
     
     # 设置后端
     if args.backend != "auto":
