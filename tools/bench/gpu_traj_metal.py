@@ -113,8 +113,10 @@ def _lcg_random(state: jnp.uint32) -> jnp.float32:
     """Generate random float in [0, 1) matching OpenCL implementation"""
     new_state = _lcg_next(state)
     # Take lower 31 bits (0x7fffffffu in OpenCL)
-    val = new_state & jnp.uint32(0x7fffffffu)
-    return val.astype(jnp.float32) / jnp.float32(0x7fffffffu)
+    # Note: 0x7fffffffu is 2147483647 in decimal
+    mask = jnp.uint32(0x7fffffff)
+    val = new_state & mask
+    return val.astype(jnp.float32) / jnp.float32(2147483647.0)
 
 @partial(jax.jit, static_argnames=('steps', 'use_lcg'))
 def _integrate_single_path(steps: int, key: jax.Array, use_lcg: bool = False) -> jnp.float32:
