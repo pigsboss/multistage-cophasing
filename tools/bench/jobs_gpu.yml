@@ -1,0 +1,463 @@
+# tools/bench/jobs_gpu.yml
+# GPU batch performance test configuration file
+# Used by batch.py tool to run GPU benchmarks
+
+settings:
+  output_dir: "batch_results/gpu"
+  plots_dir: "plots/gpu"
+  unified_output: "gpu_unified_results.json"
+  sleep_interval: 2.0  # Sleep interval between jobs (seconds)
+
+# Job definitions
+jobs:
+  # GPU trajectory integral tests
+  - name: "gpu_traj_fp32"
+    tool: "gpu_traj_cl.py"
+    task: "trajectory"
+    scale_type: "trajectory"
+    base_args:
+      - "--precision"
+      - "fp32"
+      - "--repeats"
+      - "5"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+
+  - name: "gpu_traj_fp64"
+    tool: "gpu_traj_cl.py"
+    task: "trajectory"
+    scale_type: "trajectory"
+    base_args:
+      - "--precision"
+      - "fp64"
+      - "--repeats"
+      - "5"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+
+  # GPU Monte Carlo tests
+  - name: "gpu_mc_fp32"
+    tool: "gpu_mc_cl.py"
+    task: "monte_carlo"
+    scale_type: "monte_carlo"
+    base_args:
+      - "--precision"
+      - "fp32"
+      - "--repeats"
+      - "5"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+
+  - name: "gpu_mc_fp64"
+    tool: "gpu_mc_cl.py"
+    task: "monte_carlo"
+    scale_type: "monte_carlo"
+    base_args:
+      - "--precision"
+      - "fp64"
+      - "--repeats"
+      - "5"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+
+  # GPU N-body tests - non-tile mode
+  - name: "gpu_nbody_fp32_notile"
+    tool: "gpu_nbody_cl.py"
+    task: "nbody"
+    scale_type: "nbody"
+    base_args:
+      - "--precision"
+      - "fp32"
+      - "--repeats"
+      - "3"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+      - "--no-tile"
+      - "--chunk-size"
+      - "5"
+
+  - name: "gpu_nbody_fp32_tile"
+    tool: "gpu_nbody_cl.py"
+    task: "nbody"
+    scale_type: "nbody"
+    base_args:
+      - "--precision"
+      - "fp32"
+      - "--repeats"
+      - "3"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+      - "--chunk-size"
+      - "5"
+
+  - name: "gpu_nbody_fp64_notile"
+    tool: "gpu_nbody_cl.py"
+    task: "nbody"
+    scale_type: "nbody"
+    base_args:
+      - "--precision"
+      - "fp64"
+      - "--repeats"
+      - "3"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+      - "--no-tile"
+      - "--chunk-size"
+      - "5"
+
+  - name: "gpu_nbody_fp64_tile"
+    tool: "gpu_nbody_cl.py"
+    task: "nbody"
+    scale_type: "nbody"
+    base_args:
+      - "--precision"
+      - "fp64"
+      - "--repeats"
+      - "3"
+      - "--warmup"
+      - "2"
+      - "--platform"
+      - "0"
+      - "--device"
+      - "0"
+      - "--chunk-size"
+      - "5"
+
+# Plot group configurations
+plot_groups:
+  # Trajectory integral: performance with different step counts
+  - name: "GPU Trajectory - Varying Steps (FP32)"
+    task: "Trajectory Integral (GPU)"
+    scale_type: "trajectory"
+    x_parameter: "steps"
+    x_label: "Integration Steps"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      steps: [1000, 5000, 10000, 20000, 50000]
+    fixed_params:
+      trajectories: 1000
+    jobs: ["gpu_traj_fp32"]
+
+  # Trajectory integral: performance with different path counts
+  - name: "GPU Trajectory - Varying Paths (FP32)"
+    task: "Trajectory Integral (GPU)"
+    scale_type: "trajectory"
+    x_parameter: "trajectories"
+    x_label: "Number of Trajectories"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      trajectories: [100, 500, 1000, 2000, 5000]
+    fixed_params:
+      steps: 10000
+    jobs: ["gpu_traj_fp32"]
+
+  # Monte Carlo: performance with different sample counts
+  - name: "GPU Monte Carlo - Varying Samples (FP32)"
+    task: "Monte Carlo Pi (GPU Batched)"
+    scale_type: "monte_carlo"
+    x_parameter: "samples"
+    x_label: "Number of Samples (millions)"
+    y_parameter: "samples_per_second"
+    y_label: "Samples per Second"
+    varied_params:
+      samples: [1000000, 5000000, 10000000, 50000000, 100000000]
+    fixed_params: {}
+    jobs: ["gpu_mc_fp32"]
+
+  # Different precision comparison: trajectory integral
+  - name: "GPU Trajectory - Precision Comparison"
+    task: "Trajectory Integral (GPU)"
+    scale_type: "trajectory"
+    x_parameter: "precision"
+    x_label: "Floating Point Precision"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      precision: ["fp32", "fp64"]
+    fixed_params:
+      steps: 10000
+      trajectories: 1000
+    jobs: ["gpu_traj_fp32", "gpu_traj_fp64"]
+
+  # Different precision comparison: Monte Carlo
+  - name: "GPU Monte Carlo - Precision Comparison"
+    task: "Monte Carlo Pi (GPU Batched)"
+    scale_type: "monte_carlo"
+    x_parameter: "precision"
+    x_label: "Floating Point Precision"
+    y_parameter: "samples_per_second"
+    y_label: "Samples per Second"
+    varied_params:
+      precision: ["fp32", "fp64"]
+    fixed_params:
+      samples: 10000000
+    jobs: ["gpu_mc_fp32", "gpu_mc_fp64"]
+
+  # N-body simulation: performance with different particle counts (tile vs non-tile)
+  - name: "GPU N-Body - Varying Bodies (FP32, Tile vs No-Tile)"
+    task: "N-Body Simulation (GPU)"
+    scale_type: "nbody"
+    x_parameter: "bodies"
+    x_label: "Number of Bodies"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      bodies: [100, 500, 1000, 2000, 5000]
+    fixed_params:
+      steps: 50
+      dt: 0.01
+    jobs: ["gpu_nbody_fp32_tile", "gpu_nbody_fp32_notile"]
+
+  # N-body simulation: performance with different step counts
+  - name: "GPU N-Body - Varying Steps (FP32, Tile)"
+    task: "N-Body Simulation (GPU)"
+    scale_type: "nbody"
+    x_parameter: "steps"
+    x_label: "Number of Steps"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      steps: [10, 50, 100, 200, 500]
+    fixed_params:
+      bodies: 1000
+      dt: 0.01
+    jobs: ["gpu_nbody_fp32_tile"]
+
+  # N-body simulation: different precision comparison (tile mode)
+  - name: "GPU N-Body - Precision Comparison (Tile Mode)"
+    task: "N-Body Simulation (GPU)"
+    scale_type: "nbody"
+    x_parameter: "precision"
+    x_label: "Floating Point Precision"
+    y_parameter: "avg_time"
+    y_label: "Average Execution Time (s)"
+    varied_params:
+      precision: ["fp32", "fp64"]
+    fixed_params:
+      bodies: 1000
+      steps: 50
+      dt: 0.01
+    jobs: ["gpu_nbody_fp32_tile", "gpu_nbody_fp64_tile"]
+
+  # N-body simulation: tile mode vs non-tile mode (different scales)
+  - name: "GPU N-Body - Tile vs No-Tile Scaling (FP32)"
+    task: "N-Body Simulation (GPU)"
+    scale_type: "nbody"
+    x_parameter: "bodies"
+    x_label: "Number of Bodies"
+    y_parameter: "iterations_per_second"
+    y_label: "Iterations per Second"
+    varied_params:
+      bodies: [100, 500, 1000, 2000, 5000]
+    fixed_params:
+      steps: 50
+      dt: 0.01
+    jobs: ["gpu_nbody_fp32_tile", "gpu_nbody_fp32_notile"]
+
+# Batch test tasks (for generating specific test tasks)
+batch_tests:
+  # Trajectory integral: different scale tests
+  - group: "trajectory_scaling"
+    description: "Test trajectory integral performance at different scales"
+    variations:
+      - {steps: 1000, trajectories: 500}
+      - {steps: 5000, trajectories: 500}
+      - {steps: 10000, trajectories: 500}
+      - {steps: 20000, trajectories: 500}
+      - {steps: 50000, trajectories: 500}
+      - {steps: 10000, trajectories: 100}
+      - {steps: 10000, trajectories: 500}
+      - {steps: 10000, trajectories: 1000}
+      - {steps: 10000, trajectories: 2000}
+    tools: ["gpu_traj_fp32", "gpu_traj_fp64"]
+
+  # Monte Carlo: different scale tests
+  - group: "monte_carlo_scaling"
+    description: "Test Monte Carlo performance at different scales"
+    variations:
+      - {samples: 1000000}
+      - {samples: 5000000}
+      - {samples: 10000000}
+      - {samples: 50000000}
+      - {samples: 100000000}
+    tools: ["gpu_mc_fp32", "gpu_mc_fp64"]
+
+  # N-body simulation: different scale tests
+  - group: "nbody_scaling"
+    description: "Test N-body simulation performance at different scales"
+    variations:
+      - {bodies: 100, steps: 50}
+      - {bodies: 500, steps: 50}
+      - {bodies: 1000, steps: 50}
+      - {bodies: 2000, steps: 50}
+      - {bodies: 5000, steps: 20}  # Reduce steps for large scale
+      - {bodies: 1000, steps: 10}
+      - {bodies: 1000, steps: 50}
+      - {bodies: 1000, steps: 100}
+      - {bodies: 1000, steps: 200}
+    tools: ["gpu_nbody_fp32_tile", "gpu_nbody_fp32_notile", "gpu_nbody_fp64_tile"]
+
+# Default test scales (for quick testing)
+default_scales:
+  trajectory:
+    steps: 10000
+    trajectories: 1000
+  monte_carlo:
+    samples: 10000000
+  nbody:
+    bodies: 1000
+    steps: 50
+    dt: 0.01
+
+# Device configuration
+device_config:
+  # Auto-detect available devices, or manually specify
+  platform: 0
+  device: 0
+  # Optional: specify device name (if auto-detection fails)
+  # device_name: "NVIDIA GeForce RTX 3080"
+  # device_vendor: "NVIDIA Corporation"
+
+# Performance test configuration
+performance_config:
+  # Basic configuration
+  warmup_iterations: 2
+  test_iterations: 5
+  
+  # Advanced configuration
+  enable_profiling: false
+  memory_check: true
+  precision_check: true
+  
+  # N-body simulation specific configuration
+  nbody:
+    chunk_size: 5
+    min_tile_size: 16
+    safe_mode: false
+    verbose: "INFO"
+  
+  # Monte Carlo specific configuration
+  monte_carlo:
+    num_batches: 1
+    samples_per_batch: null  # Auto-calculate
+    
+  # Trajectory integral specific configuration
+  trajectory:
+    max_work_group_size: 256
+
+# Output format configuration
+output_config:
+  # Result output
+  save_json: true
+  save_csv: false
+  save_hdf5: false
+  
+  # Plot output
+  generate_plots: true
+  plot_formats: ["png", "pdf"]
+  plot_dpi: 300
+  
+  # Report generation
+  generate_report: true
+  report_format: "markdown"
+  
+  # Comparison baseline
+  compare_with_cpu: false
+  cpu_benchmark_file: "batch_results/cpu/cpu_unified_results.json"
+
+# Validation configuration
+validation_config:
+  # Enable validation
+  enable_validation: true
+  
+  # Trajectory integral validation
+  trajectory:
+    compare_with_python: true
+    python_reference_steps: 1000
+    python_reference_paths: 100
+    tolerance: 1e-4
+    
+  # Monte Carlo validation
+  monte_carlo:
+    compare_with_python: true
+    python_reference_samples: 100000
+    tolerance: 1e-3
+    
+  # N-body simulation validation
+  nbody:
+    compare_with_python: true
+    python_reference_bodies: 200
+    python_reference_steps: 20
+    tolerance: 1e-2
+
+# Execution control
+execution_control:
+  # Parallel execution
+  parallel_execution: false
+  max_parallel_jobs: 4
+  
+  # Error handling
+  continue_on_error: true
+  max_errors: 3
+  
+  # Timeout control
+  timeout_per_job: 300  # Maximum execution time per job (seconds)
+  progress_update_interval: 10  # Progress update interval (seconds)
+  
+  # Resource limits
+  memory_limit_mb: 4096  # Memory limit (MB)
+  gpu_memory_limit_mb: null  # GPU memory limit (MB, null means no limit)
+
+# Notes
+notes: |
+  GPU batch performance test configuration file
+  
+  Usage:
+  1. Run command: python tools/bench/batch.py tools/bench/jobs_gpu.yml
+  2. You can modify parameters in default_scales to quickly adjust test scale
+  3. You can enable or disable specific tests as needed
+  4. For N-body simulation, large particle counts (>5000) recommend using --no-tile mode
+  
+  Device selection:
+  - Default uses first platform (platform: 0) first device (device: 0)
+  - You can use --platform and --device parameters to specify different devices
+  
+  Test types:
+  - trajectory: Trajectory integral test, evaluates branching logic and loop performance
+  - monte_carlo: Monte Carlo test, evaluates vectorized operation performance
+  - nbody: N-body simulation test, evaluates large-scale data and synchronization performance
+  
+  Precision selection:
+  - fp16: Half-precision floating point (requires device support)
+  - fp32: Single-precision floating point (standard)
+  - fp64: Double-precision floating point (requires device support)
