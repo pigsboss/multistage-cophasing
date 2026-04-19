@@ -109,7 +109,10 @@ def get_system_info() -> Dict[str, str]:
         mem = psutil.virtual_memory()
         info['total_ram_gb'] = f"{mem.total / (1024**3):.2f}"
         info['available_ram_gb'] = f"{mem.available / (1024**3):.2f}"
-        info['swap_total_gb'] = f"{mem.swap_total / (1024**3):.2f}" if mem.swap_total > 0 else '0.00'
+        
+        # Get swap memory separately
+        swap = psutil.swap_memory()
+        info['swap_total_gb'] = f"{swap.total / (1024**3):.2f}" if swap.total > 0 else '0.00'
         
         # CPU info
         info['cpu_cores'] = psutil.cpu_count(logical=False) or 'Unknown'
@@ -120,6 +123,12 @@ def get_system_info() -> Dict[str, str]:
     except ImportError:
         info['total_ram_gb'] = 'Unknown (install psutil)'
         info['available_ram_gb'] = 'Unknown (install psutil)'
+        info['swap_total_gb'] = 'Unknown (install psutil)'
+    except Exception as e:
+        # Handle any other exceptions gracefully
+        info['total_ram_gb'] = f'Error: {e}'
+        info['available_ram_gb'] = f'Error: {e}'
+        info['swap_total_gb'] = f'Error: {e}'
     
     return info
 
