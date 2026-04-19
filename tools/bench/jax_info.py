@@ -236,7 +236,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='CPU',
             platform='cpu',
             available=False,
-            pjrt_plugin='pjrt_c_api_cpu_plugin',
+            pjrt_plugin='Built-in CPU PJRT (jaxlib)',
             priority=100
         )
         
@@ -257,7 +257,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='NVIDIA GPU (CUDA)',
             platform='cuda',
             available=False,
-            pjrt_plugin='pjrt_c_api_gpu_plugin (CUDA)',
+            pjrt_plugin='CUDA PJRT (via jax[cuda])',
             priority=10
         )
         
@@ -287,7 +287,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='AMD GPU (ROCm)',
             platform='rocm',
             available=False,
-            pjrt_plugin='pjrt_c_api_gpu_plugin (ROCm)',
+            pjrt_plugin='ROCm PJRT (via jax-rocm)',
             priority=20
         )
         
@@ -308,7 +308,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='Apple Metal GPU',
             platform='metal',
             available=False,
-            pjrt_plugin='pjrt_c_api_metal_plugin',
+            pjrt_plugin='Metal PJRT (via jax-metal)',
             priority=30
         )
         
@@ -344,7 +344,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='Google Cloud TPU',
             platform='tpu',
             available=False,
-            pjrt_plugin='pjrt_c_api_tpu_plugin',
+            pjrt_plugin='TPU PJRT (via jax[tpu])',
             priority=40
         )
         
@@ -365,7 +365,7 @@ def detect_pjrt_plugins() -> Dict[str, BackendInfo]:
             name='Intel GPU (Arc/Data Center)',
             platform='intel',
             available=False,
-            pjrt_plugin='pjrt_c_api_intel_gpu_plugin',
+            pjrt_plugin='Intel GPU PJRT (via intel-extension-for-jax)',
             priority=50
         )
         
@@ -574,6 +574,7 @@ def print_installation_instructions(plugins: Dict[str, BackendInfo],
     if cuda_backend and not cuda_backend.available:
         if platform_system in ['linux', 'windows']:
             instructions.append("• NVIDIA CUDA: Install CUDA-enabled JAX - pip install \"jax[cuda12]\"")
+            instructions.append("  PJRT Plugin: CUDA PJRT (via jaxlib-cuda)")
             instructions.append("  Requires: CUDA 11.8/12.x, cuDNN 8.6+, NCCL 2.16+")
             instructions.append("  Verify: nvidia-smi shows compatible GPU")
         else:
@@ -584,6 +585,7 @@ def print_installation_instructions(plugins: Dict[str, BackendInfo],
     if metal_backend and not metal_backend.available:
         if platform_system == 'darwin' and system_info.get('apple_silicon') == 'Yes':
             instructions.append("• Apple Metal: Install jax-metal - pip install jax-metal")
+            instructions.append("  PJRT Plugin: Metal PJRT (via jax-metal)")
             instructions.append("  Note: Only for Apple Silicon (M1/M2/M3) GPUs")
         else:
             instructions.append("• Apple Metal: Requires macOS with Apple Silicon GPU")
@@ -593,6 +595,7 @@ def print_installation_instructions(plugins: Dict[str, BackendInfo],
     if rocm_backend and not rocm_backend.available:
         if platform_system == 'linux':
             instructions.append("• AMD ROCm: Install ROCm-enabled JAX - pip install jax-rocm")
+            instructions.append("  PJRT Plugin: ROCm PJRT (via jax-rocm)")
             instructions.append("  Requires: ROCm 5.7+, compatible AMD GPU (RDNA2/RDNA3)")
         else:
             instructions.append("• AMD ROCm: Only available on Linux with AMD GPU")
@@ -601,6 +604,7 @@ def print_installation_instructions(plugins: Dict[str, BackendInfo],
     intel_backend = plugins.get('intel_gpu')
     if intel_backend and not intel_backend.available:
         instructions.append("• Intel GPU: Install Intel Extension for JAX")
+        instructions.append("  PJRT Plugin: Intel GPU PJRT (via intel-extension-for-jax)")
         instructions.append("  Available for: Intel Arc, Data Center GPU Max/Series")
         instructions.append("  Installation: See https://github.com/intel/intel-extension-for-jax")
     
@@ -608,6 +612,7 @@ def print_installation_instructions(plugins: Dict[str, BackendInfo],
     tpu_backend = plugins.get('tpu')
     if tpu_backend and not tpu_backend.available:
         instructions.append("• Google TPU: Requires Google Cloud TPU access")
+        instructions.append("  PJRT Plugin: TPU PJRT (via jax[tpu])")
         instructions.append("  Installation: pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html")
     
     if instructions:
@@ -754,6 +759,36 @@ Examples:
     
     # Print backend summary
     print_backend_summary(plugins)
+    
+    # PJRT Architecture Explanation
+    if not args.quiet:
+        print_section("PJRT (Public JAX Runtime) Architecture")
+        print("""PJRT is JAX's unified plugin interface for hardware accelerators:
+
+1. **PJRT C API**: Standard interface defined by JAX
+2. **Plugin Implementation**: Hardware-specific implementation by vendors:
+   - Apple Metal: Provided by 'jax-metal' Python package
+   - NVIDIA CUDA: Provided by 'jaxlib-cuda' or 'jax[cuda]' packages
+   - AMD ROCm: Provided by 'jax-rocm' package
+   - Intel GPU: Provided by 'intel-extension-for-jax'
+   - Google TPU: Provided by 'jax[tpu]' package
+   - CPU: Built-in default backend in JAX
+
+3. **Plugin Files**: Typically dynamic libraries (loaded automatically):
+   - macOS: libjax_plugins_metal.dylib, libjax_plugins_cpu.dylib
+   - Linux: libjax_plugins_cuda.so, libjax_plugins_cpu.so
+   - Windows: jax_plugins_cuda.dll, jax_plugins_cpu.dll
+
+4. **Platform Identification**: Each plugin registers with a platform name:
+   - CPU → platform='cpu' (or 'CPU')
+   - Metal → platform='metal' (or 'METAL')
+   - CUDA → platform='cuda'
+   - ROCm → platform='rocm'
+   - TPU → platform='tpu'
+   - Intel GPU → platform may be 'gpu', 'sycl', 'opencl', or 'intel'
+
+Note: JAX automatically loads available plugins at startup via PJRT C API.
+""")
     
     # Get XLA runtime info
     if not args.quiet:
