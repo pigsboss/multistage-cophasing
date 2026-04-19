@@ -492,8 +492,17 @@ def print_backend_summary(plugins: Dict[str, BackendInfo]) -> None:
     """Print summary of available backends."""
     print_section("Available JAX Backends for JIT Acceleration")
     
-    available_backends = [p for p in plugins.values() if p.available]
-    unavailable_backends = [p for p in plugins.values() if not p.available and 'error' not in p]
+    # Filter out non-BackendInfo objects (like error strings)
+    backend_objects = []
+    for p in plugins.values():
+        if isinstance(p, BackendInfo):
+            backend_objects.append(p)
+        elif isinstance(p, str):
+            # If there's a string-type error, print it
+            print(f"Error detected: {p}")
+    
+    available_backends = [p for p in backend_objects if p.available]
+    unavailable_backends = [p for p in backend_objects if not p.available]
     
     if available_backends:
         print("\n✓ Active Backends (Ready for JIT Compilation):")
