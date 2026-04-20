@@ -37,6 +37,72 @@ except ImportError:
     NUMBA_AVAILABLE = False
     print("Warning: Numba not available, related tests will be skipped")
 
+# ---------- 连续权重函数（方案C：6次多项式） ---------- #
+def compute_weight_continuous(x):
+    """
+    6次多项式连续逼近原分段权重函数
+    计算量：6次乘法 + 6次加法（霍纳法则）
+    无分支，适合GPU/向量化计算
+    """
+    # 预计算系数（基于最小二乘拟合 [-2, 2] 区间）
+    # 这些系数通过拟合原分段函数获得
+    c0 = 0.3125
+    c1 = 0.234375
+    c2 = -0.2734375
+    c3 = -0.05859375
+    c4 = 0.13671875
+    c5 = 0.01953125
+    c6 = -0.03125
+    
+    # 使用霍纳法则计算：(((((c6*x + c5)*x + c4)*x + c3)*x + c2)*x + c1)*x + c0
+    result = c6
+    result = result * x + c5
+    result = result * x + c4
+    result = result * x + c3
+    result = result * x + c2
+    result = result * x + c1
+    result = result * x + c0
+    
+    return result
+
+
+def compute_weight_piecewise(x):
+    """
+    原分段权重函数（用于对比）
+    """
+    if x < -1.0:
+        return 0.1
+    elif x < 0.0:
+        return 0.3 * x + 0.4
+    elif x < 1.0:
+        return 0.5 * (1.0 - x * x)
+    else:
+        return 0.2
+
+
+# Numba版本的连续权重函数
+if NUMBA_AVAILABLE:
+    @jit(nopython=True)
+    def compute_weight_continuous_numba(x):
+        """Numba编译的连续权重函数"""
+        c0 = 0.3125
+        c1 = 0.234375
+        c2 = -0.2734375
+        c3 = -0.05859375
+        c4 = 0.13671875
+        c5 = 0.01953125
+        c6 = -0.03125
+        
+        result = c6
+        result = result * x + c5
+        result = result * x + c4
+        result = result * x + c3
+        result = result * x + c2
+        result = result * x + c1
+        result = result * x + c0
+        
+        return result
+
 
 @dataclass
 class BenchmarkResult:
@@ -123,23 +189,88 @@ class CPUBenchmark:
 class PathIntegralBenchmark:
     """Trajectory integral benchmark (for aerospace trajectory optimization)"""
     
+    # 类级别的权重计算方法选择
+    use_continuous_weight = False  # 默认使用分段函数
+    
+    @classmethod
+    def set_weight_method(cls, use_continuous: bool = False):
+        """设置权重计算方法：True=连续函数, False=分段函数"""
+        cls.use_continuous_weight = use_continuous
+        method_name = "continuous (polynomial)" if use_continuous else "piecewise"
+        print(f"Weight calculation method set to: {method_name}")
+    
+    @staticmethod
+    def _compute_weight_scalar(x):
+        """根据设置选择权重计算方法（标量版本）"""
+        if PathIntegralBenchmark.use_continuous_weight:
+            return compute_weight_continuous(x)
+        else:
+            # 原分段函数
+            if x < -1.0:
+                return 0.1
+            elif x < 0.0:
+                return 0.3 * x + 0.4
+            elif x < 1.0:
+                return 0.5 * (1.0 - x * x)
+            else:
+                return 0.2
+    
+    @staticmethod
+    def _compute_weight_vectorized(x_array):
+        """根据设置选择权重计算方法（向量化版本）"""
+        if PathIntegralBenchmark.use_continuous_weight:
+            # 使用多项式连续函数（无分支）
+            c0, c1, c2, c3, c4, c5, c6 = (
+                0.3125, 0.234375, -0.2734375, 
+                -0.05859375, 0.13671875, 0.01953125, -0.03125
+            )
+            # 向量化霍纳法则
+            result = c6
+            result = result * x_array + c5
+            result = result * x_array + c4
+            result = result * x_array + c3
+            result = result * x_array + c2
+            result = result * x_array + c1
+            result = result * x_array + c0
+            return result
+        else:
+            # 原向量化分段函数
+            return np.where(
+                x_array < -1.0, 0.1,
+                np.where(
+                    x_array < 0.0,
+                    0.3 * x_array + 0.4,
+                    np.where(
+                        x_array < 1.0,
+                        0.5 * (1.0 - x_array * x_array),
+                        0.2
+                    )
+                )
+            )
+    
     @staticmethod
     def python_implementation(steps: int = 10000, paths: int = 1000) -> float:
         """Pure Python implementation - trajectory integral computation"""
         result = 0.0
-        for traj in range(paths):  # 语义上理解为trajectories
+        use_continuous = PathIntegralBenchmark.use_continuous_weight
+        
+        for traj in range(paths):
             integral = 0.0
             x = 0.0
             for step in range(steps):
-                # Simulate complex branching logic in trajectory integration
-                if x < -1.0:
-                    weight = 0.1
-                elif x < 0.0:
-                    weight = 0.3 * x + 0.4
-                elif x < 1.0:
-                    weight = 0.5 * (1.0 - x**2)
+                # 根据设置选择权重计算方法
+                if use_continuous:
+                    weight = compute_weight_continuous(x)
                 else:
-                    weight = 0.2
+                    # 原分段逻辑
+                    if x < -1.0:
+                        weight = 0.1
+                    elif x < 0.0:
+                        weight = 0.3 * x + 0.4
+                    elif x < 1.0:
+                        weight = 0.5 * (1.0 - x**2)
+                    else:
+                        weight = 0.2
                 
                 # Update integral value (with complex condition checking)
                 delta = 1.0 / steps
@@ -160,23 +291,26 @@ class PathIntegralBenchmark:
         return result
     
     @staticmethod
-    @jit(nopython=True, parallel=False)
-    def numba_implementation(steps: int = 10000, paths: int = 1000) -> float:
-        """Numba实现（串行）"""
+    @jit(nopython=True)
+    def numba_implementation(steps: int = 10000, paths: int = 1000, use_continuous: bool = False) -> float:
+        """Numba实现（串行）- 支持连续/分段权重"""
         result = 0.0
         for path in range(paths):
             integral = 0.0
             x = 0.0
             for step in range(steps):
-                # 与Python实现相同的逻辑
-                if x < -1.0:
-                    weight = 0.1
-                elif x < 0.0:
-                    weight = 0.3 * x + 0.4
-                elif x < 1.0:
-                    weight = 0.5 * (1.0 - x**2)
+                # 权重计算
+                if use_continuous:
+                    weight = compute_weight_continuous_numba(x)
                 else:
-                    weight = 0.2
+                    if x < -1.0:
+                        weight = 0.1
+                    elif x < 0.0:
+                        weight = 0.3 * x + 0.4
+                    elif x < 1.0:
+                        weight = 0.5 * (1.0 - x**2)
+                    else:
+                        weight = 0.2
                 
                 delta = 1.0 / steps
                 if step % 2 == 0:
@@ -196,22 +330,25 @@ class PathIntegralBenchmark:
     
     @staticmethod
     @jit(nopython=True, parallel=True)
-    def numba_parallel_implementation(steps: int = 10000, paths: int = 1000) -> float:
-        """Numba实现（并行）"""
+    def numba_parallel_implementation(steps: int = 10000, paths: int = 1000, use_continuous: bool = False) -> float:
+        """Numba实现（并行）- 支持连续/分段权重"""
         result = 0.0
-        # 使用prange进行并行化
         for path in prange(paths):
             integral = 0.0
             x = 0.0
             for step in range(steps):
-                if x < -1.0:
-                    weight = 0.1
-                elif x < 0.0:
-                    weight = 0.3 * x + 0.4
-                elif x < 1.0:
-                    weight = 0.5 * (1.0 - x**2)
+                # 权重计算
+                if use_continuous:
+                    weight = compute_weight_continuous_numba(x)
                 else:
-                    weight = 0.2
+                    if x < -1.0:
+                        weight = 0.1
+                    elif x < 0.0:
+                        weight = 0.3 * x + 0.4
+                    elif x < 1.0:
+                        weight = 0.5 * (1.0 - x**2)
+                    else:
+                        weight = 0.2
                 
                 delta = 1.0 / steps
                 if step % 2 == 0:
@@ -235,50 +372,64 @@ class PathIntegralBenchmark:
         if not NUMPY_AVAILABLE:
             return 0.0
         
-        import numpy as np
+        use_continuous = PathIntegralBenchmark.use_continuous_weight
         
         # 初始化：所有路径的初始状态
-        x_array = np.zeros(paths, dtype=np.float64)  # 所有路径的当前x值
-        integral_array = np.zeros(paths, dtype=np.float64)  # 所有路径的积分值
+        x_array = np.zeros(paths, dtype=np.float64)
+        integral_array = np.zeros(paths, dtype=np.float64)
         
         delta = 1.0 / steps
         
-        # 时间步循环 - 路径内顺序执行
+        # 预计算多项式系数（如果使用连续函数）
+        if use_continuous:
+            c0, c1, c2, c3, c4, c5, c6 = (
+                0.3125, 0.234375, -0.2734375, 
+                -0.05859375, 0.13671875, 0.01953125, -0.03125
+            )
+        
+        # 时间步循环
         for step in range(steps):
-            # 为所有路径生成随机数 - 路径间向量化
             rand_vals = np.random.random(paths) * 0.1
             
-            # 分支逻辑计算 - 路径间向量化
-            # 使用向量化的条件判断
-            weight_array = np.where(
-                x_array < -1.0, 
-                0.1,
-                np.where(
-                    x_array < 0.0,
-                    0.3 * x_array + 0.4,
+            # 根据设置选择权重计算方法
+            if use_continuous:
+                # 连续函数（无分支，霍纳法则）
+                weight_array = c6
+                weight_array = weight_array * x_array + c5
+                weight_array = weight_array * x_array + c4
+                weight_array = weight_array * x_array + c3
+                weight_array = weight_array * x_array + c2
+                weight_array = weight_array * x_array + c1
+                weight_array = weight_array * x_array + c0
+            else:
+                # 分段函数（有分支）
+                weight_array = np.where(
+                    x_array < -1.0, 
+                    0.1,
                     np.where(
-                        x_array < 1.0,
-                        0.5 * (1.0 - x_array * x_array),
-                        0.2
+                        x_array < 0.0,
+                        0.3 * x_array + 0.4,
+                        np.where(
+                            x_array < 1.0,
+                            0.5 * (1.0 - x_array * x_array),
+                            0.2
+                        )
                     )
                 )
-            )
             
-            # 交替因子 - 路径间向量化
+            # 交替因子
             if step % 2 == 0:
                 factor_array = 1.0 + 0.1 * x_array
             else:
                 factor_array = 1.0 - 0.1 * x_array
             
-            # 更新积分 - 路径间向量化
+            # 更新积分
             integral_array += weight_array * delta * factor_array
             
-            # 更新x值 - 路径间向量化
+            # 更新x值
             x_array += rand_vals
-            # 边界裁剪 - 路径间向量化
             x_array = np.clip(x_array, -2.0, 2.0)
         
-        # 返回所有路径的平均积分值
         return float(np.mean(integral_array))
     
     @staticmethod
@@ -737,10 +888,17 @@ Examples:
   %(prog)s --size (5000,500)                     # Run all tests with same scale
   %(prog)s --size-traj (5000,500) --size-mc 1000000 --size-nbody (200,20)
   %(prog)s --test traj --size-traj (5000,500)    # Run only trajectory integral test
+  %(prog)s --test traj --weight-method continuous # Use continuous weight function
+  %(prog)s --test traj --weight-method piecewise  # Use piecewise weight function (default)
   %(prog)s --test mc --size-mc 1000000           # Run only Monte Carlo test
   %(prog)s --test nbody --size-nbody (200,20)    # Run only N-body test
   %(prog)s --repeats 10 --output results.json    # Run 10 repeats and save to JSON
   %(prog)s --help                                # Show this help message
+  
+Weight Methods:
+  --weight-method piecewise   Use original piecewise weight function (with branches)
+  --weight-method continuous  Use 6th-degree polynomial approximation (branch-free)
+  --weight-method both        Compare both methods side by side
   
 Scale parameters:
   --size (m,n):        Set uniform scale for all tests
@@ -786,7 +944,23 @@ Scale parameters:
         help="Which test to run: 'traj' for trajectory integral, 'mc' for Monte Carlo, 'nbody' for N-body, 'all' for all tests (default)"
     )
     
+    # 添加权重方法选择参数
+    parser.add_argument(
+        "--weight-method",
+        type=str,
+        choices=["piecewise", "continuous", "both"],
+        default="piecewise",
+        help="Weight calculation method for trajectory integral: 'piecewise' (default, with branches), 'continuous' (polynomial, branch-free), or 'both' (compare both)"
+    )
+    
     args = parser.parse_args()
+    
+    # 设置权重计算方法
+    if args.weight_method == "continuous":
+        PathIntegralBenchmark.set_weight_method(True)
+    elif args.weight_method == "piecewise":
+        PathIntegralBenchmark.set_weight_method(False)
+    # 'both' 模式在测试函数中处理
     
     # Parse scale parameters
     def parse_tuple(s: str) -> Tuple[int, int]:
@@ -839,24 +1013,44 @@ Scale parameters:
     def run_trajectory_test():
         print("\n1. Testing complex branching and loops (Trajectory Integral)...")
         
+        # 获取权重方法设置
+        weight_method = args.weight_method
+        
+        if weight_method == "both":
+            # 先运行分段函数版本
+            print("\n--- Running with PIECEWISE weight function ---")
+            PathIntegralBenchmark.set_weight_method(False)
+            _run_trajectory_single_test("Piecewise")
+            
+            # 再运行连续函数版本
+            print("\n--- Running with CONTINUOUS weight function ---")
+            PathIntegralBenchmark.set_weight_method(True)
+            _run_trajectory_single_test("Continuous")
+        else:
+            # 单模式运行
+            method_label = "Continuous" if PathIntegralBenchmark.use_continuous_weight else "Piecewise"
+            _run_trajectory_single_test(method_label)
+    
+    def _run_trajectory_single_test(method_label: str):
+        """单次轨迹测试（辅助函数）"""
         path_integral = PathIntegralBenchmark()
         
         # Pure Python implementation
         result = benchmark.run_benchmark(
             path_integral.python_implementation,
             task_name="Trajectory Integral",
-            impl_name="Pure Python",
+            impl_name=f"Pure Python ({method_label})",
             steps=traj_steps,
             paths=traj_trajectories
         )
         all_results.append(result)
         
-        # 新的NumPy实现 - 路径间向量化，路径内循环
+        # NumPy实现
         if NUMPY_AVAILABLE:
             result = benchmark.run_benchmark(
-                path_integral.numpy_scipy_implementation,  # 使用新的实现
+                path_integral.numpy_scipy_implementation,
                 task_name="Trajectory Integral",
-                impl_name="NumPy (Vectorized across paths)",
+                impl_name=f"NumPy ({method_label})",
                 steps=traj_steps,
                 paths=traj_trajectories
             )
@@ -867,7 +1061,7 @@ Scale parameters:
             result = benchmark.run_benchmark(
                 path_integral.numpy_old_implementation,
                 task_name="Trajectory Integral",
-                impl_name="NumPy/SciPy (Old - vectorized within path)",
+                impl_name=f"NumPy/SciPy (Old - vectorized within path, {method_label})",
                 steps=traj_steps,
                 paths=traj_trajectories
             )
@@ -876,9 +1070,12 @@ Scale parameters:
         # Numba serial implementation
         if NUMBA_AVAILABLE:
             result = benchmark.run_benchmark(
-                path_integral.numba_implementation,
+                lambda steps, paths: path_integral.numba_implementation(
+                    steps, paths, 
+                    use_continuous=PathIntegralBenchmark.use_continuous_weight
+                ),
                 task_name="Trajectory Integral",
-                impl_name="Numba (Serial)",
+                impl_name=f"Numba (Serial, {method_label})",
                 steps=traj_steps,
                 paths=traj_trajectories
             )
@@ -886,9 +1083,12 @@ Scale parameters:
             
             # Numba parallel implementation
             result = benchmark.run_benchmark(
-                path_integral.numba_parallel_implementation,
+                lambda steps, paths: path_integral.numba_parallel_implementation(
+                    steps, paths,
+                    use_continuous=PathIntegralBenchmark.use_continuous_weight
+                ),
                 task_name="Trajectory Integral",
-                impl_name="Numba (Parallel)",
+                impl_name=f"Numba (Parallel, {method_label})",
                 steps=traj_steps,
                 paths=traj_trajectories
             )
