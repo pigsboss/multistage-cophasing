@@ -356,7 +356,7 @@ class ScalarOpenCLStyle:
 
 # ---------- 技术途径2：向量化计算（NumPy风格） ---------- #
 class VectorizedNumPyStyle:
-    """向量化实现，与cpu.py的numpy_scipy_implementation完全一致的计算模式"""
+    """向量化实现，支持时间维度分块（Chunking）"""
     
     @staticmethod
     def create_compute_function(steps: int, paths: int, use_lcg: bool = False, use_continuous: bool = False):
@@ -494,6 +494,140 @@ class VectorizedNumPyStyle:
         
         return compute_vectorized
 
+    @staticmethod
+    def create_compute_function_chunked(steps: int, paths: int, use_lcg: bool = False, 
+                                       use_continuous: bool = False, chunk_size: int = 10000):
+        """
+        创建分块向量化计算函数
+        
+        Args:
+            steps: 总时间步数
+            paths: 路径数
+            use_lcg: 是否使用LCG随机数
+            use_continuous: 是否使用连续权重函数
+            chunk_size: 每个JIT块的时间步数（默认10000，可调整）
+        """
+        import jax
+        import jax.numpy as jnp
+        from jax import random
+        
+        delta = 1.0 / steps
+        
+        # 预计算多项式系数
+        if use_continuous:
+            c0, c1, c2, c3, c4, c5, c6 = (
+                0.3125, 0.234375, -0.2734375, 
+                -0.05859375, 0.13671875, 0.01953125, -0.03125
+            )
+        
+        @jax.jit
+        def compute_chunk(x_init, integral_init, key, chunk_start_idx: int, chunk_steps: int):
+            """
+            计算一个时间块（chunk）
+            
+            Args:
+                x_init: 初始状态 (paths,)
+                integral_init: 初始积分 (paths,)
+                key: 随机数密钥
+                chunk_start_idx: 全局起始步索引（用于计算交替因子奇偶性）
+                chunk_steps: 本块实际步数（处理余数时可能小于 chunk_size）
+            """
+            def body_fn(step_in_chunk, carry):
+                x_array, integral_array = carry
+                global_step = chunk_start_idx + step_in_chunk
+                
+                # 随机数生成
+                if use_lcg:
+                    # LCG实现（简化版，实际应传递状态）
+                    step_key = random.fold_in(key, step_in_chunk)
+                    subkeys = random.split(step_key, paths)
+                    rand_vals = jax.vmap(lambda k: random.uniform(k, dtype=jnp.float32))(subkeys) * 0.1
+                else:
+                    step_key = random.fold_in(key, step_in_chunk)
+                    subkeys = random.split(step_key, paths)
+                    rand_vals = jax.vmap(lambda k: random.uniform(k, dtype=jnp.float32))(subkeys) * 0.1
+                
+                # 权重计算（连续或分段）
+                if use_continuous:
+                    weight_array = c6
+                    weight_array = weight_array * x_array + c5
+                    weight_array = weight_array * x_array + c4
+                    weight_array = weight_array * x_array + c3
+                    weight_array = weight_array * x_array + c2
+                    weight_array = weight_array * x_array + c1
+                    weight_array = weight_array * x_array + c0
+                else:
+                    weight_array = jnp.where(
+                        x_array < -1.0, 0.1,
+                        jnp.where(
+                            x_array < 0.0, 0.3 * x_array + 0.4,
+                            jnp.where(
+                                x_array < 1.0, 0.5 * (1.0 - x_array * x_array),
+                                0.2
+                            )
+                        )
+                    )
+                
+                # 交替因子（基于全局步数）
+                factor_array = jnp.where(
+                    global_step % 2 == 0,
+                    1.0 + 0.1 * x_array,
+                    1.0 - 0.1 * x_array
+                )
+                
+                # 更新积分
+                integral_array = integral_array + weight_array * delta * factor_array
+                
+                # 更新x
+                x_array = jnp.clip(x_array + rand_vals, -2.0, 2.0)
+                
+                return (x_array, integral_array), None
+            
+            # 使用 scan 处理 chunk 内步骤（更节省内存）
+            (final_x, final_integral), _ = jax.lax.scan(
+                body_fn, 
+                (x_init, integral_init), 
+                jnp.arange(chunk_steps)
+            )
+            
+            return final_x, final_integral
+        
+        def compute_full_chunked(key):
+            """主控函数：分块执行"""
+            # 初始化
+            x_array = jnp.zeros((paths,), dtype=jnp.float32)
+            integral_array = jnp.zeros((paths,), dtype=jnp.float32)
+            
+            # 计算完整 chunks 数量和余数
+            num_full_chunks = steps // chunk_size
+            remainder = steps % chunk_size
+            
+            # 为每个 chunk 生成独立密钥
+            chunk_keys = random.split(key, num_full_chunks + (1 if remainder > 0 else 0))
+            
+            # 顺序处理完整 chunks（马尔可夫链必须顺序）
+            for i in range(num_full_chunks):
+                start_idx = i * chunk_size
+                x_array, integral_array = compute_chunk(
+                    x_array, integral_array, chunk_keys[i], 
+                    start_idx, chunk_size
+                )
+                # 每 10 个 chunks 同步一次，防止内存堆积（可选）
+                if i % 10 == 9:
+                    jax.block_until_ready((x_array, integral_array))
+            
+            # 处理余数（最后不足 chunk_size 的部分）
+            if remainder > 0:
+                start_idx = num_full_chunks * chunk_size
+                x_array, integral_array = compute_chunk(
+                    x_array, integral_array, chunk_keys[num_full_chunks],
+                    start_idx, remainder
+                )
+            
+            return jnp.mean(integral_array)
+        
+        return compute_full_chunked
+
 
 # ---------- public benchmark routine ---------- #
 def run_benchmark(
@@ -505,8 +639,9 @@ def run_benchmark(
     method_type: str = "scalar",  # "scalar" 或 "vectorized"
     backend: str = "auto",  # "auto" 或指定后端
     use_continuous: bool = False,  # 新增：使用连续权重函数
+    chunk_size: int = None,  # None 表示不分块（传统模式）
 ) -> BenchmarkResult:
-    """运行路径积分基准测试"""
+    """运行路径积分基准测试（支持分块）"""
     import jax
     import jax.numpy as jnp
     from jax import random
@@ -530,6 +665,15 @@ def run_benchmark(
     platform = device.platform if device else "unknown"
     device_kind = device.device_kind if device else "unknown"
     
+    # 确定是否使用分块
+    use_chunking = chunk_size is not None and chunk_size > 0 and chunk_size < steps
+    
+    if use_chunking:
+        print(f"Using chunked execution: chunk_size={chunk_size}, total_steps={steps}")
+        print(f"Number of chunks: {(steps + chunk_size - 1) // chunk_size}")
+    else:
+        print(f"Using monolithic execution (single JIT kernel)")
+    
     # 添加编译时间监控
     print(f"Creating {method_type} compute function with steps={steps}, paths={paths}...")
     weight_method_str = "continuous" if use_continuous else "piecewise"
@@ -540,11 +684,18 @@ def run_benchmark(
 
     # 选择计算方法
     if method_type == "scalar":
+        # 标量模式通常 paths 较小，保持原有实现
         compute_func = ScalarOpenCLStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
         method_desc = "Scalar (OpenCL-style loops)"
     elif method_type == "vectorized":
-        compute_func = VectorizedNumPyStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
-        method_desc = "Vectorized (NumPy-style vector ops)"
+        if use_chunking:
+            compute_func = VectorizedNumPyStyle.create_compute_function_chunked(
+                steps, paths, use_lcg, use_continuous, chunk_size
+            )
+            method_desc = f"Vectorized Chunked (chunk_size={chunk_size})"
+        else:
+            compute_func = VectorizedNumPyStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
+            method_desc = "Vectorized (monolithic)"
     else:
         raise ValueError(f"Unknown method_type: {method_type}")
 
@@ -561,7 +712,8 @@ def run_benchmark(
     
     # 构建实现名称（包含权重方法信息）
     weight_label = "Continuous" if use_continuous else "Piecewise"
-    impl_name = f"JAX {platform.upper()} ({device_kind}, {method_desc}, {rng_method}, {weight_label})"
+    chunk_label = f"Chunk{chunk_size}" if use_chunking else "Mono"
+    impl_name = f"JAX {platform.upper()} ({device_kind}, {method_desc}, {rng_method}, {weight_label}, {chunk_label})"
     
     # 预热运行
     print(f"Warming up {method_type} implementation...")
@@ -772,6 +924,17 @@ Weight Methods:
         help="列出所有可用的JAX后端并退出",
     )
     parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="时间维度分块大小（默认None表示不分块）。设置为正整数（如5000或10000）可启用分块执行，避免单次内核超时",
+    )
+    parser.add_argument(
+        "--auto-chunk",
+        action="store_true",
+        help="自动根据steps选择分块大小（steps>50000时自动分块，每块10000步）",
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="快速测试模式（使用较小的问题规模）",
@@ -821,6 +984,12 @@ Weight Methods:
         print(f"JAX backend: {jax.default_backend()}")
         print(f"Available devices: {[str(d) for d in devices]}")
     
+    # 确定chunk_size
+    chunk_size = args.chunk_size
+    if args.auto_chunk and steps > 50000 and chunk_size is None:
+        chunk_size = 10000
+        print(f"Auto-chunking enabled: using chunk_size={chunk_size}")
+    
     # 运行基准测试
     all_results = []
     
@@ -860,6 +1029,7 @@ Weight Methods:
                 method_type=method_type,
                 backend=args.backend,
                 use_continuous=use_continuous,
+                chunk_size=chunk_size,
             )
             all_results.append(result)
     
