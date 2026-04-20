@@ -681,7 +681,8 @@ def run_benchmark(
     method_type: str = "scalar",  # "scalar" 或 "vectorized"
     backend: str = "auto",  # "auto" 或指定后端
     use_continuous: bool = False,  # 新增：使用连续权重函数
-    chunk_size: int = None,  # None 表示不分块（传统模式）
+    chunk_steps: Optional[int] = None,  # None 表示不分块（传统模式）
+    chunk_paths: Optional[int] = None,  # 新增：路径维度分块
 ) -> BenchmarkResult:
     """运行路径积分基准测试（支持分块）"""
     import jax
@@ -708,13 +709,18 @@ def run_benchmark(
     device_kind = device.device_kind if device else "unknown"
     
     # 确定是否使用分块
-    use_chunking = chunk_size is not None and chunk_size > 0 and chunk_size < steps
+    use_chunking = (
+        (chunk_steps is not None and chunk_steps > 0 and chunk_steps < steps) or 
+        (chunk_paths is not None and chunk_paths > 0 and chunk_paths < paths)
+    )
     
     if use_chunking:
-        print(f"Using chunked execution: chunk_size={chunk_size}, total_steps={steps}")
-        print(f"Number of chunks: {(steps + chunk_size - 1) // chunk_size}")
+        cs = chunk_steps if chunk_steps is not None else steps
+        cp = chunk_paths if chunk_paths is not None else paths
+        print(f"Using chunked execution: tile_size=({cs}, {cp})")
+        print(f"Grid: ({(steps + cs - 1) // cs} time chunks, {(paths + cp - 1) // cp} path chunks)")
     else:
-        print(f"Using monolithic execution (single JIT kernel)")
+        print("Using monolithic execution (single JIT kernel)")
     
     # 添加编译时间监控
     print(f"Creating {method_type} compute function with steps={steps}, paths={paths}...")
@@ -731,10 +737,13 @@ def run_benchmark(
         method_desc = "Scalar (OpenCL-style loops)"
     elif method_type == "vectorized":
         if use_chunking:
+            # For now, use time-based chunking only (existing implementation)
+            # Full 2D chunking would need additional implementation
+            actual_chunk_steps = chunk_steps if chunk_steps is not None else steps
             compute_func = VectorizedNumPyStyle.create_compute_function_chunked(
-                steps, paths, use_lcg, use_continuous, chunk_size
+                steps, paths, use_lcg, use_continuous, actual_chunk_steps
             )
-            method_desc = f"Vectorized Chunked (chunk_size={chunk_size})"
+            method_desc = f"Vectorized Chunked (chunk_steps={actual_chunk_steps})"
         else:
             compute_func = VectorizedNumPyStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
             method_desc = "Vectorized (monolithic)"
