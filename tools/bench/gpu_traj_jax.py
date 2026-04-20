@@ -104,6 +104,64 @@ except ImportError:
     print("Error: JAX not installed.  pip install jax jaxlib", file=sys.stderr)
     sys.exit(1)
 
+# ---------- 权重函数实现 ---------- #
+def compute_weight_continuous(x):
+    """
+    6次多项式连续逼近原分段权重函数（方案C）
+    计算量：6次乘法 + 6次加法（霍纳法则）
+    无分支，适合GPU/向量化计算
+    """
+    # 预计算系数（基于最小二乘拟合 [-2, 2] 区间）
+    c0 = 0.3125
+    c1 = 0.234375
+    c2 = -0.2734375
+    c3 = -0.05859375
+    c4 = 0.13671875
+    c5 = 0.01953125
+    c6 = -0.03125
+    
+    # 使用霍纳法则计算：(((((c6*x + c5)*x + c4)*x + c3)*x + c2)*x + c1)*x + c0
+    result = c6
+    result = result * x + c5
+    result = result * x + c4
+    result = result * x + c3
+    result = result * x + c2
+    result = result * x + c1
+    result = result * x + c0
+    
+    return result
+
+
+def compute_weight_piecewise(x):
+    """
+    原分段权重函数（用于对比）
+    """
+    # 在JAX中使用jnp.where实现条件分支
+    import jax.numpy as jnp
+    
+    return jnp.where(
+        x < -1.0, 0.1,
+        jnp.where(
+            x < 0.0, 0.3 * x + 0.4,
+            jnp.where(
+                x < 1.0, 0.5 * (1.0 - x * x),
+                0.2
+            )
+        )
+    )
+
+
+# 全局权重计算方法标志
+_use_continuous_weight = False
+
+def set_weight_method(use_continuous: bool = False):
+    """设置权重计算方法：True=连续函数, False=分段函数"""
+    global _use_continuous_weight
+    _use_continuous_weight = use_continuous
+    method_name = "continuous (polynomial)" if use_continuous else "piecewise"
+    print(f"Weight calculation method set to: {method_name}")
+    return use_continuous
+
 # ---------- shared result container (identical to cpu.py) ---------- #
 @dataclass
 class BenchmarkResult:
@@ -188,7 +246,7 @@ class ScalarOpenCLStyle:
     """标量循环实现，仿效OpenCL显式编写计算过程"""
     
     @staticmethod
-    def _integrate_single_path_scalar(steps: int, key, use_lcg: bool = False):
+    def _integrate_single_path_scalar(steps: int, key, use_lcg: bool = False, use_continuous: bool = False):
         """单个路径的积分计算（标量版本）"""
         import jax
         import jax.numpy as jnp
@@ -196,12 +254,27 @@ class ScalarOpenCLStyle:
         def body_fn_scalar(carry, step):
             x, integral, rng_state = carry
             
-            # 分支逻辑（与OpenCL完全一致）
-            weight = jnp.where(
-                x < -1.0, 0.1,
-                jnp.where(x < 0.0, 0.3 * x + 0.4,
-                    jnp.where(x < 1.0, 0.5 * (1.0 - x * x), 0.2))
-            )
+            # 根据设置选择权重计算方法
+            if use_continuous:
+                # 连续函数（6次多项式，无分支）
+                c0, c1, c2, c3, c4, c5, c6 = (
+                    0.3125, 0.234375, -0.2734375, 
+                    -0.05859375, 0.13671875, 0.01953125, -0.03125
+                )
+                weight = c6
+                weight = weight * x + c5
+                weight = weight * x + c4
+                weight = weight * x + c3
+                weight = weight * x + c2
+                weight = weight * x + c1
+                weight = weight * x + c0
+            else:
+                # 分段函数（有分支）
+                weight = jnp.where(
+                    x < -1.0, 0.1,
+                    jnp.where(x < 0.0, 0.3 * x + 0.4,
+                        jnp.where(x < 1.0, 0.5 * (1.0 - x * x), 0.2))
+                )
             
             # 交替因子
             factor = jnp.where(step % 2 == 0, 1.0 + 0.1 * x, 1.0 - 0.1 * x)
@@ -236,7 +309,7 @@ class ScalarOpenCLStyle:
         return body_fn_scalar
     
     @staticmethod
-    def create_compute_function(steps: int, paths: int, use_lcg: bool = False):
+    def create_compute_function(steps: int, paths: int, use_lcg: bool = False, use_continuous: bool = False):
         """创建标量计算函数"""
         import jax
         import jax.numpy as jnp
@@ -250,7 +323,7 @@ class ScalarOpenCLStyle:
                 states = base_seed + jnp.arange(paths, dtype=jnp.uint32)
                 
                 def process_single_path(initial_state):
-                    body_fn = ScalarOpenCLStyle._integrate_single_path_scalar(steps, None, use_lcg)
+                    body_fn = ScalarOpenCLStyle._integrate_single_path_scalar(steps, None, use_lcg, use_continuous)
                     (_, integral, _), _ = jax.lax.scan(
                         body_fn, 
                         (0.0, 0.0, initial_state), 
@@ -265,7 +338,7 @@ class ScalarOpenCLStyle:
                 keys = jax.random.split(key, paths)
                 
                 def process_single_path(path_key):
-                    body_fn = ScalarOpenCLStyle._integrate_single_path_scalar(steps, path_key, use_lcg)
+                    body_fn = ScalarOpenCLStyle._integrate_single_path_scalar(steps, path_key, use_lcg, use_continuous)
                     (_, integral, _), _ = jax.lax.scan(
                         body_fn,
                         (0.0, 0.0, path_key),
@@ -286,7 +359,7 @@ class VectorizedNumPyStyle:
     """向量化实现，与cpu.py的numpy_scipy_implementation完全一致的计算模式"""
     
     @staticmethod
-    def create_compute_function(steps: int, paths: int, use_lcg: bool = False):
+    def create_compute_function(steps: int, paths: int, use_lcg: bool = False, use_continuous: bool = False):
         """创建向量化计算函数 - 完全匹配cpu.py的计算模式"""
         import jax
         import jax.numpy as jnp
@@ -299,6 +372,13 @@ class VectorizedNumPyStyle:
             # 初始化所有路径的状态
             x_array = jnp.zeros((paths,), dtype=jnp.float32)
             integral_array = jnp.zeros((paths,), dtype=jnp.float32)
+            
+            # 预计算多项式系数（如果使用连续函数）
+            if use_continuous:
+                c0, c1, c2, c3, c4, c5, c6 = (
+                    0.3125, 0.234375, -0.2734375, 
+                    -0.05859375, 0.13671875, 0.01953125, -0.03125
+                )
             
             if use_lcg:
                 # LCG初始化
@@ -314,17 +394,28 @@ class VectorizedNumPyStyle:
                     rand_vals = (new_states & jnp.uint32(0x7fffffff)).astype(jnp.float32)
                     rand_vals = rand_vals / jnp.float32(2147483647.0) * 0.1
                     
-                    # 与cpu.py完全相同的分支逻辑
-                    weight_array = jnp.where(
-                        x_array < -1.0, 0.1,
-                        jnp.where(
-                            x_array < 0.0, 0.3 * x_array + 0.4,
+                    # 根据设置选择权重计算方法
+                    if use_continuous:
+                        # 连续函数（6次多项式，无分支，霍纳法则）
+                        weight_array = c6
+                        weight_array = weight_array * x_array + c5
+                        weight_array = weight_array * x_array + c4
+                        weight_array = weight_array * x_array + c3
+                        weight_array = weight_array * x_array + c2
+                        weight_array = weight_array * x_array + c1
+                        weight_array = weight_array * x_array + c0
+                    else:
+                        # 分段函数（有分支）
+                        weight_array = jnp.where(
+                            x_array < -1.0, 0.1,
                             jnp.where(
-                                x_array < 1.0, 0.5 * (1.0 - x_array * x_array),
-                                0.2
+                                x_array < 0.0, 0.3 * x_array + 0.4,
+                                jnp.where(
+                                    x_array < 1.0, 0.5 * (1.0 - x_array * x_array),
+                                    0.2
+                                )
                             )
                         )
-                    )
                     
                     # 交替因子 - 使用jnp.where代替if语句
                     factor_array = jnp.where(
@@ -356,17 +447,28 @@ class VectorizedNumPyStyle:
                     subkeys = random.split(step_key, paths)
                     rand_vals = jax.vmap(lambda k: random.uniform(k, dtype=jnp.float32))(subkeys) * 0.1
                     
-                    # 与cpu.py完全相同的分支逻辑
-                    weight_array = jnp.where(
-                        x_array < -1.0, 0.1,
-                        jnp.where(
-                            x_array < 0.0, 0.3 * x_array + 0.4,
+                    # 根据设置选择权重计算方法
+                    if use_continuous:
+                        # 连续函数（6次多项式，无分支，霍纳法则）
+                        weight_array = c6
+                        weight_array = weight_array * x_array + c5
+                        weight_array = weight_array * x_array + c4
+                        weight_array = weight_array * x_array + c3
+                        weight_array = weight_array * x_array + c2
+                        weight_array = weight_array * x_array + c1
+                        weight_array = weight_array * x_array + c0
+                    else:
+                        # 分段函数（有分支）
+                        weight_array = jnp.where(
+                            x_array < -1.0, 0.1,
                             jnp.where(
-                                x_array < 1.0, 0.5 * (1.0 - x_array * x_array),
-                                0.2
+                                x_array < 0.0, 0.3 * x_array + 0.4,
+                                jnp.where(
+                                    x_array < 1.0, 0.5 * (1.0 - x_array * x_array),
+                                    0.2
+                                )
                             )
                         )
-                    )
                     
                     # 交替因子 - 使用jnp.where代替if语句
                     factor_array = jnp.where(
@@ -402,6 +504,7 @@ def run_benchmark(
     use_lcg: bool = False,
     method_type: str = "scalar",  # "scalar" 或 "vectorized"
     backend: str = "auto",  # "auto" 或指定后端
+    use_continuous: bool = False,  # 新增：使用连续权重函数
 ) -> BenchmarkResult:
     """运行路径积分基准测试"""
     import jax
@@ -429,15 +532,18 @@ def run_benchmark(
     
     # 添加编译时间监控
     print(f"Creating {method_type} compute function with steps={steps}, paths={paths}...")
+    weight_method_str = "continuous" if use_continuous else "piecewise"
+    print(f"Weight method: {weight_method_str}")
+    
     import time as time_module
     start_compile = time_module.time()
 
     # 选择计算方法
     if method_type == "scalar":
-        compute_func = ScalarOpenCLStyle.create_compute_function(steps, paths, use_lcg)
+        compute_func = ScalarOpenCLStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
         method_desc = "Scalar (OpenCL-style loops)"
     elif method_type == "vectorized":
-        compute_func = VectorizedNumPyStyle.create_compute_function(steps, paths, use_lcg)
+        compute_func = VectorizedNumPyStyle.create_compute_function(steps, paths, use_lcg, use_continuous)
         method_desc = "Vectorized (NumPy-style vector ops)"
     else:
         raise ValueError(f"Unknown method_type: {method_type}")
@@ -453,8 +559,9 @@ def run_benchmark(
         key = random.PRNGKey(42)
         rng_method = "JAX-RNG"
     
-    # 构建实现名称
-    impl_name = f"JAX {platform.upper()} ({device_kind}, {method_desc}, {rng_method})"
+    # 构建实现名称（包含权重方法信息）
+    weight_label = "Continuous" if use_continuous else "Piecewise"
+    impl_name = f"JAX {platform.upper()} ({device_kind}, {method_desc}, {rng_method}, {weight_label})"
     
     # 预热运行
     print(f"Warming up {method_type} implementation...")
@@ -516,7 +623,7 @@ def run_benchmark(
         execution_times=times,
         precision="fp32",
         notes=f"Steps={steps}, Paths={paths}, Method={method_type}, "
-              f"RNG={rng_method}, Backend={platform}, "
+              f"RNG={rng_method}, Weight={weight_label}, Backend={platform}, "
               f"Throughput={paths_per_sec:.0f} paths/sec, "
               f"Ops={total_ops_per_sec:.0f} steps·paths/sec",
         result_value=final_result,
@@ -597,10 +704,16 @@ Examples:
   %(prog)s --method vectorized                  # 使用向量化方法
   %(prog)s --backend {available_backends[0] if available_backends else 'cpu'}  # 指定后端
   %(prog)s --use-lcg                           # 使用LCG随机数生成器
+  %(prog)s --weight-method continuous          # 使用连续权重函数（多项式）
+  %(prog)s --weight-method piecewise           # 使用分段权重函数（默认）
   %(prog)s --output benchmark.json              # 保存结果到JSON文件
   %(prog)s --list-backends                     # 列出可用后端
 
 Available backends: {', '.join(available_backends)}
+
+Weight Methods:
+  --weight-method piecewise   Use original piecewise weight function (with branches)
+  --weight-method continuous  Use 6th-degree polynomial approximation (branch-free)
         """,
     )
 
@@ -639,6 +752,14 @@ Available backends: {', '.join(available_backends)}
         "--use-lcg",
         action="store_true",
         help="使用LCG随机数生成器（与OpenCL实现匹配）",
+    )
+    # 新增：权重方法选择参数
+    parser.add_argument(
+        "--weight-method",
+        type=str,
+        choices=["piecewise", "continuous", "both"],
+        default="piecewise",
+        help="权重计算方法：'piecewise'（默认，分段函数）、'continuous'（连续多项式）、或'both'（对比两者）",
     )
     parser.add_argument(
         "--output",
@@ -681,6 +802,7 @@ Available backends: {', '.join(available_backends)}
     print(f"Method: {args.method}")
     print(f"Backend: {args.backend}")
     print(f"RNG: {'LCG' if args.use_lcg else 'JAX-RNG'}")
+    print(f"Weight method: {args.weight_method}")
     if args.quick:
         print("Quick mode: ON")
     
@@ -702,27 +824,44 @@ Available backends: {', '.join(available_backends)}
     # 运行基准测试
     all_results = []
     
-    # 确定要测试的方法
+    # 确定要测试的权重方法
+    weight_methods_to_test = []
+    if args.weight_method == "both":
+        weight_methods_to_test = [False, True]  # False=piecewise, True=continuous
+    elif args.weight_method == "continuous":
+        weight_methods_to_test = [True]
+    else:  # piecewise
+        weight_methods_to_test = [False]
+    
+    # 确定要测试的计算方法
     methods_to_test = []
     if args.method == "both":
         methods_to_test = ["scalar", "vectorized"]
     else:
         methods_to_test = [args.method]
     
-    for method_type in methods_to_test:
-        print(f"\n{'='*60}")
-        print(f"Testing {method_type} method...")
+    # 遍历所有组合
+    for use_continuous in weight_methods_to_test:
+        weight_label = "continuous" if use_continuous else "piecewise"
+        if len(weight_methods_to_test) > 1:
+            print(f"\n{'='*60}")
+            print(f"Testing with {weight_label.upper()} weight function...")
+            print(f"{'='*60}")
         
-        result = run_benchmark(
-            steps=steps,
-            paths=paths,
-            warmup_iterations=args.warmup,
-            test_iterations=args.repeats,
-            use_lcg=args.use_lcg,
-            method_type=method_type,
-            backend=args.backend,
-        )
-        all_results.append(result)
+        for method_type in methods_to_test:
+            print(f"\nTesting {method_type} method with {weight_label} weights...")
+            
+            result = run_benchmark(
+                steps=steps,
+                paths=paths,
+                warmup_iterations=args.warmup,
+                test_iterations=args.repeats,
+                use_lcg=args.use_lcg,
+                method_type=method_type,
+                backend=args.backend,
+                use_continuous=use_continuous,
+            )
+            all_results.append(result)
     
     # 输出结果
     BenchmarkReporter.print_results(all_results, output_file=args.output)
@@ -752,6 +891,8 @@ Available backends: {', '.join(available_backends)}
                 use_lcg=args.use_lcg,
                 method_type=all_results[0].method_type,
                 backend=args.backend,
+                use_continuous=all_results[0].implementation.find("Continuous") >= 0 or 
+                              all_results[0].implementation.find("continuous") >= 0,
             )
             
             gpu_value = gpu_result.result_value
