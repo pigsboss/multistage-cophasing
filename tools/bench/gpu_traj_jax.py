@@ -717,7 +717,7 @@ class VectorizedNumPyStyle:
                 -0.05859375, 0.13671875, 0.01953125, -0.03125
             )
         
-        @jax.jit
+        @jax.jit(static_argnames=('chunk_steps',))
         def compute_chunk(x_init, integral_init, key, chunk_start_idx: int, chunk_steps: int):
             """
             Compute a single chunk with pre-generated random numbers.
