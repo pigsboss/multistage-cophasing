@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GPU Path-Integral Benchmark - JAX通用后端
-==========================================
+GPU Path-Integral Benchmark - JAX Universal Backend
+===================================================
 
-支持的后端：
+Supported backends:
 - Metal (Apple Silicon)
 - CUDA (NVIDIA GPUs)
 - ROCm (AMD GPUs)
 - Intel GPUs
-- CPU (后备)
+- CPU (fallback)
 
-支持的两种独立技术途径：
-1. 标量循环（Scalar Loops） - 仿效OpenCL，显式编写标量计算过程
-2. 向量化计算（Vectorized） - 仿效NumPy，显式编写向量计算过程
+Two independent computation methods:
+1. Scalar Loops - Emulates OpenCL, explicit scalar computation with path/time loops
+2. Vectorized - Emulates NumPy, explicit vectorized computation with time loops
 
-所有输出遵循MCPC编码标准（仅使用英文）。
-算法与OpenCL版本和CPU版本完全一致，确保结果可比性。
+All output follows MCPC Coding Standards (English only).
+Algorithms consistent with OpenCL and CPU versions for comparable results.
 
-使用示例：
+Usage examples:
   python gpu_traj_jax.py --method scalar --backend metal
   python gpu_traj_jax.py --method vectorized --backend cuda
   python gpu_traj_jax.py --method both --use-lcg --output results.json
+  python gpu_traj_jax.py --size (100000,10000) --chunk-size (5000,5000)  # Large task with chunking
 """
 
 import argparse
@@ -689,11 +690,11 @@ def run_benchmark(
     import jax.numpy as jnp
     from jax import random
     
-    # 设置后端
+    # Set backend
     if backend != "auto":
         set_jax_backend(backend)
     else:
-        # 自动检测并选择第一个可用后端
+        # Auto-detect and select first available backend
         available_backends = detect_available_backends()
         if available_backends:
             selected_backend = available_backends[0]
@@ -702,13 +703,13 @@ def run_benchmark(
         else:
             print("Warning: No backends available, using default", file=sys.stderr)
     
-    # 获取当前设备信息
+    # Get current device information
     devices = jax.devices()
     device = devices[0] if devices else None
     platform = device.platform if device else "unknown"
     device_kind = device.device_kind if device else "unknown"
     
-    # 确定是否使用分块
+    # Determine if chunking should be used
     use_chunking = (
         (chunk_steps is not None and chunk_steps > 0 and chunk_steps < steps) or 
         (chunk_paths is not None and chunk_paths > 0 and chunk_paths < paths)
@@ -717,12 +718,12 @@ def run_benchmark(
     if use_chunking:
         cs = chunk_steps if chunk_steps is not None else steps
         cp = chunk_paths if chunk_paths is not None else paths
-        print(f"Using chunked execution: tile_size=({cs}, {cp})")
+        print(f"Using chunked execution: tile size ({cs}, {cp})")
         print(f"Grid: ({(steps + cs - 1) // cs} time chunks, {(paths + cp - 1) // cp} path chunks)")
     else:
         print("Using monolithic execution (single JIT kernel)")
     
-    # 添加编译时间监控
+    # Add compilation time monitoring
     print(f"Creating {method_type} compute function with steps={steps}, paths={paths}...")
     weight_method_str = "continuous" if use_continuous else "piecewise"
     print(f"Weight method: {weight_method_str}")
@@ -771,7 +772,7 @@ def run_benchmark(
         chunk_label = "Mono"
     impl_name = f"JAX {platform.upper()} ({device_kind}, {method_desc}, {rng_method}, {weight_label}, {chunk_label})"
     
-    # 预热运行
+    # Warm-up runs
     print(f"Warming up {method_type} implementation...")
     for _ in range(warmup_iterations):
         if use_lcg:
@@ -781,7 +782,7 @@ def run_benchmark(
         
         compute_func(test_key).block_until_ready()
     
-    # 正式测试运行
+    # Test runs
     print(f"Running {test_iterations} test iterations...")
     times: List[float] = []
     results_list: List[float] = []
@@ -799,25 +800,25 @@ def run_benchmark(
         times.append(end_time - start_time)
         results_list.append(float(result))
     
-    # 计算性能指标
+    # Calculate performance metrics
     avg_time = float(np.mean(times)) if times else 0.0
     paths_per_sec = paths / avg_time if avg_time > 0 else 0.0
     total_ops_per_sec = (steps * paths) / avg_time if avg_time > 0 else 0.0
     final_result = results_list[-1] if results_list else 0.0
         
-    # 添加更多详细的时间信息
+    # Add more detailed timing information
     if len(times) > 1:
         print(f"  First iteration: {times[0]:.4f}s")
         print(f"  Best iteration: {min(times):.4f}s")
         print(f"  Std deviation: {np.std(times):.6f}s")
             
-        # 计算稳定后的性能（去掉前2次可能较慢的迭代）
+        # Calculate stable performance (remove first 2 potentially slower iterations)
         if len(times) > 3:
             stable_times = times[2:]
             stable_avg = sum(stable_times) / len(stable_times)
             print(f"  Stable average (after warmup): {stable_avg:.4f}s")
         
-    # 计算和显示性能指标
+    # Calculate and display performance metrics
     if steps > 0 and paths > 0 and avg_time > 0:
         ops_per_second = (steps * paths) / avg_time
         print(f"  Performance: {ops_per_second:.0f} operations/sec")
@@ -862,10 +863,10 @@ class BenchmarkReporter:
             print(f"\nResults saved to: {output_file}")
         else:
             print("\n" + "=" * 80)
-            print("GPU Path Integral Benchmark Results - JAX通用后端")
+            print("GPU Path Integral Benchmark Results - JAX Universal Backend")
             print("=" * 80)
             
-            # 按方法类型分组显示
+            # Group by method type
             method_groups = {}
             for r in results:
                 if r.method_type not in method_groups:
@@ -898,30 +899,37 @@ class BenchmarkReporter:
 def main():
     import jax
     
-    # 检测可用后端
+    # Detect available backends
     available_backends = detect_available_backends()
     
     parser = argparse.ArgumentParser(
-        description="GPU Path-Integral Benchmark - JAX通用后端（支持多种计算方法和后端）",
+        description="GPU Path-Integral Benchmark - JAX Universal Backend",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Examples:
-  %(prog)s                                      # 默认参数
-  %(prog)s --size (5000,500)                    # 自定义问题规模
-  %(prog)s --method scalar                      # 使用标量循环方法
-  %(prog)s --method vectorized                  # 使用向量化方法
-  %(prog)s --backend {available_backends[0] if available_backends else 'cpu'}  # 指定后端
-  %(prog)s --use-lcg                           # 使用LCG随机数生成器
-  %(prog)s --weight-method continuous          # 使用连续权重函数（多项式）
-  %(prog)s --weight-method piecewise           # 使用分段权重函数（默认）
-  %(prog)s --output benchmark.json              # 保存结果到JSON文件
-  %(prog)s --list-backends                     # 列出可用后端
+  %(prog)s                                      # Default parameters
+  %(prog)s --size (5000,500)                    # Custom problem scale
+  %(prog)s --method scalar                      # Use scalar loop method
+  %(prog)s --method vectorized                  # Use vectorized method
+  %(prog)s --backend {available_backends[0] if available_backends else 'cpu'}  # Specify backend
+  %(prog)s --use-lcg                           # Use LCG random number generator
+  %(prog)s --weight-method continuous          # Use continuous weight function (polynomial)
+  %(prog)s --weight-method piecewise           # Use piecewise weight function (default)
+  %(prog)s --chunk-size (5000,10000)           # Enable 2D chunking with specific tile size
+  %(prog)s --no-chunk                          # Disable auto-chunking (force monolithic)
+  %(prog)s --output benchmark.json              # Save results to JSON file
+  %(prog)s --list-backends                     # List available backends
 
 Available backends: {', '.join(available_backends)}
 
 Weight Methods:
-  --weight-method piecewise   Use original piecewise weight function (with branches)
-  --weight-method continuous  Use 6th-degree polynomial approximation (branch-free)
+  piecewise   Original piecewise weight function (with branches)
+  continuous  6th-degree polynomial approximation (branch-free)
+
+Chunking Strategy:
+  By default, auto-chunking is enabled for large tasks (steps*paths > 10M).
+  Use --chunk-size (steps,paths) to manually specify tile dimensions.
+  Use --no-chunk to force single-kernel execution (may cause TDR on large tasks).
         """,
     )
 
@@ -929,100 +937,106 @@ Weight Methods:
         "--size",
         type=str,
         default="(10000,1000)",
-        help='问题规模 (steps,paths) 元组，默认 (10000,1000)',
+        help='Problem scale as (steps,paths) tuple. Default: (10000,1000)',
     )
+    
     parser.add_argument(
         "--repeats",
         type=int,
         default=10,
-        help="测试迭代次数（默认 10）",
+        help="Number of test iterations (default: 10)",
     )
+    
     parser.add_argument(
         "--warmup",
         type=int,
         default=3,
-        help="预热迭代次数（默认 3）",
+        help="Number of warmup iterations (default: 3)",
     )
+    
     parser.add_argument(
         "--method",
         type=str,
         choices=["scalar", "vectorized", "both"],
         default="both",
-        help="计算方法：标量循环（scalar）、向量化（vectorized）、或两者都测试（both）",
+        help="Computation method: scalar (OpenCL-style loops), vectorized (NumPy-style), or both",
     )
+    
     parser.add_argument(
         "--backend",
         type=str,
         default="auto",
-        help=f"指定JAX后端（auto, {', '.join(available_backends)}）",
+        help=f"Specify JAX backend (auto, {', '.join(available_backends)})",
     )
+    
     parser.add_argument(
         "--use-lcg",
         action="store_true",
-        help="使用LCG随机数生成器（与OpenCL实现匹配）",
+        help="Use LCG random number generator (matches OpenCL implementation)",
     )
-    # 新增：权重方法选择参数
+    
     parser.add_argument(
         "--weight-method",
         type=str,
         choices=["piecewise", "continuous", "both"],
         default="piecewise",
-        help="权重计算方法：'piecewise'（默认，分段函数）、'continuous'（连续多项式）、或'both'（对比两者）",
+        help="Weight calculation method: piecewise (default, with branches), continuous (polynomial, branch-free), or both (compare)",
     )
+    
+    # Modified to Tuple style, consistent with --size
+    parser.add_argument(
+        "--chunk-size",
+        type=str,
+        default=None,
+        help='Chunk size as (steps,paths) tuple. Enables 2D chunking when set. Example: (5000,10000). Default: auto-determined for large tasks.',
+    )
+    
+    # Add option to disable chunking
+    parser.add_argument(
+        "--no-chunk",
+        action="store_true",
+        help="Disable auto-chunking and force monolithic kernel execution",
+    )
+    
     parser.add_argument(
         "--output",
         type=str,
-        help="可选JSON输出文件",
+        help="Optional JSON output file path",
     )
+    
     parser.add_argument(
         "--list-backends",
         action="store_true",
-        help="列出所有可用的JAX后端并退出",
+        help="List all available JAX backends and exit",
     )
-    parser.add_argument(
-        "--chunk-steps",
-        type=int,
-        default=None,
-        help="Chunk size for time dimension (steps). Enable 2D chunking when set smaller than total steps.",
-    )
-    parser.add_argument(
-        "--chunk-paths",
-        type=int,
-        default=None,
-        help="Chunk size for path dimension (paths). Enable path chunking to reduce memory usage.",
-    )
-    parser.add_argument(
-        "--chunk-auto",
-        action="store_true",
-        help="Automatically determine chunk sizes based on problem scale and available memory.",
-    )
+    
     parser.add_argument(
         "--quick",
         action="store_true",
-        help="快速测试模式（使用较小的问题规模）",
+        help="Quick test mode (uses smaller problem scale)",
     )
     
     args = parser.parse_args()
     
-    # 列出后端选项
+    # List backend options
     if args.list_backends:
         print("Available JAX backends:")
         for i, backend in enumerate(available_backends):
             print(f"  {i+1}. {backend}")
         return
     
-    # 解析规模参数
+    # Parse scale parameters
     size_str = args.size.strip()
     if size_str.startswith("(") and size_str.endswith(")"):
         size_str = size_str[1:-1]
     steps, paths = map(int, size_str.split(","))
     
-    # 快速测试模式
+    # Quick test mode
     if args.quick:
-        print("Quick mode enabled - reducing problem size")
+        print("Quick mode enabled - reducing problem scale")
         steps, paths = min(steps, 1000), min(paths, 100)
     
-    print("Starting GPU Path-Integral Benchmark - JAX通用后端")
+    print("Starting GPU Path-Integral Benchmark - JAX Universal Backend")
     print(f"Configuration: steps={steps}, paths={paths}, repeats={args.repeats}")
     print(f"Method: {args.method}")
     print(f"Backend: {args.backend}")
@@ -1031,7 +1045,7 @@ Weight Methods:
     if args.quick:
         print("Quick mode: ON")
     
-    # 设置后端
+    # Backend setup
     if args.backend != "auto":
         set_jax_backend(args.backend)
     else:
@@ -1040,34 +1054,55 @@ Weight Methods:
             print(f"Auto-selected backend: {selected_backend}")
             set_jax_backend(selected_backend)
     
-    # 获取设备信息
+    # Get device info
     devices = jax.devices()
     if devices:
         print(f"JAX backend: {jax.default_backend()}")
         print(f"Available devices: {[str(d) for d in devices]}")
     
-    # Determine chunk sizes
-    chunk_steps = args.chunk_steps
-    chunk_paths = args.chunk_paths
-
-    if args.chunk_auto:
+    # Determine chunking strategy (unified style parsing)
+    chunk_steps = None
+    chunk_paths = None
+    
+    if args.no_chunk:
+        print("Chunking disabled (monolithic mode)")
+        chunk_steps = None
+        chunk_paths = None
+    elif args.chunk_size:
+        # Parse tuple format (steps, paths)
+        chunk_str = args.chunk_size.strip()
+        if chunk_str.startswith("(") and chunk_str.endswith(")"):
+            chunk_str = chunk_str[1:-1]
         try:
-            devices = jax.devices()
-            # Estimate memory (simplified for Metal/CUDA)
-            mem_gb = 16.0  # Default assumption
-            if hasattr(devices[0], 'memory_stats'):
-                # Try to get actual memory info
-                stats = devices[0].memory_stats()
-                mem_gb = stats.get('bytes_limit', 16 * 1024**3) / 1024**3
-            
-            chunk_steps, chunk_paths = estimate_optimal_chunk_sizes(
-                steps, paths, mem_gb
-            )
-            print(f"Auto-selected chunk sizes: steps={chunk_steps}, paths={chunk_paths}")
-        except Exception as e:
-            print(f"Warning: Auto-chunking failed ({e}), using defaults")
-            chunk_steps = min(10000, steps)
-            chunk_paths = None
+            chunk_steps, chunk_paths = map(int, chunk_str.split(","))
+            print(f"Manual chunking enabled: tile size ({chunk_steps}, {chunk_paths})")
+        except ValueError:
+            print(f"Error: Invalid chunk-size format '{args.chunk_size}'. Use (steps,paths) format.")
+            sys.exit(1)
+    else:
+        # Auto-chunking for large tasks (default behavior)
+        total_cells = steps * paths
+        if total_cells > 10_000_000:  # 10M threshold
+            print(f"Large task detected ({total_cells:,} cells). Auto-enabling chunking...")
+            try:
+                devices = jax.devices()
+                mem_gb = 16.0  # Default assumption
+                if hasattr(devices[0], 'memory_stats'):
+                    stats = devices[0].memory_stats()
+                    mem_gb = stats.get('bytes_limit', 16 * 1024**3) / 1024**3
+                
+                chunk_steps, chunk_paths = estimate_optimal_chunk_sizes(steps, paths, mem_gb)
+                print(f"Auto-selected chunk size: ({chunk_steps}, {chunk_paths})")
+            except Exception as e:
+                print(f"Warning: Auto-chunking failed ({e}). Using conservative defaults.")
+                # Conservative defaults based on your validation (100-10000 range)
+                chunk_steps = min(5000, steps)
+                chunk_paths = min(50000, paths) if paths > 50000 else paths
+                if chunk_paths == paths:
+                    chunk_paths = None  # No path chunking needed
+                print(f"Fallback chunk size: ({chunk_steps}, {chunk_paths or paths})")
+        else:
+            print("Monolithic execution (auto-chunking not triggered for small tasks)")
     
     # 运行基准测试
     all_results = []
@@ -1116,15 +1151,15 @@ Weight Methods:
     # 输出结果
     BenchmarkReporter.print_results(all_results, output_file=args.output)
     
-    # 小规模验证（仅对第一个结果进行验证）
+    # Small-scale validation (only for first result)
     if all_results:
         print("\n" + "=" * 80)
         print("Validating against CPU reference (small scale)...")
         
-        # 使用小规模问题进行验证
+        # Use small scale for validation
         ref_steps, ref_paths = min(steps, 1000), min(paths, 100)
         
-        # 导入CPU参考实现
+        # Import CPU reference implementation
         try:
             from cpu import PathIntegralBenchmark
             cpu_ref = PathIntegralBenchmark.python_implementation(
@@ -1132,7 +1167,7 @@ Weight Methods:
                 paths=ref_paths
             )
             
-            # 使用相同的参数重新运行GPU计算进行验证
+            # Re-run GPU computation with same parameters for validation
             gpu_result = run_benchmark(
                 steps=ref_steps,
                 paths=ref_paths,
