@@ -139,9 +139,8 @@ class DebugRenderer(Renderer):
         # Set camera if present
         if scene.camera:
             cam_world_pos = scene.camera.transform.position
-            plotter.show(interactive=True,
-                         viewup=scene.camera.up,
-                         pos=cam_world_pos,
-                         focal_point=scene.camera.target)
-        else:
-            plotter.show(interactive=True)
+            plotter.camera.SetPosition(cam_world_pos)
+            plotter.camera.SetFocalPoint(scene.camera.target)
+            plotter.camera.SetViewUp(scene.camera.up)
+
+        plotter.show(interactive=True)
