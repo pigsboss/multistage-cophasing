@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 高精度星历模块 - SPICE 集成版
 
@@ -280,12 +281,20 @@ class HighPrecisionEphemeris(Ephemeris):
                 return True
             else:
                 warnings.warn("SPICE initialization failed, falling back to analytical mode")
+                self._spice_interface = None
+                self._spice_initialized = False
+                # Actually switch to analytical mode so get_state() routes correctly
+                self.config.mode = EphemerisMode.ANALYTICAL
+                self._initialize_models()
                 return False
                 
         except Exception as e:
             warnings.warn(f"SPICE initialization error: {e}, falling back to analytical mode")
             self._spice_interface = None
             self._spice_initialized = False
+            # Actually switch to analytical mode so get_state() routes correctly
+            self.config.mode = EphemerisMode.ANALYTICAL
+            self._initialize_models()
             return False
     
     def _find_default_spice_path(self) -> Optional[Path]:
