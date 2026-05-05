@@ -76,14 +76,17 @@ class DebugRenderer(Renderer):
             return
 
         names = [b[0] for b in bodies]
-        xs = [b[1][0] for b in bodies]
-        ys = [b[1][1] for b in bodies]
         cols = [b[2] for b in bodies]
+
+        # Convert positions from meters to Astronomical Units
+        AU = 149597870700.0  # m
+        xs = [b[1][0] / AU for b in bodies]
+        ys = [b[1][1] / AU for b in bodies]
 
         fig, ax = plt.subplots(figsize=(8, 8))
         ax.set_title("Solar System Bodies (Scaled Positions)", fontsize=14)
-        ax.set_xlabel("X [m]")
-        ax.set_ylabel("Y [m]")
+        ax.set_xlabel("X [AU]")
+        ax.set_ylabel("Y [AU]")
         ax.axhline(0, color='gray', linewidth=0.5)
         ax.axvline(0, color='gray', linewidth=0.5)
         ax.set_aspect('equal')
