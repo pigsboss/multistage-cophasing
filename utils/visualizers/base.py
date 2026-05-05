@@ -293,13 +293,14 @@ class SceneBuilder:
         earth_node.transform.scale = np.array([10.0, 10.0, 10.0])  # enlarge for debug
         earth_group.add_child(earth_node)
 
-        # --- Moon relative to Earth (no extra scaling) ---
+        # --- Moon relative to Earth (placed in inertial space, NOT child of rotating Earth) ---
         moon_state = ephemeris_handler.get_state(
             "moon", epoch,
             observer_body="earth",
             frame=CoordinateFrame.J2000_ECI
         )
-        moon_pos = moon_state[:3]
+        moon_rel_pos = moon_state[:3]                # Moon position relative to Earth
+        moon_pos_j2000 = earth_pos + moon_rel_pos    # Moon position in heliocentric J2000
 
         # Approximate Moon ellipsoid
         moon_radii = (1737400.0, 1737400.0, 1735972.0)
@@ -309,9 +310,11 @@ class SceneBuilder:
         except Exception:
             moon_rot = np.eye(3)
 
+        # Create Moon as a sibling of Earth under the scaled group.
+        # Its local position is the heliocentric position (scaling will be applied).
         moon_group = Group("Moon")
-        earth_group.add_child(moon_group)
-        moon_group.transform.position = moon_pos
+        scaled_se.add_child(moon_group)
+        moon_group.transform.position = moon_pos_j2000
         moon_group.transform.rotation = moon_rot
 
         moon_node = Ellipsoid("Moon", radii=moon_radii)
