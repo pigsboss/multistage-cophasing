@@ -45,6 +45,8 @@ def main():
                         help="Time step between frames in seconds (default: 3600)")
     parser.add_argument("--vedo", action="store_true",
                         help="Use vedo for 3D output")
+    parser.add_argument("--debug", action="store_true",
+                        help="Use debug backend (prints scene tree, optionally renders with vedo)")
     parser.add_argument("--output", type=str, default=None,
                         help="Directory to save PNG frames (vedo required)")
     args = parser.parse_args()
@@ -113,8 +115,12 @@ def main():
     # Enable vedo backend if --output is given even without --vedo
     use_vedo = args.vedo or (args.output is not None)
 
-    # Renderer (vedo backend will handle single/multi‑frame)
-    renderer = SimpleRenderer(use_vedo=use_vedo)
+    # Select renderer based on flags
+    if args.debug:
+        from utils.visualizers.backends.debug import DebugRenderer
+        renderer = DebugRenderer(use_vedo=use_vedo)
+    else:
+        renderer = SimpleRenderer(use_vedo=use_vedo)
 
     total_frames = len(times)
     for idx, epoch in enumerate(times):
