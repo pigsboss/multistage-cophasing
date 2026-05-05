@@ -41,10 +41,12 @@ def main():
                         help="Time step between frames in seconds (default: 3600). "
                              "Only used when --duration is specified.")
     parser.add_argument("--vedo", action="store_true",
-                        help="Use vedo for 3D output (single frame interactive, or multi‑frame image sequence)")
+                        help="Use vedo for 3D output (interactive single frame, or image sequence if --output is given). "
+                             "When --output alone is given, vedo is automatically enabled.")
     parser.add_argument("--output", type=str, default=None,
-                        help="Directory to save frames when using --vedo with --duration. "
-                             "If not set, frames are not saved.")
+                        help="Directory to save PNG frames using vedo. "
+                             "Automatically enables the vedo backend. "
+                             "If --duration is not set, a single frame is saved.")
     args = parser.parse_args()
 
     if args.duration is not None and args.duration <= 0:
@@ -88,8 +90,11 @@ def main():
     # Scene builder (single instance, could change scale function)
     builder = SceneBuilder(scale_function=LogScale(linear_threshold=3.8e8, compression=5e8))
 
+    # Enable vedo backend if --output is given even without --vedo
+    use_vedo = args.vedo or (args.output is not None)
+
     # Renderer (vedo backend will handle single/multi‑frame)
-    renderer = DebugRenderer(use_vedo=args.vedo)
+    renderer = DebugRenderer(use_vedo=use_vedo)
 
     total_frames = len(times)
     for idx, epoch in enumerate(times):
