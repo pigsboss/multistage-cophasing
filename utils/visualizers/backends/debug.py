@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Debug Backend – prints the scene tree and optionally opens a 3D view via vedo.
+Supports both interactive single‑frame and batch rendering to images.
 """
 
 from ..base import (
@@ -11,6 +12,8 @@ from . import Renderer
 import numpy as np
 import vtk
 from typing import Optional
+import sys
+from pathlib import Path
 
 
 class DebugRenderer(Renderer):
@@ -20,10 +23,24 @@ class DebugRenderer(Renderer):
         self.use_vedo = use_vedo
 
     def render(self, scene: Scene, **kwargs) -> None:
+        frame_index = kwargs.get("frame_index", 0)
+        total_frames = kwargs.get("total_frames", 1)
+        output_dir = kwargs.get("output_dir", None)
+
         print(f"Rendering scene: {scene.name}  time = {scene.time:.3f} s")
         self._print_node(scene.root, indent=0)
-        if self.use_vedo:
-            self._vedo_render(scene)
+
+        if not self.use_vedo:
+            return
+
+        if output_dir:
+            self._vedo_render_frame(scene, frame_index, output_dir)
+        else:
+            if total_frames > 1:
+                print("Multi‑frame animation requires --output to save images. Skipping vedo.",
+                      file=sys.stderr)
+            else:
+                self._vedo_render_interactive(scene)
 
     # ------------------------------------------------------------------
     # Tree printing
@@ -46,18 +63,45 @@ class DebugRenderer(Renderer):
             self._print_node(child, indent + 1)
 
     # ------------------------------------------------------------------
-    # Vedo rendering – uses homogeneous 4x4 transforms, no .center() call
+    # Vedo – interactive single frame
     # ------------------------------------------------------------------
-    def _vedo_render(self, scene: Scene):
-        try:
-            import vedo
-        except ImportError:
-            print("vedo is not installed. Install it with: pip install vedo", file=__import__('sys').stderr)
-            return
-
+    def _vedo_render_interactive(self, scene: Scene):
+        import vedo
         plotter = vedo.Plotter()
+        self._draw_scene(scene, plotter)
+        # Set camera from scene (if defined)
+        if scene.camera:
+            cam_world_pos = scene.camera.transform.position
+            plotter.camera.SetPosition(cam_world_pos)
+            plotter.camera.SetFocalPoint(scene.camera.target)
+            plotter.camera.SetViewUp(scene.camera.up)
+        plotter.show(interactive=True)
 
-        # Helper to build a 4x4 homogeneous transform (rotation + translation only)
+    # ------------------------------------------------------------------
+    # Vedo – save a single frame (non‑interactive)
+    # ------------------------------------------------------------------
+    def _vedo_render_frame(self, scene: Scene, frame_index: int, output_dir: str):
+        import vedo
+        plotter = vedo.Plotter(offscreen=True)
+        self._draw_scene(scene, plotter)
+        # Set camera from scene
+        if scene.camera:
+            cam_world_pos = scene.camera.transform.position
+            plotter.camera.SetPosition(cam_world_pos)
+            plotter.camera.SetFocalPoint(scene.camera.target)
+            plotter.camera.SetViewUp(scene.camera.up)
+        filename = Path(output_dir) / f"frame_{frame_index:04d}.png"
+        plotter.show(interactive=False)          # render offscreen
+        plotter.screenshot(str(filename))
+        print(f"Saved {filename}", file=sys.stderr)
+        plotter.close()
+
+    # ------------------------------------------------------------------
+    # Common drawing routine used by both interactive and frame modes
+    # ------------------------------------------------------------------
+    def _draw_scene(self, scene: Scene, plotter):
+        import vedo
+
         def _local_to_world_mat(rot, pos):
             mat = np.eye(4)
             mat[:3, :3] = rot
@@ -67,8 +111,7 @@ class DebugRenderer(Renderer):
         def traverse(node: SceneNode,
                      parent_world_pos: np.ndarray,
                      parent_world_rot: np.ndarray,
-                     parent_scale_function: Optional[ScaleFunction],   # <-- ScaleFunction instance, not method
-                     ):
+                     parent_scale_function: Optional[ScaleFunction]):
             local_pos = node.transform.position.copy()
 
             # Apply parent's nonlinear scale function if present
@@ -80,16 +123,15 @@ class DebugRenderer(Renderer):
             world_pos = parent_world_rot @ scaled_local_pos + parent_world_pos
             world_rot = parent_world_rot @ node.transform.rotation
 
-            # Determine scale function instance to pass to children
             own_scale_function = None
             if isinstance(node, ScaledGroup):
-                own_scale_function = node.scale_function   # the whole ScaleFunction object
+                own_scale_function = node.scale_function
 
             mat = _local_to_world_mat(world_rot, world_pos)
 
             # ---------- Draw geometry ----------
             if isinstance(node, Ellipsoid):
-                # --- Colour by name ---
+                # Colour by name
                 if "Sun" in node.name:
                     color = "yellow"
                 elif "Earth" in node.name:
@@ -132,25 +174,10 @@ class DebugRenderer(Renderer):
                     line = vedo.Line(transformed)
                     plotter.add(line)
 
-            elif isinstance(node, Camera):
-                pass
-
-            elif isinstance(node, Background):
-                pass
-
             # Recurse
             for child in node.children:
                 traverse(child, world_pos, world_rot, own_scale_function)
 
-        # Start traversal from the root
+        # Start traversal from root
         root_scale_function = scene.root.scale_function if isinstance(scene.root, ScaledGroup) else None
         traverse(scene.root, np.zeros(3), np.eye(3), root_scale_function)
-
-        # Set camera if present
-        if scene.camera:
-            cam_world_pos = scene.camera.transform.position
-            plotter.camera.SetPosition(cam_world_pos)
-            plotter.camera.SetFocalPoint(scene.camera.target)
-            plotter.camera.SetViewUp(scene.camera.up)
-
-        plotter.show(interactive=True)
