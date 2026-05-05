@@ -240,8 +240,84 @@ class Scene:
 class SceneBuilder:
     """Creates a Scene using high‑precision ephemeris (SPICE) and scale mapping."""
 
+    # Predefined planetary data (radii in meters, vedo colour names)
+    _PLANET_DATA = {
+        "mercury": {"radii": (2439.4e3, 2439.4e3, 2439.4e3), "color": "grey"},
+        "venus":   {"radii": (6052e3,   6052e3,   6052e3),   "color": "orange"},
+        "earth":   {"radii": (6378.137e3, 6378.137e3, 6356.752e3), "color": "blue"},
+        "mars":    {"radii": (3396.2e3, 3396.2e3, 3376.2e3), "color": "red"},
+        "jupiter": {"radii": (71492e3,  71492e3,  66854e3),  "color": "brown"},
+        "saturn":  {"radii": (60268e3,  60268e3,  54364e3),  "color": "gold"},
+        "uranus":  {"radii": (25559e3,  25559e3,  24973e3),  "color": "lightblue"},
+        "neptune": {"radii": (24764e3,  24764e3,  24341e3),  "color": "darkblue"},
+    }
+
     def __init__(self, scale_function: Optional[ScaleFunction] = None):
         self.scale_function = scale_function or LogScale(linear_threshold=4e8, compression=5e8)
+
+    def build_solar_system(self, epoch: float,
+                           ephemeris_handler) -> Scene:
+        """
+        Build a scene containing the Sun and all eight planets.
+
+        Parameters:
+            epoch: Ephemeris time (seconds past J2000).
+            ephemeris_handler: An instance of HighPrecisionEphemeris (SPICE mode).
+        """
+        scene = Scene("Solar-System")
+        scene.time = epoch
+
+        # --- Sun at origin ---
+        sun_radii = (6.957e8, 6.957e8, 6.957e8)
+        sun_node = Ellipsoid("Sun", radii=sun_radii)
+        sun_node.transform.scale = np.array([0.5, 0.5, 0.5])   # slightly larger than before
+        scene.root.add_child(sun_node)
+
+        # --- Planets (all direct children of root) ---
+        planet_display_positions = []   # to compute camera extent
+
+        for name, data in self._PLANET_DATA.items():
+            # Get heliocentric state
+            state = ephemeris_handler.get_state(
+                name, epoch,
+                observer_body="sun",
+                frame=CoordinateFrame.J2000_ECI
+            )
+            real_pos = state[:3]
+
+            # Apply scale mapping
+            display_pos = self.scale_function.map_vector(real_pos)
+            planet_display_positions.append(display_pos)
+
+            # Create group and ellipsoid
+            group = Group(name.capitalize())
+            scene.root.add_child(group)
+            group.transform.position = display_pos
+            # No rotation applied (can be added later with SPICE attitude)
+
+            ellip = Ellipsoid(name.capitalize(), radii=data["radii"])
+            # Scale up for visibility; small planets need more boost
+            scale_factor = 10.0 if name not in ("jupiter", "saturn") else 5.0
+            ellip.transform.scale = np.array([scale_factor] * 3)
+            group.add_child(ellip)
+
+        # --- Camera: top‑down view ---
+        # Compute a height that encloses all planets comfortably
+        max_display_dist = max(np.linalg.norm(p) for p in planet_display_positions)
+        camera_height = max_display_dist * 2.0
+        camera = Camera("Top-Down Camera")
+        camera.transform.position = np.array([0.0, 0.0, camera_height])
+        camera.target = np.zeros(3)       # look at the Sun
+        camera.up = np.array([0.0, 1.0, 0.0])
+        scene.camera = camera
+        scene.root.add_child(camera)
+
+        # --- Background ---
+        bg = Background()
+        scene.background = bg
+        scene.root.add_child(bg)
+
+        return scene
 
     def build_solar_system_demo(self, epoch: float,
                                 ephemeris_handler) -> Scene:

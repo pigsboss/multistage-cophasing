@@ -3,8 +3,8 @@
 MCPC Visualizer CLI
 
 Usage:
-    python -m utils.visualizers --time "2026-04-10T12:00:00" [--vedo]
-    python -m utils.visualizers --time "2026-04-10T12:00:00" --duration 86400 --step 3600 [--vedo] [--output frames/]
+    python -m utils.visualizers --scene earth_moon --time "2026-04-10T12:00:00" [--vedo] ...
+    python -m utils.visualizers --scene solar_system --time "2026-04-10T12:00:00" [--vedo] ...
 """
 
 import argparse
@@ -31,22 +31,20 @@ except ImportError as e:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MCPC 3D Scene Visualizer (Sun-Earth-Moon demo)")
+        description="MCPC 3D Scene Visualizer")
+    parser.add_argument("--scene", type=str, default="earth_moon",
+                        choices=["earth_moon", "solar_system"],
+                        help="Which scene to render (default: earth_moon)")
     parser.add_argument("--time", type=str, default="2026-04-10T12:00:00",
-                        help="UTC start time in ISO format (default: 2026-04-10T12:00:00)")
+                        help="UTC start time in ISO format")
     parser.add_argument("--duration", type=float, default=None,
-                        help="Total simulation duration in seconds (e.g., 86400 for one day). "
-                             "If not given, a single frame is rendered.")
+                        help="Total simulation duration in seconds")
     parser.add_argument("--step", type=float, default=3600,
-                        help="Time step between frames in seconds (default: 3600). "
-                             "Only used when --duration is specified.")
+                        help="Time step between frames in seconds (default: 3600)")
     parser.add_argument("--vedo", action="store_true",
-                        help="Use vedo for 3D output (interactive single frame, or image sequence if --output is given). "
-                             "When --output alone is given, vedo is automatically enabled.")
+                        help="Use vedo for 3D output")
     parser.add_argument("--output", type=str, default=None,
-                        help="Directory to save PNG frames using vedo. "
-                             "Automatically enables the vedo backend. "
-                             "If --duration is not set, a single frame is saved.")
+                        help="Directory to save PNG frames (vedo required)")
     args = parser.parse_args()
 
     if args.duration is not None and args.duration <= 0:
@@ -87,8 +85,14 @@ def main():
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Scene builder (single instance, could change scale function)
-    builder = SceneBuilder(scale_function=LogScale(linear_threshold=3.8e8, compression=5e8))
+    # Choose scale function per scene
+    if args.scene == "solar_system":
+        # Wider threshold for outer planets
+        scale = LogScale(linear_threshold=1.5e11, compression=5e11)
+    else:
+        scale = LogScale(linear_threshold=3.8e8, compression=5e8)
+
+    builder = SceneBuilder(scale_function=scale)
 
     # Enable vedo backend if --output is given even without --vedo
     use_vedo = args.vedo or (args.output is not None)
@@ -98,9 +102,12 @@ def main():
 
     total_frames = len(times)
     for idx, epoch in enumerate(times):
-        scene = builder.build_solar_system_demo(epoch, eph)
-        print(f"\n--- Frame {idx+1}/{total_frames} : epoch = {epoch:.3f} s ---")
+        if args.scene == "solar_system":
+            scene = builder.build_solar_system(epoch, eph)
+        else:
+            scene = builder.build_solar_system_demo(epoch, eph)
 
+        print(f"\n--- Frame {idx+1}/{total_frames} : epoch = {epoch:.3f} s ---")
         renderer.render(
             scene,
             frame_index=idx,
