@@ -523,8 +523,8 @@ class SceneBuilder:
         moon_real_pos_hc = earth_pos + moon_rel_pos
         moon_real_dist = np.linalg.norm(moon_real_pos_hc)
         moon_display_dist = np.linalg.norm(moon_display_pos)
-        print(f"[DIAG DEMO] Sun        R={sun_radii[0]/R_EARTH:.1f} Re, "
-              f"world_R={sun_radii[0]*sun_node.transform.scale[0]/R_EARTH:.3f} Re")
+        print(f"[DIAG DEMO] Sun        R={sun_node.radii[0]/R_EARTH:.1f} Re, "
+              f"world_R={sun_node.radii[0]*sun_node.transform.scale[0]/R_EARTH:.3f} Re")
         print(f"[DIAG DEMO] Earth      real_dist={earth_real_dist/LD:.4f} LD, "
               f"display_dist={earth_display_dist/LD:.4f} LD, "
               f"R={earth_radii[0]/R_EARTH:.1f} Re, "
