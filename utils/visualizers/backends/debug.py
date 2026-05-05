@@ -9,6 +9,8 @@ No 3D rendering or interactive GUI window (matplotlib window is optional).
 from __future__ import annotations
 import numpy as np
 from typing import List, Tuple
+import sys
+from pathlib import Path
 from ..base import (
     Scene, SceneNode, Group, ScaledGroup,
     Ellipsoid, Arrow, Trajectory, Camera, Background,
@@ -31,7 +33,7 @@ class DebugRenderer(Renderer):
 
         # Only plot for solar‑system scenes
         if scene.name.lower().startswith("solar"):
-            self._plot_ellipsoid_positions(scene)
+            self._plot_ellipsoid_positions(scene, **kwargs)
 
     # ------------------------------------------------------------------
     # Tree printing (unchanged)
@@ -56,12 +58,18 @@ class DebugRenderer(Renderer):
             self._print_node(child, indent + 1)
 
     # ------------------------------------------------------------------
-    # Matplotlib scatter plot (no GUI dependency, just display)
+    # Matplotlib scatter plot (supports both interactive and file‑mode)
     # ------------------------------------------------------------------
-    def _plot_ellipsoid_positions(self, scene: Scene):
+    def _plot_ellipsoid_positions(self, scene: Scene, **kwargs):
         """Collect all Ellipsoid nodes directly under the root and plot their
-        display‑space (X,Y) positions as a 2D scatter plot."""
+        display‑space (X,Y) positions as a 2D scatter plot.
+        If 'output_dir' is given in kwargs, save to PNG instead of showing.
+        """
+        import matplotlib
         import matplotlib.pyplot as plt
+
+        output_dir = kwargs.get("output_dir", None)
+        frame_index = kwargs.get("frame_index", 0)
 
         bodies: List[Tuple[str, np.ndarray, str]] = []
         for child in scene.root.children:
@@ -82,6 +90,14 @@ class DebugRenderer(Renderer):
         AU = 149597870700.0  # m
         xs = [b[1][0] / AU for b in bodies]
         ys = [b[1][1] / AU for b in bodies]
+
+        # If saving files, use a non‑interactive backend to avoid window pop‑ups
+        if output_dir is not None:
+            matplotlib.use("Agg")
+            plt.ioff()
+        else:
+            # Interactive mode for display
+            pass  # Default backend will be used
 
         fig, ax = plt.subplots(figsize=(8, 8))
         ax.set_title("Solar System Bodies (Scaled Positions)", fontsize=14)
@@ -109,4 +125,11 @@ class DebugRenderer(Renderer):
 
         ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
         fig.tight_layout()
-        plt.show()
+
+        if output_dir is not None:
+            filename = Path(output_dir) / f"frame_{frame_index:04d}.png"
+            fig.savefig(str(filename), dpi=150)
+            plt.close(fig)
+            print(f"[DEBUG] Saved {filename}", file=sys.stderr)
+        else:
+            plt.show()
