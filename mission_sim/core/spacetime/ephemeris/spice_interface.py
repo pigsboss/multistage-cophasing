@@ -632,18 +632,13 @@ class SPICECalculator:
     def _to_naif_id(self, body: Union[str, int]) -> object:
         """
         转换天体名称为 SPICE 可识别的标识。
-        优先返回字符串 ID（包含整数编码）以确保 spiceypy 正确解析。
+        直接使用小写名称，SPICE 接受标准天体名称。
         """
         if isinstance(body, int):
             return str(body)
         if isinstance(body, str):
-            lower_body = body.lower()
-            if lower_body in self.NAIF_IDS:
-                # Return string representation of NAIF integer ID (required by spiceypy)
-                return str(self.NAIF_IDS[lower_body])
-            # 如果不在字典中，尝试直接使用原始字符串（可能是 SPICE 内置名称）
-            # 但 SPICE 可能会解析失败，因此建议字典中覆盖所有常用名称
-            return lower_body
+            # Use the lower‑case name directly; SPICE accepts standard body names.
+            return body.lower()
         raise SPICEError(f"Unknown body identifier: {body}")
     
     def _to_spice_frame(self, frame: Union[CoordinateFrame, str]) -> str:
