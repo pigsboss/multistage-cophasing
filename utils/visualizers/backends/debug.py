@@ -9,6 +9,7 @@ from ..base import (
 )
 from . import Renderer
 import numpy as np
+import vtk
 from typing import Optional
 
 
@@ -104,7 +105,12 @@ class DebugRenderer(Renderer):
                 full_transform = mat @ S
 
                 sph = vedo.Sphere(pos=(0, 0, 0), r=1.0, c='white', res=24)
-                sph.apply_transform(full_transform)
+                # Convert numpy array to vtkMatrix4x4 to satisfy vedo's type check
+                vtk_mat = vtk.vtkMatrix4x4()
+                for i in range(4):
+                    for j in range(4):
+                        vtk_mat.SetElement(i, j, full_transform[i, j])
+                sph.apply_transform(vtk_mat)
                 plotter.add(sph)
 
             elif isinstance(node, Arrow):
