@@ -73,7 +73,7 @@ class SimpleRenderer(Renderer):
         au = 149597870700.0  # meters
         plotter.camera.SetParallelProjection(True)
         plotter.camera.SetParallelScale(15.0 * au)
-        plotter.camera.SetPosition(0.0, 0.0, 1.0)          # dummy z
+        plotter.camera.SetPosition(0.0, 0.0, 15.0 * au)  # far above XY plane
         plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)        # Sun at origin
         plotter.camera.SetViewUp(0.0, 1.0, 0.0)            # Y up
         # Ensure square window so that ±15 AU is visible in both X and Y
@@ -91,7 +91,7 @@ class SimpleRenderer(Renderer):
         au = 149597870700.0  # meters
         plotter.camera.SetParallelProjection(True)
         plotter.camera.SetParallelScale(15.0 * au)
-        plotter.camera.SetPosition(0.0, 0.0, 1.0)
+        plotter.camera.SetPosition(0.0, 0.0, 15.0 * au)
         plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
         plotter.camera.SetViewUp(0.0, 1.0, 0.0)
         plotter.size = (800, 800)
