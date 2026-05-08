@@ -76,6 +76,8 @@ class SimpleRenderer(Renderer):
         plotter.camera.SetPosition(0.0, 0.0, 15.0 * au)  # far above XY plane
         plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)        # Sun at origin
         plotter.camera.SetViewUp(0.0, 1.0, 0.0)            # Y up
+        # Ensure clipping planes cover the full scene depth (AU scale)
+        plotter.camera.SetClippingRange(1e10, 1e14)  # 10,000 km to 1,000 AU
         # Ensure square window so that ±15 AU is visible in both X and Y
         plotter.size = (800, 800)
         plotter.show(interactive=True, resetcam=False)
@@ -94,6 +96,8 @@ class SimpleRenderer(Renderer):
         plotter.camera.SetPosition(0.0, 0.0, 15.0 * au)
         plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
         plotter.camera.SetViewUp(0.0, 1.0, 0.0)
+        # Ensure clipping planes cover the full scene depth (AU scale)
+        plotter.camera.SetClippingRange(1e10, 1e14)  # 10,000 km to 1,000 AU
         plotter.size = (800, 800)
         filename = Path(output_dir) / f"frame_{frame_index:04d}.png"
         plotter.show(interactive=False, resetcam=False)          # render offscreen
