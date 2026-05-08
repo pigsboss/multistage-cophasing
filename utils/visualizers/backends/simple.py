@@ -69,12 +69,15 @@ class SimpleRenderer(Renderer):
         import vedo
         plotter = vedo.Plotter(bg="black")
         self._draw_scene(scene, plotter)
-        # Set camera from scene (if defined)
-        if scene.camera:
-            cam_world_pos = scene.camera.transform.position
-            plotter.camera.SetPosition(cam_world_pos)
-            plotter.camera.SetFocalPoint(scene.camera.target)
-            plotter.camera.SetViewUp(scene.camera.up)
+        # Hardcoded camera: top-down ortho + Sun centred, ±15 AU view
+        au = 149597870700.0  # meters
+        plotter.camera.SetParallelProjection(True)
+        plotter.camera.SetParallelScale(15.0 * au)
+        plotter.camera.SetPosition(0.0, 0.0, 1.0)          # dummy z
+        plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)        # Sun at origin
+        plotter.camera.SetViewUp(0.0, 1.0, 0.0)            # Y up
+        # Ensure square window so that ±15 AU is visible in both X and Y
+        plotter.size = (800, 800)
         plotter.show(interactive=True)
 
     # ------------------------------------------------------------------
@@ -84,12 +87,14 @@ class SimpleRenderer(Renderer):
         import vedo
         plotter = vedo.Plotter(offscreen=True, bg="black")
         self._draw_scene(scene, plotter)
-        # Set camera from scene
-        if scene.camera:
-            cam_world_pos = scene.camera.transform.position
-            plotter.camera.SetPosition(cam_world_pos)
-            plotter.camera.SetFocalPoint(scene.camera.target)
-            plotter.camera.SetViewUp(scene.camera.up)
+        # Hardcoded camera: top-down ortho + Sun centred, ±15 AU view
+        au = 149597870700.0  # meters
+        plotter.camera.SetParallelProjection(True)
+        plotter.camera.SetParallelScale(15.0 * au)
+        plotter.camera.SetPosition(0.0, 0.0, 1.0)
+        plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
+        plotter.camera.SetViewUp(0.0, 1.0, 0.0)
+        plotter.size = (800, 800)
         filename = Path(output_dir) / f"frame_{frame_index:04d}.png"
         plotter.show(interactive=False)          # render offscreen
         plotter.screenshot(str(filename))
