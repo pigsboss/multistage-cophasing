@@ -19,8 +19,9 @@ from pathlib import Path
 class SimpleRenderer(Renderer):
     """A backend that prints the scene hierarchy and may display a simple 3D view using vedo."""
 
-    def __init__(self, use_vedo: bool = False):
+    def __init__(self, use_vedo: bool = False, camera_config: Optional[dict] = None):
         self.use_vedo = use_vedo
+        self.camera_config = camera_config or {}
 
     def render(self, scene: Scene, **kwargs) -> None:
         frame_index = kwargs.get("frame_index", 0)
@@ -102,6 +103,51 @@ class SimpleRenderer(Renderer):
             unit_factor = 3.844e8          # 1 LD in metres
             view_limit = 5.0               # ±5 LD
 
+        # Parse camera configuration
+        cam_fov = self.camera_config.get('fov', 60.0)
+        cam_res = self.camera_config.get('resolution', (800, 800))
+        use_parallel = self.camera_config.get('parallel', False)
+
+        # Parse camera position (default: top-down view)
+        cam_pos_str = self.camera_config.get('pos')
+        if cam_pos_str:
+            cam_pos = np.array([float(x) for x in cam_pos_str.split(',')])
+        else:
+            cam_pos = np.array([0.0, 0.0, 10.0])
+
+        # Parse camera target (support body names or coordinates)
+        target_str = self.camera_config.get('target', '0,0,0')
+        target_body = target_str.lower()
+
+        # Build body lookup for targeting
+        body_dict = {name.lower(): (pos / unit_factor) for name, pos, _ in bodies}
+
+        if target_body in body_dict:
+            cam_target = body_dict[target_body]
+        else:
+            # Parse as coordinates
+            try:
+                cam_target = np.array([float(x) for x in target_str.split(',')])
+            except ValueError:
+                print(f"[SIMPLE] Warning: Invalid target '{target_str}', using origin",
+                      file=sys.stderr)
+                cam_target = np.array([0.0, 0.0, 0.0])
+
+        # Setup camera
+        plotter.size = cam_res
+        if use_parallel:
+            plotter.camera.SetParallelProjection(True)
+            # For parallel projection, scale determines visible range
+            plotter.camera.SetParallelScale(view_limit)
+        else:
+            plotter.camera.SetParallelProjection(False)
+            plotter.camera.SetViewAngle(cam_fov)
+
+        plotter.camera.SetPosition(cam_pos[0], cam_pos[1], cam_pos[2])
+        plotter.camera.SetFocalPoint(cam_target[0], cam_target[1], cam_target[2])
+        plotter.camera.SetViewUp(0.0, 1.0, 0.0)
+        plotter.camera.SetClippingRange(0.1, 100.0)
+
         # Create vedo spheres at display positions (full 3D)
         for name, pos, color in bodies:
             x = pos[0] / unit_factor
@@ -115,14 +161,6 @@ class SimpleRenderer(Renderer):
             lbl = vedo.Text3D(name, pos=(x+0.3, y+0.3, z), s=0.3, c='white')
             plotter.add(lbl)
 
-        # Camera: top-down orthographic, strictly matching debug.py's xlim/ylim
-        plotter.camera.SetParallelProjection(True)
-        plotter.camera.SetParallelScale(view_limit)   # shows -15..15 or -5..5
-        plotter.camera.SetPosition(0.0, 0.0, 10.0)    # above XY plane
-        plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)   # look at origin (Sun)
-        plotter.camera.SetViewUp(0.0, 1.0, 0.0)
-        plotter.camera.SetClippingRange(0.1, 100.0)
-        plotter.size = (800, 800)
         plotter.show(interactive=True, resetcam=False)
 
     # ------------------------------------------------------------------
@@ -151,7 +189,47 @@ class SimpleRenderer(Renderer):
             unit_factor = 3.844e8
             view_limit = 5.0
 
-        # Create vedo spheres at display positions (full 3D)
+        # Parse camera configuration (same as interactive)
+        cam_fov = self.camera_config.get('fov', 60.0)
+        cam_res = self.camera_config.get('resolution', (800, 800))
+        use_parallel = self.camera_config.get('parallel', False)
+
+        # Parse camera position
+        cam_pos_str = self.camera_config.get('pos')
+        if cam_pos_str:
+            cam_pos = np.array([float(x) for x in cam_pos_str.split(',')])
+        else:
+            cam_pos = np.array([0.0, 0.0, 10.0])
+
+        # Parse camera target
+        target_str = self.camera_config.get('target', '0,0,0')
+        target_body = target_str.lower()
+        body_dict = {name.lower(): (pos / unit_factor) for name, pos, _ in bodies}
+        if target_body in body_dict:
+            cam_target = body_dict[target_body]
+        else:
+            try:
+                cam_target = np.array([float(x) for x in target_str.split(',')])
+            except ValueError:
+                print(f"[SIMPLE] Warning: Invalid target '{target_str}', using origin",
+                      file=sys.stderr)
+                cam_target = np.array([0.0, 0.0, 0.0])
+
+        # Setup camera
+        plotter.size = cam_res
+        if use_parallel:
+            plotter.camera.SetParallelProjection(True)
+            plotter.camera.SetParallelScale(view_limit)
+        else:
+            plotter.camera.SetParallelProjection(False)
+            plotter.camera.SetViewAngle(cam_fov)
+
+        plotter.camera.SetPosition(cam_pos[0], cam_pos[1], cam_pos[2])
+        plotter.camera.SetFocalPoint(cam_target[0], cam_target[1], cam_target[2])
+        plotter.camera.SetViewUp(0.0, 1.0, 0.0)
+        plotter.camera.SetClippingRange(0.1, 100.0)
+
+        # Create vedo spheres at display positions
         for name, pos, color in bodies:
             x = pos[0] / unit_factor
             y = pos[1] / unit_factor
@@ -161,15 +239,6 @@ class SimpleRenderer(Renderer):
             plotter.add(sph)
             lbl = vedo.Text3D(name, pos=(x+0.3, y+0.3, z), s=0.3, c='white')
             plotter.add(lbl)
-
-        # Camera setup identical to interactive mode
-        plotter.camera.SetParallelProjection(True)
-        plotter.camera.SetParallelScale(view_limit)
-        plotter.camera.SetPosition(0.0, 0.0, 10.0)
-        plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
-        plotter.camera.SetViewUp(0.0, 1.0, 0.0)
-        plotter.camera.SetClippingRange(0.1, 100.0)
-        plotter.size = (800, 800)
 
         filename = Path(output_dir) / f"frame_{frame_index:04d}.png"
         plotter.show(interactive=False, resetcam=False)

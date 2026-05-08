@@ -79,6 +79,24 @@ def main():
                         help="Use debug backend (prints scene tree, optionally renders with vedo)")
     parser.add_argument("--output", type=str, default=None,
                         help="Directory to save PNG frames (vedo required)")
+
+    # Camera configuration arguments
+    parser.add_argument("--cam-pos", type=str, default=None,
+                        help="Camera position as x,y,z in scene units "
+                             "(AU for solar_system, LD for earth_moon). "
+                             "Default: 0,0,10 (top-down view)")
+    parser.add_argument("--cam-target", type=str, default="0,0,0",
+                        help="Camera target/focal point as x,y,z coordinates, "
+                             "or body name (sun, mercury, venus, earth, mars, "
+                             "jupiter, saturn, uranus, neptune, moon). "
+                             "Default: 0,0,0 (origin/Sun)")
+    parser.add_argument("--cam-fov", type=float, default=60.0,
+                        help="Camera field of view in degrees (default: 60)")
+    parser.add_argument("--resolution", type=str, default="800x800",
+                        help="Output resolution as WxH (default: 800x800)")
+    parser.add_argument("--parallel-projection", action="store_true",
+                        help="Use parallel/orthographic projection "
+                             "(default: perspective)")
     args = parser.parse_args()
 
     # Parse and convert duration/step from human‑readable units
@@ -154,12 +172,21 @@ def main():
     # Enable vedo backend if --output is given even without --vedo
     use_vedo = args.vedo or (args.output is not None)
 
+    # Parse camera configuration
+    camera_config = {
+        'pos': args.cam_pos,
+        'target': args.cam_target,
+        'fov': args.cam_fov,
+        'resolution': tuple(map(int, args.resolution.split('x'))),
+        'parallel': args.parallel_projection,
+    }
+
     # Select renderer based on flags
     if args.debug:
         from utils.visualizers.backends.debug import DebugRenderer
         renderer = DebugRenderer()   # no arguments – pure matplotlib debug
     else:
-        renderer = SimpleRenderer(use_vedo=use_vedo)
+        renderer = SimpleRenderer(use_vedo=use_vedo, camera_config=camera_config)
 
     total_frames = len(times)
     for idx, epoch in enumerate(times):
