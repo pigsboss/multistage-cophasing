@@ -65,8 +65,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="MCPC 3D Scene Visualizer")
     parser.add_argument("--scene", type=str, default="earth_moon",
-                        choices=["earth_moon", "solar_system"],
-                        help="Which scene to render (default: earth_moon)")
+                        choices=["earth_moon", "cislunar", "solar_system"],
+                        help="Which scene to render (earth_moon/cislunar or solar_system, default: earth_moon)")
     parser.add_argument("--time", type=str, default="2026-04-10T12:00:00",
                         help="UTC start time in ISO format")
     parser.add_argument("--duration", type=str, default=None,
