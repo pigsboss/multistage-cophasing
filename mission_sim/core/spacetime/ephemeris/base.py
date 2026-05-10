@@ -8,6 +8,8 @@ class Ephemeris:
     职责：作为预处理阶段与 GNC 阶段之间的数据契约，封装随时间变化的标称状态，
           并提供状态查询接口。
     子类可重载 get_state 以实现不同的获取逻辑（如解析 Kepler 计算、SPICE 直接查询等）。
+
+    The instance is callable: ephemeris(time) is equivalent to ephemeris.get_state(time).
     """
     def __init__(self, times: list | np.ndarray, states: list | np.ndarray, frame: CoordinateFrame):
         """
@@ -65,6 +67,12 @@ class Ephemeris:
                   f"[{self.times[0]:.1f}s, {self.times[-1]:.1f}s]。正在进行高风险外推！")
         
         return result
+
+    def __call__(self, t: float) -> np.ndarray:
+        """
+        Alias for get_state(t). Allows ephemeris(t) as a shorthand.
+        """
+        return self.get_state(t)
 
     def get_interpolated_state(self, t: float) -> np.ndarray:
         """
