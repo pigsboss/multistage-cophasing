@@ -2,218 +2,236 @@
 """
 工具：更新闰秒数据 (Leap Second Data Updater)
 -----------------------------------------------
-从巴黎天文台镜像（IERS 公报 C 的规范来源）获取最新的闰秒表，
-解析所有宣布的闰秒插入日期，并在终端中显示它们。
+从 IERS Bulletin C 的系列文本文件中自动提取所有历史闰秒日期。
+通过遍历以下 URL 获得资料：
+    https://datacenter.iers.org/data/16/bulletinc-{num:03d}.txt
+其中 {num} 从 10 开始递增。
 
 用法：
     python tools/update_leap_second.py                       # 仅显示
-    python tools/update_leap_second.py --sync                # 显示并更新运行时间模块
-    python tools/update_leap_second.py --sync --url <URL>    # 指定自定义数据源
-
-说明：
-    默认数据源：https://hpiers.obspm.fr/iers/bul/bulc/Leap_Second.dat
-    此为巴黎天文台维护的公开纯文本文件，是闰秒数据的权威来源。
-
---sync 选项将调用 mission_sim.core.spacetime.time 模块中的 add_leap_second()
-函数，把任何新发现的闰秒日期追加到内部的 _LEAP_SECONDS_DATES 列表。该模块的
-缓存更新是幂等的：已存在的日期不会被重复添加。
+    python tools/update_leap_second.py --sync                # 显示并同步到运行时模块
+    python tools/update_leap_second.py --start 10 --end 100  # 自定义编号范围
 
 依赖：
-    仅使用 Python 标准库 (urllib, datetime, argparse)。
-    为了运行 --sync 选项，需要在项目根目录下执行，确保 mission_sim 包可导入。
+    仅使用 Python 标准库 (urllib, datetime, argparse, re)。
 """
 
 import argparse
 import datetime
+import re
 import sys
+import urllib.error
 import urllib.request
-
-# ---------------------------------------------------------------------------
-# 默认数据 URL
-# ---------------------------------------------------------------------------
-DEFAULT_LEAP_SECOND_URL = (
-    "https://hpiers.obspm.fr/iers/bul/bulc/Leap_Second.dat"
-)
+from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
-# 获取原始数据
+# 数据获取
 # ---------------------------------------------------------------------------
-def fetch_leap_seconds_data(url: str) -> str:
+
+BULLETIN_URL_TEMPLATE = "https://datacenter.iers.org/data/16/bulletinc-{num:03d}.txt"
+
+
+def fetch_bulletin(num: int) -> Optional[str]:
     """
-    从给定的 URL 获取 Leap_Second.dat 文件内容。
+    下载指定编号的 Bulletin C 文本。
 
     Parameters
     ----------
-    url : str
-        数据文件 URL。
+    num : int
+        Bulletin 编号。
 
     Returns
     -------
-    str
-        文件全部文本。
-
-    Raises
-    ------
-    urllib.error.URLError
-        如果网络请求失败。
+    str or None
+        如果文件存在则返回纯文本内容，否则返回 None。
     """
-    with urllib.request.urlopen(url, timeout=30) as response:
-        raw = response.read().decode("utf-8")
-    return raw
+    url = BULLETIN_URL_TEMPLATE.format(num=num)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    except Exception:
+        return None
+
+    # 提取 <pre> 标签内的原始文本
+    match = re.search(r"<pre[^>]*>(.*?)</pre>", raw, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    # 如果服务器直接返回纯文本（极少情况），直接使用
+    return raw.strip()
 
 
 # ---------------------------------------------------------------------------
-# 解析数据
+# 文本解析
 # ---------------------------------------------------------------------------
-def parse_leap_seconds_data(text: str) -> list[tuple[str, int]]:
+
+def parse_bulletin(text: str) -> Tuple[Optional[str], Optional[int]]:
     """
-    解析 Leap_Second.dat 文本，返回 (日期字符串, TAI-UTC 差值) 元组列表。
-
-    格式示例::
-        1972-01-01  10
-        1972-07-01  11
-        1973-01-01  12
-        ...
-
-    以 '#' 开头的行将被忽略。
-
-    Parameters
-    ----------
-    text : str
-        Leap_Second.dat 的完整文本内容。
+    从 Bulletin C 文本中提取闰秒日期和 UTC-TAI 偏移。
 
     Returns
     -------
-    list of (str, int)
-        列表中第一个元素对应最早的闰秒。
+    leap_date_str : str or None
+        闰秒发生的日期（格式 YYYY-MM-DD），若无闰秒则返回 None。
+    tai_utc_offset : int or None
+        公告中声明的 UTC-TAI 差值（秒），取非负整数值（即 TAI-UTC）。
     """
-    entries = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    # 匹配闰秒公告行
+    leap_match = re.search(
+        r"A positive leap second will be introduced at the end of (\w+ \d{4})",
+        text, re.IGNORECASE
+    )
+    leap_date = None
+    if leap_match:
+        month_year = leap_match.group(1)  # 如 "December 1995"
+        month_map = {
+            'january': 1, 'february': 2, 'march': 3, 'april': 4,
+            'may': 5, 'june': 6, 'july': 7, 'august': 8,
+            'september': 9, 'october': 10, 'november': 11, 'december': 12
+        }
+        parts = month_year.split()
+        if len(parts) == 2:
+            month_str, year_str = parts[0].lower(), parts[1]
+            month = month_map.get(month_str)
+            if month is not None:
+                year = int(year_str)
+                # 闰秒在月末的 23:59:60 UTC 之后，即次月 1 日 0h UTC
+                import calendar
+                last_day = calendar.monthrange(year, month)[1]
+                # 构造该月最后一天的 datetime，然后加一天
+                leap_dt = datetime.datetime(year, month, last_day, tzinfo=datetime.timezone.utc)
+                leap_dt += datetime.timedelta(days=1)
+                leap_date = leap_dt.strftime("%Y-%m-%d")
+
+    # 匹配 UTC-TAI 差值（常见格式："UTC-TAI = -37 s"）
+    offset_match = re.search(
+        r"UTC-TAI\s*=\s*-(\d+)\s*s", text, re.IGNORECASE
+    )
+    tai_utc_offset = None
+    if offset_match:
+        tai_utc_offset = int(offset_match.group(1))
+    else:
+        # 备选："TAI-UTC = 37 s"
+        alt_match = re.search(r"TAI-UTC\s*=\s*(\d+)\s*s", text, re.IGNORECASE)
+        if alt_match:
+            tai_utc_offset = int(alt_match.group(1))
+
+    return leap_date, tai_utc_offset
+
+
+# ---------------------------------------------------------------------------
+# 自动遍历所有可用公告
+# ---------------------------------------------------------------------------
+
+def scan_all_bulletins(start: int = 10, max_attempts: int = 200) -> List[Tuple[str, int]]:
+    """
+    从 start 编号开始依次下载公告，提取所有闰秒事件。
+
+    Returns
+    -------
+    entries : list of (date_str, tai_utc_offset)
+        按日期递增排序的闰秒事件列表。
+    """
+    events = []
+    consecutive_missing = 0
+
+    for num in range(start, start + max_attempts):
+        text = fetch_bulletin(num)
+        if text is None:
+            consecutive_missing += 1
+            if consecutive_missing >= 5:  # 连续 5 个 404 则停止
+                break
             continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        date_str = parts[0]
-        try:
-            offset = int(parts[1])
-        except ValueError:
-            continue
-        # 验证日期可解析
-        try:
-            datetime.datetime.fromisoformat(date_str)
-        except ValueError:
-            continue
-        entries.append((date_str, offset))
-    # 按日期排序（确保顺序）
-    entries.sort(key=lambda x: x[0])
-    return entries
+        else:
+            consecutive_missing = 0
+
+        leap_date, offset = parse_bulletin(text)
+        if leap_date:
+            events.append((leap_date, offset if offset is not None else 0))
+            print(f"  [{num:03d}] Found leap second: {leap_date}  (TAI-UTC={offset})")
+        else:
+            print(f"  [{num:03d}] No leap second announced.")
+
+    # 按日期排序
+    events.sort(key=lambda x: x[0])
+    return events
 
 
 # ---------------------------------------------------------------------------
 # 显示列表
 # ---------------------------------------------------------------------------
-def display_leap_seconds(entries: list[tuple[str, int]]) -> None:
-    """
-    友好打印闰秒日期及对应的 TAI-UTC 差值。
 
-    Parameters
-    ----------
-    entries : list of (str, int)
-        解析结果。
-    """
+def display_events(events: List[Tuple[str, int]]) -> None:
+    """友好打印闰秒列表"""
     header = f"{'Date':<15} {'TAI-UTC (s)':<12}"
     print(header)
     print("-" * len(header))
-    for date_str, offset in entries:
+    for date_str, offset in events:
         print(f"{date_str:<15} {offset:<12}")
-    print(f"\nTotal records: {len(entries)}")
+    print(f"\nTotal records: {len(events)}")
 
 
 # ---------------------------------------------------------------------------
 # 同步到运行时模块
 # ---------------------------------------------------------------------------
-def sync_to_runtime(entries: list[tuple[str, int]]) -> int:
-    """
-    将解析出的新闰秒日期同步到运行时的 time 模块。
 
-    调用 mission_sim.core.spacetime.time.add_leap_second() 为每个
-    尚未存在于内部列表中的日期添加条目。该函数是幂等的。
-
-    Parameters
-    ----------
-    entries : list of (str, int)
-        从权威源解析得到的闰秒日期列表。
-
-    Returns
-    -------
-    int
-        新增的闰秒条目数量。
-    """
+def sync_to_runtime(events: List[Tuple[str, int]]) -> int:
+    """将新的闰秒日期添加到 time 模块（幂等）。"""
     from mission_sim.core.spacetime.time import add_leap_second, _LEAP_SECONDS_DATES
 
-    # 构建已经存在的日期集合（仅日期部分，忽略时分秒）
-    existing = set()
-    for dt in _LEAP_SECONDS_DATES:
-        existing.add(dt.strftime("%Y-%m-%d"))
-
+    existing = {dt.strftime("%Y-%m-%d") for dt in _LEAP_SECONDS_DATES}
     added = 0
-    for date_str, _ in entries:
+    for date_str, _ in events:
         if date_str not in existing:
             add_leap_second(date_str)
             added += 1
-            existing.add(date_str)  # 避免本批次重复
-
+            existing.add(date_str)
     return added
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# 主程序
 # ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(
-        description="获取并解析 IERS 闰秒数据，可选同步到运行时模块。"
+        description="从 IERS Bulletin C 存档中提取闰秒日期。"
     )
     parser.add_argument(
-        "--url",
-        default=DEFAULT_LEAP_SECOND_URL,
-        help=f"Leap_Second.dat 数据的 URL（默认: {DEFAULT_LEAP_SECOND_URL}）",
+        "--start", type=int, default=10,
+        help="起始 Bulletin 编号 (默认: 10)"
     )
     parser.add_argument(
-        "--sync",
-        action="store_true",
-        help="将新发现的闰秒日期同步到 mission_sim.core.spacetime.time 模块。",
+        "--end", type=int, default=200,
+        help="最大尝试编号 (默认: 200)"
+    )
+    parser.add_argument(
+        "--sync", action="store_true",
+        help="将新闰秒同步到 mission_sim.core.spacetime.time 模块。"
     )
     args = parser.parse_args()
 
-    # 1. 获取数据
-    print(f"Fetching leap second data from: {args.url}")
-    try:
-        text = fetch_leap_seconds_data(args.url)
-    except Exception as e:
-        print(f"ERROR: Failed to fetch data: {e}", file=sys.stderr)
-        sys.exit(1)
+    print("Scanning IERS Bulletin C archive for leap seconds...\n")
+    events = scan_all_bulletins(start=args.start, max_attempts=args.end - args.start + 1)
 
-    # 2. 解析
-    entries = parse_leap_seconds_data(text)
-    if not entries:
-        print("WARNING: No leap second records found in the data.", file=sys.stderr)
-        sys.exit(0)
+    if not events:
+        print("No leap second events found.")
+        return
 
-    # 3. 显示
-    print("\n===== IERS Leap Second Data =====")
-    display_leap_seconds(entries)
+    print("\n===== Extracted Leap Second History =====")
+    display_events(events)
 
-    # 4. 同步
     if args.sync:
         try:
-            added = sync_to_runtime(entries)
+            added = sync_to_runtime(events)
         except ImportError as e:
             print(
-                f"\nERROR: Cannot import mission_sim. "
-                f"Make sure you run this script from the project root directory.\n"
+                "\nERROR: Cannot import mission_sim. "
+                "Make sure you run this script from the project root directory.\n"
                 f"  {e}",
                 file=sys.stderr,
             )
