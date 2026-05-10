@@ -1,17 +1,22 @@
 """
-高精度时间系统转换模块（更随和版）
+Hey there! Time conversion made easy.
 
-轻松搞定 UTC 字符串 (ISO 8601) 与常用时间系统间的双向转换：
+Provides bidirectional conversion between UTC strings (ISO 8601) and the
+following time scales:
   - TAI (International Atomic Time)
   - TT  (Terrestrial Time)
   - TDB (Barycentric Dynamical Time)
   - Julian Date (UTC)
   - Unix timestamp
-  - 平滑 UTC 秒 (不含闰秒，自 J2000.0 UTC 起算)
+  - Smooth UTC seconds (leap‑second‑free, referenced to J2000.0 UTC)
 
-闰秒数据从本地静态文件 ``Leap_Second.dat`` 读取，不再硬编码。
-若文件缺失或过期，会在模块加载时提示用户运行
-``tools/update_leap_second.py`` 进行初始化或更新。
+All internal time representations are continuous seconds relative to
+the J2000.0 epoch, consistent with the MCPC unified time axis.
+
+Leap‑second data are loaded from the local static file ``Leap_Second.dat``
+instead of being hard‑coded.  If the file is missing or out‑of‑date,
+a diagnostic message will be emitted at import time instructing the user
+to run ``tools/update_leap_second.py``.
 """
 
 import math
@@ -20,26 +25,31 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
-# 历元常量
+# Epoch constants
 # ---------------------------------------------------------------------------
 J2000_UTC = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)  # J2000.0 UTC
-J2000_JD = 2451545.0  # Julian Date of J2000.0 (TT 历元，但常用作参考)
-TAI_OFFSET_AT_J2000 = 32.0  # 在 J2000.0 UTC 时，TAI - UTC = 32 s
+J2000_JD = 2451545.0   # Julian Date of J2000.0 (TT epoch, commonly used as reference)
+TAI_OFFSET_AT_J2000 = 32.0  # TAI - UTC at J2000.0 UTC
 
 # ---------------------------------------------------------------------------
-# 闰秒数据文件路径
+# Path to the leap‑second data file
 # ---------------------------------------------------------------------------
 _LEAP_FILE_PATH = os.path.join(os.path.dirname(__file__), "Leap_Second.dat")
 
 # ---------------------------------------------------------------------------
-# 从本地文件加载闰秒表
+# Load leap‑second table from the local file (executed once at import)
 # ---------------------------------------------------------------------------
 def _parse_leap_second_file(path: str) -> list:
     """
-    读取 Leap_Second.dat 文件，返回闰秒生效日期 (datetime) 的升序列表。
-    文件格式示例：
-          41317.0    1  1 1972       10
-    其中第2~4列分别为日、月、年；第5列为 TAI-UTC (s)，本函数仅使用日期。
+    Parse the Leap_Second.dat file and return a list of leap‑second
+    effective dates (as UTC datetime objects), sorted in ascending order.
+
+    File format example::
+
+        41317.0    1  1 1972       10
+
+    Columns 2‑4 are day, month, year; column 5 is the TAI‑UTC value (which
+    is ignored by this function).
     """
     events = []
     with open(path, "r", encoding="utf-8") as f:
@@ -54,7 +64,6 @@ def _parse_leap_second_file(path: str) -> list:
                 day = int(parts[1])
                 month = int(parts[2])
                 year = int(parts[3])
-                # 第 5 列是 TAI-UTC 值，此处忽略
                 dt = datetime(year, month, day, tzinfo=timezone.utc)
                 events.append(dt)
             except (ValueError, IndexError):
@@ -65,17 +74,22 @@ def _parse_leap_second_file(path: str) -> list:
 
 def _check_file_freshness(path: str) -> None:
     """
-    检查本地闰秒文件是否过期（超过当前半年周期）。
-    若文件修改时间早于当前半年周期的开始，则认为过期并提示用户更新。
+    Verify whether the local leap‑second file is current with respect
+    to the half‑yearly Bulletin C cycle.
+
+    If the file's modification time is earlier than the start of the
+    current half‑year period (1 January or 1 July), a warning is printed
+    to stderr recommending that the file be updated.
     """
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return  # 文件不存在时已在调用处处理
+        return   # file doesn't exist, handled elsewhere
+
     file_mtime = datetime.fromtimestamp(mtime, tz=timezone.utc)
     now = datetime.now(tz=timezone.utc)
 
-    # 半年周期：1月1日 / 7月1日
+    # Bulletin C half‑year periods: 1 January … 30 June, 1 July … 31 December
     if now.month >= 7:
         period_start = datetime(now.year, 7, 1, tzinfo=timezone.utc)
     else:
@@ -83,17 +97,20 @@ def _check_file_freshness(path: str) -> None:
 
     if file_mtime < period_start:
         print(
-            f"⚠️  闰秒文件 {path} 可能已过期（最后修改于 {file_mtime.date()}）。\n"
-            "   建议运行 `python tools/update_leap_second.py` 获取最新数据。",
+            f"\N{warning sign}  Leap‑second file '{path}' may be outdated "
+            f"(last modified {file_mtime.date()}).\n"
+            "   Please run 'python tools/update_leap_second.py' to obtain "
+            "the latest data.",
             file=sys.stderr,
         )
 
 
-# 实际加载并检查（仅在模块导入时执行一次）
+# Actual loading and freshness check (performed once at import time)
 if not os.path.exists(_LEAP_FILE_PATH):
     print(
-        f"⚠️  闰秒文件 {_LEAP_FILE_PATH} 不存在。\n"
-        "   请运行 `python tools/update_leap_second.py` 初始化本地数据。",
+        f"\N{warning sign}  Leap‑second file '{_LEAP_FILE_PATH}' not found.\n"
+        "   Please run 'python tools/update_leap_second.py' to initialise "
+        "the local data file.",
         file=sys.stderr,
     )
     _LEAP_SECONDS_DATES = []
@@ -103,12 +120,14 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# 闰秒管理
+# Leap‑second management
 # ---------------------------------------------------------------------------
 def leap_seconds(utc_time: datetime) -> int:
     """
-    返回给定 UTC datetime 之前的累计闰秒数 (TAI - UTC)。
-    若时间早于第一个闰秒日期，则返回 0。
+    Return the cumulative number of leap seconds (TAI − UTC) that have
+    occurred on or before the given UTC datetime.
+
+    For times earlier than the first leap second this function returns 0.
     """
     cnt = 0
     for d in _LEAP_SECONDS_DATES:
@@ -121,12 +140,13 @@ def leap_seconds(utc_time: datetime) -> int:
 
 def add_leap_second(date_str: str) -> None:
     """
-    向内存闰秒表中临时添加一个闰秒日期（不写入文件，仅本次进程有效）。
+    Temporarily insert a leap‑second date into the in‑memory table
+    (does **not** modify the data file, only valid for the current process).
 
     Parameters
     ----------
     date_str : str
-        ISO 格式日期, 如 "2026-01-01"
+        ISO‑format date string, e.g. ``"2026-01-01"``.
     """
     new_date = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
     _LEAP_SECONDS_DATES.append(new_date)
@@ -134,22 +154,24 @@ def add_leap_second(date_str: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 核心转换函数（保持不变）
+# Core conversion functions
 # ---------------------------------------------------------------------------
 def utc_string_to_utc_smooth(utc_iso: str) -> float:
-    """将 UTC 字符串转换为平滑 UTC 秒数 (不含闰秒，自 J2000.0 UTC)。"""
+    """Convert a UTC ISO string to smooth UTC seconds (leap‑second‑free)
+    relative to J2000.0 UTC."""
     dt = datetime.fromisoformat(utc_iso).replace(tzinfo=timezone.utc)
     return (dt - J2000_UTC).total_seconds()
 
 
 def utc_smooth_to_utc_string(utc_smooth_sec: float) -> str:
-    """反向：将平滑 UTC 秒数转换为 UTC ISO 字符串"""
+    """Inverse of `utc_string_to_utc_smooth`: convert smooth UTC seconds
+    back to an ISO UTC string."""
     dt = J2000_UTC + timedelta(seconds=utc_smooth_sec)
     return dt.isoformat()
 
 
 def utc_string_to_tai(utc_iso: str) -> float:
-    """UTC -> TAI 秒 (自 J2000.0 TAI 历元)"""
+    """Convert UTC ISO string to TAI seconds since J2000.0 TAI."""
     dt = datetime.fromisoformat(utc_iso).replace(tzinfo=timezone.utc)
     utc_smooth = (dt - J2000_UTC).total_seconds()
     leap = leap_seconds(dt)
@@ -157,38 +179,42 @@ def utc_string_to_tai(utc_iso: str) -> float:
 
 
 def tai_to_utc_string(tai_sec: float) -> str:
-    """TAI 秒 -> UTC ISO 字符串 (逆过程)"""
+    """Inverse of `utc_string_to_tai`."""
     for leap in range(0, 60):
         utc_smooth = tai_sec - leap + TAI_OFFSET_AT_J2000
         dt = J2000_UTC + timedelta(seconds=utc_smooth)
         if leap_seconds(dt) == leap:
             return dt.isoformat()
-    raise ValueError(f"无法找到合法的 UTC 时间对应 TAI={tai_sec}")
+    raise ValueError(f"Unable to find a valid UTC time for TAI = {tai_sec}")
 
 
 def utc_string_to_tt(utc_iso: str) -> float:
-    """UTC -> TT 秒 (自 J2000.0 TT 历元)"""
+    """Convert UTC ISO string to TT seconds since J2000.0 TT."""
     tai = utc_string_to_tai(utc_iso)
-    return tai + 32.184  # TAI 与 TT 的固定偏移
+    return tai + 32.184   # fixed offset between TAI and TT
 
 
 def tt_to_utc_string(tt_sec: float) -> str:
-    """TT 秒 -> UTC 字符串"""
+    """Inverse of `utc_string_to_tt`."""
     tai = tt_sec - 32.184
     return tai_to_utc_string(tai)
 
 
 def utc_string_to_tdb(utc_iso: str) -> float:
-    """UTC -> TDB 秒 (自 J2000.0 TDB 历元)，简化解析近似"""
+    """
+    Convert UTC ISO string to TDB seconds since J2000.0 TDB using a
+    simplified analytic approximation (Fairhead & Bretagnon, 1990);
+    accuracy < 1 µs.
+    """
     tt = utc_string_to_tt(utc_iso)
-    t_tt = tt / 86400.0 / 36525.0
+    t_tt = tt / 86400.0 / 36525.0       # Julian centuries since J2000 TT
     g = (357.528 + 35999.05 * t_tt) * math.radians(1)
     tdb_offset = 0.001658 * math.sin(g + 0.0167 * math.sin(g))
     return tt + tdb_offset
 
 
 def tdb_to_utc_string(tdb_sec: float) -> str:
-    """TDB 秒 -> UTC 字符串，迭代求解"""
+    """Inverse of `utc_string_to_tdb` using a fixed‑point iteration."""
     tt = tdb_sec
     for _ in range(5):
         t_tt = tt / 86400.0 / 36525.0
@@ -199,34 +225,34 @@ def tdb_to_utc_string(tdb_sec: float) -> str:
 
 
 def utc_string_to_jd(utc_iso: str) -> float:
-    """UTC -> Julian Date (UTC 尺度的连续 JD)"""
+    """Convert UTC ISO string to continuous UTC Julian Date."""
     utc_smooth = utc_string_to_utc_smooth(utc_iso)
     return J2000_JD + utc_smooth / 86400.0
 
 
 def jd_to_utc_string(jd: float) -> str:
-    """Julian Date (UTC) -> UTC 字符串"""
+    """Inverse of `utc_string_to_jd`."""
     utc_smooth = (jd - J2000_JD) * 86400.0
     return utc_smooth_to_utc_string(utc_smooth)
 
 
 def utc_string_to_unix(utc_iso: str) -> float:
-    """UTC -> Unix timestamp (POSIX 秒)"""
+    """Convert UTC ISO string to Unix timestamp (POSIX seconds)."""
     dt = datetime.fromisoformat(utc_iso).replace(tzinfo=timezone.utc)
     return dt.timestamp()
 
 
 def unix_to_utc_string(unixtime: float) -> str:
-    """Unix timestamp -> UTC 字符串"""
+    """Inverse of `utc_string_to_unix`."""
     dt = datetime.fromtimestamp(unixtime, tz=timezone.utc)
     return dt.isoformat()
 
 
 # ---------------------------------------------------------------------------
-# 兼容旧式函数 (如 astro.py 中的名称)
+# Legacy compatibility functions (mirror aliases from astro.py)
 # ---------------------------------------------------------------------------
 def utc2tai(utc_jd: float) -> float:
-    """旧接口：UTC Julian date -> TAI Julian date (假设连续 UTC JD)"""
+    """Legacy: convert UTC Julian date to TAI Julian date."""
     utc_smooth = (utc_jd - J2000_JD) * 86400.0
     dt = J2000_UTC + timedelta(seconds=utc_smooth)
     leap = leap_seconds(dt)
@@ -234,12 +260,12 @@ def utc2tai(utc_jd: float) -> float:
 
 
 def utc2tdt(utc_jd: float) -> float:
-    """UTC JD -> TDT (TT) JD"""
+    """Legacy: convert UTC Julian date to TDT (TT) Julian date."""
     return utc2tai(utc_jd) + 32.184 / 86400.0
 
 
 def utc2tdb(utc_jd: float) -> float:
-    """UTC JD -> TDB JD (简化)"""
+    """Legacy: convert UTC Julian date to TDB Julian date (simplified)."""
     tdt = utc2tdt(utc_jd)
     jc = (utc_jd - J2000_JD) / 36525.0
     g = 2.0 * math.pi * (357.528 + 35999.05 * jc) / 360.0
@@ -247,10 +273,10 @@ def utc2tdb(utc_jd: float) -> float:
 
 
 def unix2utc(t: float) -> float:
-    """Unix timestamp -> UTC Julian day"""
+    """Legacy: convert Unix timestamp to UTC Julian day."""
     return t / 86400.0 + 2440587.5
 
 
 def utc2unix(utc_jd: float) -> float:
-    """UTC Julian day -> Unix timestamp"""
+    """Legacy: convert UTC Julian day to Unix timestamp."""
     return (utc_jd - 2440587.5) * 86400.0
