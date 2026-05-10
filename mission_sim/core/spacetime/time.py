@@ -17,6 +17,11 @@ Leap‑second data are loaded from the local static file ``Leap_Second.dat``
 instead of being hard‑coded.  If the file is missing or out‑of‑date,
 a diagnostic message will be emitted at import time instructing the user
 to run ``tools/update_leap_second.py``.
+
+.. seealso::
+   ADR-0004 (docs/design/adr/0004-leap-second-data-management.md)
+   for the design rationale behind the external leap‑second file and the
+   freshness check.
 """
 
 import math
@@ -80,6 +85,9 @@ def _check_file_freshness(path: str) -> None:
     If the file's modification time is earlier than the start of the
     current half‑year period (1 January or 1 July), a warning is printed
     to stderr recommending that the file be updated.
+
+    .. seealso::
+       ADR-0004 for the design of this freshness check.
     """
     try:
         mtime = os.path.getmtime(path)

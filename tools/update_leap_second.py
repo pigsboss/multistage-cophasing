@@ -11,6 +11,11 @@
 
 依赖：
     仅使用 Python 标准库 (urllib, datetime, os, re, argparse)。
+
+.. seealso::
+   ADR-0004 (docs/design/adr/0004-leap-second-data-management.md)
+   for the design rationale of externalizing leap‑second data and this
+   update tool.
 """
 
 import argparse
