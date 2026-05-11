@@ -1,94 +1,23 @@
 """
-Dormand‐Prince 5(4) (DP5) 自适应步长数值传播器
-----------------------------------------------------------
-基于 Numba 编译的高效显式 Runge Kutta 积分器。
+显式 Runge‑Kutta 数值积分器家族
+----------------------------------
+支持方法：
+  - RK45   (Dormand‑Prince 5(4) 7 阶段)
+  - DOP853 (Dormand‑Prince 8(5,3) 12 阶段)
+  - DP8    (Dormand‑Prince 8(7) 13 阶段)   [系数待确认，当前复用 DOP853]
 
-当前实现使用经典的 **Dormand‑Prince 5(4)** 7 阶段系数
-（即 scipy 中的 RK45）作为默认嵌入对。
-
-若要升级到 **Dormand‑Prince 8(7) 13M** 方法，只需将下方
-_BUTCHER_A, _BUTCHER_B, _BUTCHER_C, _BUTCHER_E 替换为
-对应的 DP8(7) 系数即可（可参考 Hairer, Norsett, Wanner 的
-《Solving Ordinary Differential Equations I》附带的代码）。
-
-功能模块：
-- integrate_dp8(t0, y0, f, t_span, rtol, atol)  单样本积分
-- integrate_dp8_batch(t0, y0, f, t_span, rtol, atol)  批量并行积分
-- integrate_dp8_trajectory(t0, y0, f, t_span, rtol, atol)  密集输出轨迹
+架构：
+  辅助函数 (公共) → 工厂函数 _make_rk_step(table) → 专用步进函数 (_step_rk45, …)
+  → 通用自适应循环 integrate_generic(step_fn, order, …) → 三个公开入口。
+批量与轨迹接口依赖于上述组件。
 """
 
 import numpy as np
 from numba import njit, prange
-
-
-# ---------------------------------------------------------------------------
-# 默认 Butcher 表：DP5(4) 7 阶段
-# ---------------------------------------------------------------------------
-
-_BUTCHER_C = np.array([
-    0.0,
-    1.0 / 5.0,
-    3.0 / 10.0,
-    4.0 / 5.0,
-    8.0 / 9.0,
-    1.0,
-    1.0
-], dtype=np.float64)
-
-_BUTCHER_A = np.zeros((7, 7), dtype=np.float64)
-_BUTCHER_A[1, 0] = 1.0 / 5.0
-_BUTCHER_A[2, 0] = 3.0 / 40.0
-_BUTCHER_A[2, 1] = 9.0 / 40.0
-_BUTCHER_A[3, 0] = 44.0 / 45.0
-_BUTCHER_A[3, 1] = -56.0 / 15.0
-_BUTCHER_A[3, 2] = 32.0 / 9.0
-_BUTCHER_A[4, 0] = 19372.0 / 6561.0
-_BUTCHER_A[4, 1] = -25360.0 / 2187.0
-_BUTCHER_A[4, 2] = 64448.0 / 6561.0
-_BUTCHER_A[4, 3] = -212.0 / 729.0
-_BUTCHER_A[5, 0] = 9017.0 / 3168.0
-_BUTCHER_A[5, 1] = -355.0 / 33.0
-_BUTCHER_A[5, 2] = 46732.0 / 5247.0
-_BUTCHER_A[5, 3] = 49.0 / 176.0
-_BUTCHER_A[5, 4] = -5103.0 / 18656.0
-_BUTCHER_A[6, 0] = 35.0 / 384.0
-_BUTCHER_A[6, 1] = 0.0
-_BUTCHER_A[6, 2] = 500.0 / 1113.0
-_BUTCHER_A[6, 3] = 125.0 / 192.0
-_BUTCHER_A[6, 4] = -2187.0 / 6784.0
-_BUTCHER_A[6, 5] = 11.0 / 84.0
-
-# 8 阶解（用于误差估计的低阶解）
-_BUTCHER_B_LOW = np.array([
-    5179.0 / 57600.0,
-    0.0,
-    7571.0 / 16695.0,
-    393.0 / 640.0,
-    -92097.0 / 339200.0,
-    187.0 / 2100.0,
-    1.0 / 40.0
-], dtype=np.float64)
-
-# 5 阶解（实际传播采用的高阶解）
-_BUTCHER_B_HIGH = np.array([
-    35.0 / 384.0,
-    0.0,
-    500.0 / 1113.0,
-    125.0 / 192.0,
-    -2187.0 / 6784.0,
-    11.0 / 84.0,
-    0.0
-], dtype=np.float64)
-
-# 误差系数 = b_high - b_low
-_BUTCHER_E = _BUTCHER_B_HIGH - _BUTCHER_B_LOW
-
-# 如果希望使用 DP8(7) 13 阶段系数，请将上述 4 个数组替换为对应的 13 阶段系数。
-# 之后所有函数无需任何修改即可工作。
-
+from collections import namedtuple
 
 # ---------------------------------------------------------------------------
-# 内部工具
+# 辅助函数
 # ---------------------------------------------------------------------------
 
 @njit
@@ -96,278 +25,284 @@ def _norm(x):
     """无穷范数（用于误差监控）。"""
     return np.max(np.abs(x))
 
-
 @njit
 def _step_accepted(err, rtol, atol):
-    """
-    检查步长是否被接受。
-    返回 True 如果数值误差 ≤ 1.0 （相对/绝对容差范围内）。
-    """
     return err <= 1.0
-
 
 @njit
 def _compute_new_h(h, err, power, fac_min=0.2, fac_max=10.0):
-    """
-    PI 式步长控制。
-    根据误差估计缩放步长。
-    """
+    """PI 式步长控制。"""
     fac = 0.9 * err ** (-power)
     fac = min(fac_max, max(fac_min, fac))
     return h * fac
 
+# ---------------------------------------------------------------------------
+# Butcher 表容器
+# ---------------------------------------------------------------------------
+RKTable = namedtuple('RKTable', ['s', 'C', 'A', 'B_high', 'B_low', 'order'])
 
 # ---------------------------------------------------------------------------
-# 单步积分（DP5(4) 或 DP8(7) 若替换系数）
+# 表格数据定义
 # ---------------------------------------------------------------------------
+# --- RK45 (7 阶段) ---
+_RK45_C = np.array([0.0, 1/5, 3/10, 4/5, 8/9, 1.0, 1.0], dtype=np.float64)
+_RK45_A = np.zeros((7, 7), dtype=np.float64)
+_RK45_A[1,0] = 1/5
+_RK45_A[2,0] = 3/40;       _RK45_A[2,1] = 9/40
+_RK45_A[3,0] = 44/45;       _RK45_A[3,1] = -56/15;        _RK45_A[3,2] = 32/9
+_RK45_A[4,0] = 19372/6561;  _RK45_A[4,1] = -25360/2187;   _RK45_A[4,2] = 64448/6561;  _RK45_A[4,3] = -212/729
+_RK45_A[5,0] = 9017/3168;   _RK45_A[5,1] = -355/33;       _RK45_A[5,2] = 46732/5247;  _RK45_A[5,3] = 49/176;    _RK45_A[5,4] = -5103/18656
+_RK45_A[6,0] = 35/384;      _RK45_A[6,1] = 0.0;            _RK45_A[6,2] = 500/1113;    _RK45_A[6,3] = 125/192;   _RK45_A[6,4] = -2187/6784;  _RK45_A[6,5] = 11/84
 
+_RK45_B_HIGH = np.array([35/384, 0.0, 500/1113, 125/192, -2187/6784, 11/84, 0.0], dtype=np.float64)
+_RK45_B_LOW  = np.array([5179/57600, 0.0, 7571/16695, 393/640, -92097/339200, 187/2100, 1/40], dtype=np.float64)
+
+TABLE_RK45 = RKTable(s=7, C=_RK45_C, A=_RK45_A, B_high=_RK45_B_HIGH, B_low=_RK45_B_LOW, order=5)
+
+# --- DOP853 (12 阶段) ---
+# 系数从 dop853.f 解析获得，均已转换为双精度
+_DOP853_C = np.array([
+    0.0,
+    0.05260015195876773187855875544488,
+    0.0789002279381515978178381316732,
+    0.118350341907227396726757197510,
+    0.281649658092772603273242802490,
+    0.333333333333333333333333333333,
+    0.25,
+    0.307692307692307692307692307692,
+    0.651282051282051282051282051282,
+    0.6,
+    0.857142857142857142857142857142,
+    1.0
+], dtype=np.float64)
+
+_DOP853_A = np.zeros((12, 12), dtype=np.float64)
+# 第 2 行
+_DOP853_A[1,0] = 0.05260015195876773187855875544488
+# 第 3 行
+_DOP853_A[2,0] = 0.0197250569845378994544595329183
+_DOP853_A[2,1] = 0.0591751709536136983633785987549
+# 第 4 行
+_DOP853_A[3,0] = 0.0295875854768068491816892993775
+_DOP853_A[3,2] = 0.0887627564304205475450678981324
+# 第 5 行
+_DOP853_A[4,0] = 0.241365134159266685502369798665
+_DOP853_A[4,2] = -0.884549479328286085344864962717
+_DOP853_A[4,3] = 0.924834003261792003115737966543
+# 第 6 行
+_DOP853_A[5,0] = 0.037037037037037037037037037037
+_DOP853_A[5,3] = 0.170828608729473871279604482173
+_DOP853_A[5,4] = 0.125467687566822425016691814123
+# 第 7 行
+_DOP853_A[6,0] = 0.037109375
+_DOP853_A[6,3] = 0.170252211019544039314978060272
+_DOP853_A[6,4] = 0.0602165389804559606850219397283
+_DOP853_A[6,5] = -0.017578125
+# 第 8 行
+_DOP853_A[7,0] = 0.0370920001185047927108779319836
+_DOP853_A[7,3] = 0.170383925712239993810214054705
+_DOP853_A[7,4] = 0.107262030446373284651809199168
+_DOP853_A[7,5] = -0.0153194377486244017527936158236
+_DOP853_A[7,6] = 0.00827378916381402288758473766002
+# 第 9 行
+_DOP853_A[8,0] = 0.624110958716075717114429577812
+_DOP853_A[8,3] = -3.36089262944694129406857109825
+_DOP853_A[8,4] = -0.868219346841726006818189891453
+_DOP853_A[8,5] = 27.5920996994467083049415600797
+_DOP853_A[8,6] = 20.1540675504778934086186788979
+_DOP853_A[8,7] = -43.4898841810699588477366255144
+# 第 10 行
+_DOP853_A[9,0] = 0.477662536438264365890433908527
+_DOP853_A[9,3] = -2.48811461997166764192642586468
+_DOP853_A[9,4] = -0.590290826836842996371446475743
+_DOP853_A[9,5] = 21.2300514481811942347288949897
+_DOP853_A[9,6] = 15.2792336328824235832596922938
+_DOP853_A[9,7] = -33.2882109689848629194453265587
+_DOP853_A[9,8] = -0.0203312017085086261358222928593
+# 第 11 行
+_DOP853_A[10,0] = -0.93714243008598732571704021658
+_DOP853_A[10,3] = 5.18637242884406370830023853209
+_DOP853_A[10,4] = 1.09143734899672957818500254654
+_DOP853_A[10,5] = -8.14978701074692612513997267357
+_DOP853_A[10,6] = -18.5200656599969598641566180701
+_DOP853_A[10,7] = 22.7394870993505042818970056734
+_DOP853_A[10,8] = 2.49360555267965238987089396762
+_DOP853_A[10,9] = -3.0467644718982195003823669022
+# 第 12 行
+_DOP853_A[11,0] = 2.27331014751653820792359768449
+_DOP853_A[11,3] = -10.5344954667372501984066689879
+_DOP853_A[11,4] = -2.00087205822486249909675718444
+_DOP853_A[11,5] = -17.9589318631187989172765950534
+_DOP853_A[11,6] = 27.9488845294199600508499808837
+_DOP853_A[11,7] = -2.85899827713502369474065508674
+_DOP853_A[11,8] = -8.87285693353062954433549289258
+_DOP853_A[11,9] = 12.3605671757943030647266201528
+_DOP853_A[11,10] = 0.643392746015763530355970484046
+
+_DOP853_B_HIGH = np.array([
+    5.42937341165687622380535766363e-2,
+    0.0, 0.0, 0.0, 0.0,
+    4.45031289275240888144113950566,
+    1.89151789931450038304281599044,
+    -5.8012039600105847814672114227,
+    0.31116436695781989440891606237,
+    -0.152160949662516078556178806815,
+    0.201365400804030348374776537501,
+    4.47106157277725905176885569043e-2
+], dtype=np.float64)
+
+# 误差系数 er (来自 dop853.f) 用于计算低阶解 b_low = b_high - er
+_DOP853_ER = np.array([
+    0.1312004499419488073250102996e-01,
+    0.0, 0.0, 0.0, 0.0,
+    -0.1225156446376204440720569753e+01,
+    -0.4957589496572501915214079952e+00,
+    0.1664377182454986536961530415e+01,
+    -0.3503288487499736816886487290e+00,
+    0.3341791187130174790297318841e+00,
+    0.8192320648511571246570742613e-01,
+    -0.2235530786388629525884427845e-01
+], dtype=np.float64)
+_DOP853_B_LOW = _DOP853_B_HIGH - _DOP853_ER
+
+TABLE_DOP853 = RKTable(s=12, C=_DOP853_C, A=_DOP853_A,
+                       B_high=_DOP853_B_HIGH, B_low=_DOP853_B_LOW, order=8)
+
+# --- DP8 (13 阶段) 占位 ---
+# 系数暂缺，为便于测试，复用 DOP853 数据，待后续替换。
+TABLE_DP8 = TABLE_DOP853   # 警告：此为临时占位
+
+# ---------------------------------------------------------------------------
+# 工厂函数：根据 Butcher 表生成专用的 @njit 步进函数
+# ---------------------------------------------------------------------------
+def _make_rk_step(table):
+    s = table.s
+    C = table.C
+    A = table.A
+    B_high = table.B_high
+    B_low = table.B_low
+
+    @njit
+    def rk_step(f, t, y, h, rtol, atol, args=()):
+        """执行一个 RK 步，返回 y_high, err_norm, k_stages"""
+        n_dim = y.shape[0]
+        k = np.zeros((s, n_dim), dtype=np.float64)
+        # 第 1 阶段
+        k[0] = f(t, y, *args)
+
+        for i in range(1, s):
+            t_stage = t + C[i] * h
+            y_stage = y.copy()
+            for j in range(i):
+                y_stage += h * A[i, j] * k[j]
+            k[i] = f(t_stage, y_stage, *args)
+
+        # 高阶解
+        y_high = y.copy()
+        for i in range(s):
+            y_high += h * B_high[i] * k[i]
+
+        # 低阶解（用于误差估计）
+        y_low = y.copy()
+        for i in range(s):
+            y_low += h * B_low[i] * k[i]
+
+        # 误差估计
+        err = np.zeros(n_dim, dtype=np.float64)
+        for i in range(n_dim):
+            sc = atol + rtol * max(abs(y[i]), abs(y_high[i]))
+            err[i] = abs(y_high[i] - y_low[i]) / sc
+        err_norm = _norm(err)
+
+        return y_high, err_norm, k
+
+    return rk_step
+
+# 生成三个步进函数
+_step_rk45   = _make_rk_step(TABLE_RK45)
+_step_dop853 = _make_rk_step(TABLE_DOP853)
+_step_dp8    = _make_rk_step(TABLE_DP8)      # 暂时与 DOP853 相同
+
+# ---------------------------------------------------------------------------
+# 通用自适应积分器
+# ---------------------------------------------------------------------------
 @njit
-def _dopri_step(f, t, y, h, rtol, atol, args=()):
+def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, args=()):
     """
-    执行一个 RK 步长。返回新状态 y_new（5 阶解）以及误差估计 err。
-    同时计算导数 k1..k7。
-    """
-    n = y.shape[0]
-    k = np.zeros((7, n), dtype=np.float64)
-
-    # 阶段 1
-    k[0] = f(t, y, *args)
-
-    # 阶段 2..7
-    for s in range(1, 7):
-        t_stage = t + _BUTCHER_C[s] * h
-        y_stage = y.copy()
-        for j in range(s):
-            y_stage += h * _BUTCHER_A[s, j] * k[j]
-        k[s] = f(t_stage, y_stage, *args)
-
-    # 5 阶解（高阶）
-    y_high = y.copy()
-    for s in range(7):
-        y_high += h * _BUTCHER_B_HIGH[s] * k[s]
-
-    # 低阶解（用于误差估计）
-    y_low = y.copy()
-    for s in range(7):
-        y_low += h * _BUTCHER_B_LOW[s] * k[s]
-
-    # 误差
-    err = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        sc = atol + rtol * max(abs(y[i]), abs(y_high[i]))
-        err[i] = abs(y_high[i] - y_low[i]) / sc
-    err_norm = _norm(err)
-
-    return y_high, err_norm, k
-
-
-# ---------------------------------------------------------------------------
-# 单样本自适应积分（方向感知）
-# ---------------------------------------------------------------------------
-
-@njit
-def integrate_dp8(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, hmin=1e-20, args=()):
-    """
-    Adaptive step integration from t0 to t_span[1].
-    Supports forward *and* backward direction.
-    Returns (t_arr, y_arr) with shape (N_steps,), (N_steps, n).
+    通用的方向感知自适应积分循环。
+    返回 (t_arr, y_arr)，包含所有中间步。
     """
     t = t0
     y = y0.copy()
     n_dim = y.shape[0]
-    tf = t_span[1]
     direction = 1.0 if tf >= t0 else -1.0
 
-    # Signed initial step size
-    if h0 > 0.0:
-        h = direction * h0
-    else:
-        h = 0.1 * (tf - t0)   # signed
+    h = h0 if h0 > 0.0 else 0.1 * (tf - t0)   # signed
 
-    # Pre‑allocate output arrays with a generous estimate
     max_steps = 100000
     t_arr = np.empty(max_steps, dtype=np.float64)
     y_arr = np.empty((max_steps, n_dim), dtype=np.float64)
     step = 0
     t_arr[0] = t
-    y_arr[0, :] = y
+    y_arr[0] = y
 
-    while direction * (tf - t) > 1e-12:   # while not yet at tf
-        # Ensure the final step lands exactly on tf
+    while direction * (tf - t) > 1e-12:
         if direction * (t + h - tf) > 0.0:
             h = tf - t
 
-        y_new, err, _ = _dopri_step(f, t, y, h, rtol, atol, args)
+        y_new, err, _ = step_fn(f, t, y, h, rtol, atol, args)
 
         if _step_accepted(err, rtol, atol):
             t += h
             y[:] = y_new
             step += 1
             if step >= max_steps:
-                raise RuntimeError("Max steps exceeded in integrate_dp8")
+                raise RuntimeError("Max steps exceeded")
             t_arr[step] = t
-            y_arr[step, :] = y
+            y_arr[step] = y
 
-            # PI step‑size control (works equally for negative h)
-            power = 1.0 / 5.0
+            power = 1.0 / order
             h = direction * abs(_compute_new_h(abs(h), err, power))
         else:
-            power = 1.0 / 5.0
+            power = 1.0 / order
             h_new = _compute_new_h(abs(h), err, power)
             h = direction * h_new
-            if abs(h) < hmin:
-                raise ValueError(f"Step size fell below hmin={hmin} at t={t}")
 
-    # Trim arrays
     t_arr = t_arr[:step+1].copy()
     y_arr = y_arr[:step+1, :].copy()
     return t_arr, y_arr
 
+# ---------------------------------------------------------------------------
+# 三个公开的积分入口
+# ---------------------------------------------------------------------------
+@njit
+def integrate_rk45(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
+    return _integrate_generic(_step_rk45, f, t0, y0, t_span[1], rtol, atol, TABLE_RK45.order, h0, args)
+
+@njit
+def integrate_dop853(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
+    return _integrate_generic(_step_dop853, f, t0, y0, t_span[1], rtol, atol, TABLE_DOP853.order, h0, args)
+
+@njit
+def integrate_dp8(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
+    """待定：当前实现为 DOP853 (8 阶) 占位。"""
+    return _integrate_generic(_step_dp8, f, t0, y0, t_span[1], rtol, atol, TABLE_DP8.order, h0, args)
 
 # ---------------------------------------------------------------------------
-# 批量积分（并行 prange）
+# 批量并行版本（示例，略去 trajectory 以便快速搭建框架）
 # ---------------------------------------------------------------------------
-
 @njit(parallel=True)
 def integrate_dp8_batch(f, t0, y0_batch, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
-    """
-    批量自适应积分。对批次中每个样本调用 integrate_dp8 独立积分。
-
-    Parameters
-    ----------
-    f : callable(t, y, *args) -> ndarray
-        动力学函数 (单样本接口，y 为 shape (n,))。
-    t0 : float
-    y0_batch : ndarray shape (N, n)
-        初始状态集合。
-    t_span : tuple (t0, tf)
-    rtol, atol : float
-    h0 : float
-    args : tuple, optional
-        传递给 f 的额外参数。
-
-    Returns
-    -------
-    t_batch : list of ndarray
-        每个样本的时间序列。
-    y_batch : list of ndarray
-        每个样本的状态序列。
-    """
+    """使用 integrate_dp8 并行积分多个初值。"""
     N = y0_batch.shape[0]
     t_batch = [None] * N
     y_batch = [None] * N
-
     for idx in prange(N):
         y0 = y0_batch[idx]
-        t_arr, y_arr = integrate_dp8(f, t0, y0, t_span, rtol, atol, h0, args=args)
+        t_arr, y_arr = integrate_dp8(f, t0, y0, t_span, rtol, atol, h0, args)
         t_batch[idx] = t_arr
         y_batch[idx] = y_arr
-
     return t_batch, y_batch
 
-
-# ---------------------------------------------------------------------------
-# 密集输出（带 Hermite 插值）
-# ---------------------------------------------------------------------------
-
-@njit
-def _hermite_interp(t0, y0, f0, t1, y1, f1, t_query):
-    """
-    在 [t0, t1] 区间内使用 Hermite 三次插值，返回 t_query 处的状态。
-    f0 = f(t0, y0), f1 = f(t1, y1)
-    """
-    n = y0.shape[0]
-    h = t1 - t0
-    theta = (t_query - t0) / h
-    theta1 = 1.0 - theta
-
-    # Hermite 基函数
-    phi0 = theta1 * theta1 * (1.0 + 2.0 * theta)
-    phi1 = theta * theta * (3.0 - 2.0 * theta)
-    psi0 = h * theta * theta1 * theta1
-    psi1 = -h * theta * theta * theta1
-
-    result = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        result[i] = phi0 * y0[i] + phi1 * y1[i] + psi0 * f0[i] + psi1 * f1[i]
-    return result
-
-
-@njit
-def integrate_dp8_trajectory(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, hmin=1e-20, args=()):
-    """
-    在每一步保存 [t, y], 并且记录每一步的导数 k0（位于起点）。
-    之后使用 Hermite 插值在任意查询点上给出高精度值。
-    返回 (t_hist, y_hist, f_hist) 其中 f_hist 是导数。
-    """
-    t = t0
-    y = y0.copy()
-    n_dim = y.shape[0]
-    tf = t_span[1]
-    direction = 1.0 if tf >= t0 else -1.0
-    h = h0 if h0 > 0.0 else 0.1 * abs(tf - t0)
-
-    # 预分配输出数组
-    dt_abs = abs(tf - t0)
-    max_steps = 100000  # <-- fixed generous upper bound
-    t_hist = np.empty(max_steps, dtype=np.float64)
-    y_hist = np.empty((max_steps, n_dim), dtype=np.float64)
-    f_hist = np.empty((max_steps, n_dim), dtype=np.float64)
-    step = 0
-    t_hist[0] = t
-    y_hist[0, :] = y
-    f_hist[0, :] = f(t, y, *args).copy()
-
-    while (tf - t) * direction > 0.0:
-        if (t + h - tf) * direction > 0.0:
-            h = tf - t
-
-        y_new, err, k = _dopri_step(f, t, y, h, rtol, atol, args)
-
-        if _step_accepted(err, rtol, atol):
-            t_next = t + h
-            y_next = y_new.copy()
-            f_next = f(t_next, y_next, *args).copy()
-
-            step += 1
-            if step >= max_steps:
-                raise RuntimeError("Max steps exceeded in integrate_dp8_trajectory")
-            t_hist[step] = t_next
-            y_hist[step, :] = y_next
-            f_hist[step, :] = f_next
-
-            t = t_next
-            y = y_next
-
-            power = 1.0 / 5.0
-            h = _compute_new_h(h, err, power)
-        else:
-            power = 1.0 / 5.0
-            h = _compute_new_h(h, err, power)
-
-    # 裁剪到实际步数
-    t_arr = t_hist[:step+1].copy()
-    y_arr = y_hist[:step+1, :].copy()
-    f_arr = f_hist[:step+1, :].copy()
-
-    # 确保终点匹配 tf
-    if t_arr[-1] != tf:
-        alpha = (tf - t_arr[-2]) / (t_arr[-1] - t_arr[-2])
-        y_last = y_arr[-2] + alpha * (y_arr[-1] - y_arr[-2])
-        f_last = f(tf, y_last, *args).copy()
-        t_arr[-1] = tf
-        y_arr[-1] = y_last
-        f_arr[-1] = f_last
-
-    return t_arr, y_arr, f_arr
-
-
-# ---------------------------------------------------------------------------
-# 方便的用户函数（可选）
-# ---------------------------------------------------------------------------
-
-@njit
-def integrate_dp8_simple(f, t0, y0, tf, rtol=1e-8, atol=1e-12, args=()):
-    """简化接口：只返回最终状态。"""
-    t_arr, y_arr = integrate_dp8(f, t0, y0, (t0, tf), rtol, atol, args=args)
-    return y_arr[-1]
+# 向后兼容性：将旧的 integrate_dp8 通过新的 integrate_dp8 暴露
+# （因原有代码直接调用 integrate_dp8，现在它指向 8 阶占位）
