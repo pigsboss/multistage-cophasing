@@ -1,6 +1,6 @@
 # tests/test_analytical_ephemeris.py
 """
-Hey everyone! Here are some tests for the analytical N‑body backup ephemeris.
+Hey! Here are some tests for the analytical N‑body backup ephemeris.
 
 We check out:
 - Interface compliance of NBodyTargetEphemeris
