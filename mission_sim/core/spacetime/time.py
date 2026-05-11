@@ -1,5 +1,5 @@
 """
-Hey! Time conversion made easy.
+Yo! Time conversion made easy.
 
 Provides bidirectional conversion between UTC strings (ISO 8601) and the
 following time scales:
