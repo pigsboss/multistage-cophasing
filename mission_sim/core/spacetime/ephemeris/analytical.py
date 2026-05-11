@@ -15,7 +15,7 @@ from numba import njit
 from mission_sim.core.spacetime.time import utc_smooth_to_tdb
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.spacetime.ephemeris.base import Ephemeris
-from mission_sim.utils.propagators.base import integrate_dp8
+from mission_sim.utils.propagators.rk import integrate_dp8
 
 
 # ---------------------------------------------------------------------------
