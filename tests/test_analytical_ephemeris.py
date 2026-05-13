@@ -22,7 +22,7 @@ from mission_sim.core.spacetime.ephemeris.analytical import (
 )
 from mission_sim.core.spacetime.time import utc_smooth_to_tdb
 from mission_sim.core.spacetime.ids import CoordinateFrame
-from mission_sim.utils.solvers.base import kepler_elements_to_cartesian_batch
+from mission_sim.utils.solvers.keplerian import kepler_elements_to_cartesian_batch
 import mission_sim.core.spacetime.time as timemod
 
 
