@@ -76,12 +76,20 @@ def bench_integrator(name, integrate_fn, t0, y0, t_span, tol_dict, n_repeat=5):
 # ---------------------------------------------------------------------------
 def bench_local_error_estimate():
     """
-    Fixed-step single-step test on a nonlinear smooth problem.
-    
-    DP8(7) uses a 7th-order embedded formula (only 1 order below its 8th-
-    order main solution), whereas DOP853 uses a 5th-order embedded formula
-    (3 orders below).  Consequently DP8(7)'s |y_high - y_low| tracks the
-    true |y_high - y_true| far more closely.
+    Fixed-step single-step test illustrating the classical embedded-error
+    estimate fidelity.
+
+    DP8(7) pairs an 8th-order main solution with a 7th-order embedded
+    formula (order gap = 1).  DOP853 pairs an 8th-order main solution with
+    a 5th-order embedded formula (order gap = 3).  When using the classic
+    |y_high - y_low| as the error estimator:
+
+      - DOP853:  estimate ~ O(h^6),  true error ~ O(h^9)  =>  Ratio ~ O(h^{-3})
+      - DP8(7):  estimate ~ O(h^8),  true error ~ O(h^9)  =>  Ratio ~ O(h^{-1})
+
+    Thus DP8(7)'s error estimate tracks the true local error far more
+    closely.  (The production DOP853 avoids this blow-up by using Hairer's
+    special ER vector instead of the raw 5th-order difference.)
     """
     _step_dop = _make_rk_step(TABLE_DOP853)
     _step_dp8 = _make_rk_step(TABLE_DP8)
@@ -91,7 +99,7 @@ def bench_local_error_estimate():
     step_sizes = [0.5, 0.2, 0.1, 0.05]
 
     print("\n" + "=" * 72)
-    print("Local Error Estimate Accuracy (fixed single step)")
+    print("Classical Embedded Error Estimate vs True Local Error")
     print("Problem: van der Pol oscillator (mu=2), t0=0, y0=[2,0]")
     print("Ratio = |y_high - y_low|_inf / |y_high - y_true|_inf")
     print("=" * 72)
@@ -99,29 +107,32 @@ def bench_local_error_estimate():
     print("-" * 72)
 
     for h in step_sizes:
-        # Ground truth: DOP853 at very tight tolerance with tiny initial step
-        _, y_ref_arr = integrate_dop853(
+        # Ground truth via DP8 at very tight tolerance
+        _, y_ref_arr = integrate_dp8(
             vdp_f, t0, y0.copy(), (t0, t0 + h),
             rtol=1e-14, atol=1e-16, h0=min(1e-4, h * 1e-2)
         )
         y_true = y_ref_arr[-1]
 
-        for name, table, step_fn in [
-            ("DOP853", TABLE_DOP853, _step_dop),
-            ("DP8(7)", TABLE_DP8, _step_dp8),
-        ]:
-            y_high, _, k = step_fn(vdp_f, t0, y0, h, 1e-14, 1e-16)
+        # DOP853 with its classic 5th-order embedded formula
+        y_high_dop, _, k_dop = _step_dop(vdp_f, t0, y0, h, 1e-14, 1e-16)
+        y_low_dop = y0.copy()
+        for i in range(TABLE_DOP853.s):
+            y_low_dop += h * TABLE_DOP853.B_low[i] * k_dop[i]
+        est_err_dop = np.max(np.abs(y_high_dop - y_low_dop))
+        true_err_dop = np.max(np.abs(y_high_dop - y_true))
+        ratio_dop = est_err_dop / true_err_dop if true_err_dop > 1e-18 else np.nan
+        print(f"{h:8.4f} {'DOP853*':>10} {est_err_dop:14.6e} {true_err_dop:14.6e} {ratio_dop:10.4f}")
 
-            # Reconstruct low-order solution from returned stages
-            y_low = y0.copy()
-            for i in range(table.s):
-                y_low += h * table.B_low[i] * k[i]
-
-            est_err = np.max(np.abs(y_high - y_low))
-            true_err = np.max(np.abs(y_high - y_true))
-            ratio = est_err / true_err if true_err > 1e-18 else np.nan
-
-            print(f"{h:8.4f} {name:>10} {est_err:14.6e} {true_err:14.6e} {ratio:10.4f}")
+        # DP8(7) with its 7th-order embedded formula
+        y_high_dp8, _, k_dp8 = _step_dp8(vdp_f, t0, y0, h, 1e-14, 1e-16)
+        y_low_dp8 = y0.copy()
+        for i in range(TABLE_DP8.s):
+            y_low_dp8 += h * TABLE_DP8.B_low[i] * k_dp8[i]
+        est_err_dp8 = np.max(np.abs(y_high_dp8 - y_low_dp8))
+        true_err_dp8 = np.max(np.abs(y_high_dp8 - y_true))
+        ratio_dp8 = est_err_dp8 / true_err_dp8 if true_err_dp8 > 1e-18 else np.nan
+        print(f"{h:8.4f} {'DP8(7)':>10} {est_err_dp8:14.6e} {true_err_dp8:14.6e} {ratio_dp8:10.4f}")
 
 
 # ---------------------------------------------------------------------------
