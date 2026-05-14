@@ -14,6 +14,9 @@ from mission_sim.utils.propagators.rk import (
     integrate_rk45,
     integrate_dop853,
     integrate_dp8,
+    TABLE_DOP853,
+    TABLE_DP8,
+    _make_rk_step,
 )
 
 
@@ -56,6 +59,56 @@ def bench_integrator(name, integrate_fn, t0, y0, t_span, tol_dict, n_repeat=5):
     return avg_time, max_error
 
 
+# ---------------------------------------------------------------------------
+# Local error estimate fidelity test
+# ---------------------------------------------------------------------------
+def bench_local_error_estimate():
+    """
+    Fixed-step single-step test: compare the embedded local error estimate
+    against the true local truncation error.
+    
+    DP8(7) uses a 7th-order embedded formula (only 1 order below its 8th-
+    order main solution), whereas DOP853 uses a 5th-order embedded formula
+    (3 orders below).  Consequently DP8(7)'s |y_high - y_low| tracks the
+    true |y_high - y_true| far more closely.
+    """
+    _step_dop = _make_rk_step(TABLE_DOP853)
+    _step_dp8 = _make_rk_step(TABLE_DP8)
+
+    y0 = np.array([1.0, 0.0])
+    t0 = 0.0
+    step_sizes = [0.5, 0.2, 0.1, 0.05]
+
+    print("\n" + "=" * 72)
+    print("Local Error Estimate Accuracy (fixed single step)")
+    print("Problem: harmonic oscillator, t0=0, y0=[1,0]")
+    print("Ratio = |y_high - y_low|_inf / |y_high - y_true|_inf")
+    print("=" * 72)
+    print(f"{'h':>8} {'Method':>10} {'Est error':>14} {'True error':>14} {'Ratio':>10}")
+    print("-" * 72)
+
+    for h in step_sizes:
+        for name, table, step_fn in [
+            ("DOP853", TABLE_DOP853, _step_dop),
+            ("DP8(7)", TABLE_DP8, _step_dp8),
+        ]:
+            y_high, _, k = step_fn(harmonic_f, t0, y0, h, 1e-14, 1e-16)
+
+            # Reconstruct low-order solution from returned stages
+            y_low = y0.copy()
+            for i in range(table.s):
+                y_low += h * table.B_low[i] * k[i]
+
+            est_err = np.max(np.abs(y_high - y_low))
+            true_err = np.max(np.abs(y_high - analytical_harmonic(t0 + h)))
+            ratio = est_err / true_err if true_err > 1e-18 else np.nan
+
+            print(f"{h:8.4f} {name:>10} {est_err:14.6e} {true_err:14.6e} {ratio:10.4f}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
     print("=" * 72)
     print("Runge‑Kutta Integrator Benchmark")
@@ -89,6 +142,9 @@ def main():
                 name, integrate_fn, t0, y0, (t0, tf), tol_dict
             )
             print(f"{name:<10} {avg_t*1e3:>12.4f} ms   {max_err:>12.6e}")
+
+    # Local error estimate fidelity test
+    bench_local_error_estimate()
 
     # Optional: show the fastest method
     print("\n" + "=" * 72)
