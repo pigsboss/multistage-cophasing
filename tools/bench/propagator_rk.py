@@ -19,6 +19,34 @@ from mission_sim.utils.propagators.rk import (
     _make_rk_step,
 )
 
+# ---------------------------------------------------------------------------
+# scipy adapters (optional)
+# ---------------------------------------------------------------------------
+try:
+    from scipy.integrate import RK45 as ScipyRK45, DOP853 as ScipyDOP853
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+
+def _scipy_wrapper_factory(SciClass):
+    """将 scipy 的 ODE 求解器包装成本地 bench_integrator 所需的接口。"""
+    def wrapper(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0):
+        kwargs = {}
+        if h0 > 0.0:
+            kwargs['first_step'] = h0
+        solver = SciClass(f, t0, y0, t_span[1], rtol=rtol, atol=atol, **kwargs)
+        while solver.status == 'running':
+            solver.step()
+        # 兼容原接口：返回 (t_arr, y_arr)，bench_integrator 取 y_arr[-1]
+        return np.array([solver.t]), np.array([solver.y])
+    return wrapper
+
+
+if _HAS_SCIPY:
+    scipy_rk45 = _scipy_wrapper_factory(ScipyRK45)
+    scipy_dop853 = _scipy_wrapper_factory(ScipyDOP853)
+
 
 # ---------------------------------------------------------------------------
 # Test problem: harmonic oscillator  y'' = -y,  y(0)=[1,0],  t∈[0,2π]
@@ -49,7 +77,7 @@ def vdp_f(t, y):
 # ---------------------------------------------------------------------------
 # Benchmark routine
 # ---------------------------------------------------------------------------
-def bench_integrator(name, integrate_fn, t0, y0, t_span, tol_dict, n_repeat=5):
+def bench_integrator(name, integrate_fn, t0, y0, t_span, tol_dict, n_repeat=3):
     """
     Run the integrator n_repeat times, return (avg_time, max_error).
     """
@@ -155,10 +183,16 @@ def main():
     }
 
     integrators = [
-        ("RK45",   integrate_rk45),
-        ("DOP853", integrate_dop853),
-        ("DP8(7)", integrate_dp8),
+        ("RK45",        integrate_rk45),
+        ("DOP853",      integrate_dop853),
+        ("DP8(7)",      integrate_dp8),
     ]
+
+    if _HAS_SCIPY:
+        integrators += [
+            ("SciPy RK45",  scipy_rk45),
+            ("SciPy DOP853", scipy_dop853),
+        ]
 
     for tol_name, tol_dict in tol_configs.items():
         print(f"\n--- Tolerance: rtol={tol_dict['rtol']}, atol={tol_dict['atol']} ---")
