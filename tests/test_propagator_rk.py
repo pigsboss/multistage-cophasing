@@ -76,7 +76,8 @@ def test_dp8_forward_harmonic():
     """DP8(7) propagates a harmonic oscillator to t=2π with high accuracy."""
     t0, tf = 0.0, 2.0 * np.pi
     y0 = np.array([1.0, 0.0])
-    t_arr, y_arr = integrate_dp8(harmonic_f, t0, y0, (t0, tf))
+    t_arr, y_arr = integrate_dp8(harmonic_f, t0, y0, (t0, tf),
+                                  rtol=1e-12, atol=1e-14)   # <-- tighter tolerances
     yf = y_arr[-1]
     true = analytical_harmonic(tf)
     err = np.abs(yf - true).max()
