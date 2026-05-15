@@ -23,7 +23,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
 from mission_sim.core.spacetime.ephemeris import Ephemeris
-from mission_sim.core.spacetime.ephemeris.kepler_ephemeris import KeplerEphemeris
+from mission_sim.core.spacetime.ephemeris.keplerian import KeplerEphemeris
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.spacetime.generators.base import BaseTrajectoryGenerator
 from mission_sim.utils.math_tools import orbital_elements_to_cartesian_batch
