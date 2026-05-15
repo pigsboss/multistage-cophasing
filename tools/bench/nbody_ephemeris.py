@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""
+N‑body ephemeris accuracy & performance benchmark
+======================================================
+Uses the existing N‑Body propagator (analytical.NBodyPropagator)
+with selectable integrators, and compares results against
+SPICE truth obtained via HighPrecisionEphemeris.
+
+Two test methods:
+  Method 1 – start from JPL mean Kepler elements at J2000,
+             perturbed by Gaussian noise, integrate, compare to SPICE.
+  Method 2 – start from SPICE ICs at J2000,
+             perturbed by Gaussian noise, integrate, compare to SPICE.
+
+Both methods use the same `--n-samples` and `--sigma-pos/vel`.
+No direct SPICE kernel handling is required – HighPrecisionEphemeris
+takes care of loading kernels from default locations.
+"""
+
+import argparse
+import json
+import math
+import statistics
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+# ----------------------------------------------------------------------
+# Optional dependencies
+# ----------------------------------------------------------------------
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+# ----------------------------------------------------------------------
+# Mission‑Sim imports
+# ----------------------------------------------------------------------
+from mission_sim.core.spacetime.ephemeris.analytical import NBodyPropagator
+from mission_sim.core.spacetime.ephemeris.high_precision import (
+    HighPrecisionEphemeris,
+    CelestialBody,
+    EphemerisConfig,
+    EphemerisMode,
+    CoordinateFrame,
+)
+from mission_sim.core.spacetime.ephemeris.jpl_ssb_keplerian_elements import (
+    get_all_planet_states,
+)
+
+# ----------------------------------------------------------------------
+# Configuration constants
+# ----------------------------------------------------------------------
+# Rotation from J2000 ecliptic to equatorial (ICRF)
+_OBLIQUITY_J2000 = math.radians(23.4392911111)
+_R_ECL2EQ = np.array([
+    [1.0, 0.0,                       0.0                     ],
+    [0.0, math.cos(_OBLIQUITY_J2000), math.sin(_OBLIQUITY_J2000)],
+    [0.0, -math.sin(_OBLIQUITY_J2000), math.cos(_OBLIQUITY_J2000)]
+])
+
+# Body ordering (kept consistent with GM list)
+BODIES = ["SUN", "MERCURY", "VENUS", "EARTH", "MARS",
+          "JUPITER", "SATURN", "URANUS", "NEPTUNE"]
+
+# GM in m^3/s^2 (DE440)
+GM_DICT = {
+    "SUN":      1.32712440041279419e20,
+    "MERCURY":  2.203186855140000e13,
+    "VENUS":    3.248585920000000e14,
+    "EARTH":    3.986004354360959e14,
+    "MARS":     4.282831425806000e13,
+    "JUPITER":  1.266865361931886e17,
+    "SATURN":   3.793120749865224e16,
+    "URANUS":   5.793951322279009e15,
+    "NEPTUNE":  6.835100718083999e15,
+}
+
+# Mapping from Kepler element planet names to uppercase keys
+_MEAN_NAME_MAP = {
+    "Mercury": "MERCURY",
+    "Venus":   "VENUS",
+    "EM Bary": "EARTH",
+    "Mars":    "MARS",
+    "Jupiter": "JUPITER",
+    "Saturn":  "SATURN",
+    "Uranus":  "URANUS",
+    "Neptune": "NEPTUNE",
+}
+
+# ----------------------------------------------------------------------
+# Helper: convert J2000 ecliptic state dict to ICRF equatorial flat array
+# ----------------------------------------------------------------------
+def ecliptic_dict_to_icrf_flat(state_dict: Dict[str, np.ndarray]) -> np.ndarray:
+    """
+    Takes a dict of 6‑vectors in J2000 ecliptic (m, m/s),
+    rotates to ICRF equatorial, adds Sun via momentum conservation,
+    and returns a flat 54‑element array in the order of BODIES.
+    """
+    # Rotate all planet states
+    eq_states = {}
+    for kepler_name, st in state_dict.items():
+        eq_states[kepler_name] = np.concatenate([
+            _R_ECL2EQ @ st[:3],
+            _R_ECL2EQ @ st[3:6]
+        ])
+
+    # Sun from barycenter condition
+    sun_pos = np.zeros(3)
+    sun_vel = np.zeros(3)
+    for kepler_name, st in eq_states.items():
+        body_name = _MEAN_NAME_MAP[kepler_name]
+        mass = GM_DICT[body_name]
+        sun_pos -= mass * st[:3]
+        sun_vel -= mass * st[3:6]
+    sun_pos /= GM_DICT["SUN"]
+    sun_vel /= GM_DICT["SUN"]
+
+    # Assemble flat array
+    flat = np.empty(54)
+    flat[0:6] = np.concatenate([sun_pos, sun_vel])
+    for idx, body in enumerate(BODIES[1:]):
+        # Find the corresponding kepler name
+        for kname, bname in _MEAN_NAME_MAP.items():
+            if bname == body:
+                flat[6*(idx+1):6*(idx+2)] = eq_states[kname]
+                break
+        else:
+            raise KeyError(f"No Kepler element data for {body}")
+    return flat
+
+# ----------------------------------------------------------------------
+# Truth provider via HighPrecisionEphemeris
+# ----------------------------------------------------------------------
+def build_truth_provider() -> HighPrecisionEphemeris:
+    """Create a SPICE‑mode ephemeris. Raises if SPICE unavailable."""
+    config = EphemerisConfig(mode=EphemerisMode.SPICE)
+    eph = HighPrecisionEphemeris(config=config)
+    if not eph._spice_initialized:
+        raise RuntimeError(
+            "SPICE kernels not found. Please set SPICE_KERNELS env var "
+            "or place de440.bsp and naif0012.tls in a default path."
+        )
+    return eph
+
+def get_truth_state(eph: HighPrecisionEphemeris, et_seconds: float,
+                    frame: CoordinateFrame = CoordinateFrame.J2000_ECI) -> np.ndarray:
+    """
+    Return concatenated state (54,) for all BODIES wrt SSB.
+    et_seconds: TDB seconds since J2000.
+    """
+    states = []
+    for bname in BODIES:
+        body = CelestialBody(bname.lower())  # CelestialBody values are lowercase
+        state = eph.get_state(
+            target_body=body,
+            epoch=et_seconds,
+            observer_body=CelestialBody.SSB,
+            frame=frame,
+        )
+        states.append(state)
+    return np.concatenate(states)
+
+# ----------------------------------------------------------------------
+# Timing / memory measurement
+# ----------------------------------------------------------------------
+class Timer:
+    def __enter__(self):
+        self.t_start = time.perf_counter()
+        if _HAS_PSUTIL:
+            self.proc = psutil.Process()
+            self.mem_before = self.proc.memory_info().rss
+        return self
+
+    def __exit__(self, *args):
+        self.t_end = time.perf_counter()
+        self.elapsed = self.t_end - self.t_start
+        if _HAS_PSUTIL:
+            self.mem_after = self.proc.memory_info().rss
+            self.mem_peak = max(self.mem_after - self.mem_before, 0)
+        else:
+            self.mem_peak = None
+
+# ----------------------------------------------------------------------
+# Error statistics for a single integration
+# ----------------------------------------------------------------------
+def compute_errors(pred: np.ndarray, truth: np.ndarray) -> Dict[str, float]:
+    """Return per‑body position error (m), RMS, and max."""
+    errs = {}
+    all_err = []
+    for i, name in enumerate(BODIES):
+        dpos = pred[6*i:6*i+3] - truth[6*i:6*i+3]
+        e = np.linalg.norm(dpos)
+        errs[name] = e
+        all_err.append(e)
+    errs["RMS"] = math.sqrt(sum(x*x for x in all_err) / len(all_err))
+    errs["MAX"] = max(all_err)
+    return errs
+
+# ----------------------------------------------------------------------
+# Method dispatch
+# ----------------------------------------------------------------------
+def run_method_1_or_2(
+    method: str,        # "kepler" or "spice"
+    integrator: str,
+    delta_sec: float,
+    n_samples: int,
+    sigma_pos: float,
+    sigma_vel: float,
+    rtol: float,
+    atol: float,
+    truth_eph: HighPrecisionEphemeris,
+) -> List[Dict[str, float]]:
+    """
+    Generic runner for method 1 (kepler) or 2 (spice).
+    Returns list of per‑sample error dicts.
+    """
+    # Reference state at J2000 (0 seconds)
+    y_spice0 = get_truth_state(truth_eph, 0.0)
+
+    # Target end state
+    y_spice_end = get_truth_state(truth_eph, delta_sec)
+
+    # Base initial state for each method
+    if method == "kepler":
+        # Get kepler initial state
+        t_cy = 0.0  # J2000
+        states_ecl = get_all_planet_states(t_cy)
+        base_y0 = ecliptic_dict_to_icrf_flat(states_ecl)
+    else:  # "spice"
+        base_y0 = y_spice0.copy()
+
+    # Prepare propagator factory
+    mu_list = [GM_DICT[b] for b in BODIES]
+
+    results = []
+    for sample in range(n_samples):
+        # Generate noise
+        noise_pos = np.random.normal(0, sigma_pos, 27)
+        noise_vel = np.random.normal(0, sigma_vel, 27)
+        y_init = base_y0.copy()
+        y_init[:27] += noise_pos
+        y_init[27:] += noise_vel
+
+        # Build initial dict
+        init_dict = {}
+        for idx, bname in enumerate(BODIES):
+            init_dict[bname] = y_init[6*idx:6*idx+6]
+
+        # Propagate
+        with Timer() as tmr:
+            prop = NBodyPropagator(
+                bodies=BODIES,
+                mu_list=mu_list,
+                initial_states_dict=init_dict,
+                epoch_tdb=0.0,
+                integrator=integrator,
+                rtol=rtol,
+                atol=atol,
+            )
+            prop.propagate_to(delta_sec)
+
+        # Collect final state
+        y_final = np.empty(54)
+        for idx, bname in enumerate(BODIES):
+            y_final[6*idx:6*idx+6] = prop.get_body_state(bname, delta_sec)
+
+        # Compute errors
+        err = compute_errors(y_final, y_spice_end)
+        err["_time"] = tmr.elapsed
+        err["_mem"] = tmr.mem_peak if tmr.mem_peak is not None else 0.0
+        results.append(err)
+
+    return results
+
+# ----------------------------------------------------------------------
+# Aggregate and display
+# ----------------------------------------------------------------------
+def aggregate_results(errors_list: List[Dict[str, float]]) -> Dict[str, Any]:
+    """Compute mean/std for all numeric fields."""
+    keys = list(errors_list[0].keys())
+    agg = {}
+    for k in keys:
+        vals = [d[k] for d in errors_list]
+        agg[f"{k}_mean"] = statistics.mean(vals)
+        if len(vals) > 1:
+            agg[f"{k}_std"] = statistics.stdev(vals)
+        else:
+            agg[f"{k}_std"] = 0.0
+    return agg
+
+def print_summary(method_name: str, integrator: str, agg: Dict[str, Any]):
+    print(f"\n{'='*60}")
+    print(f"METHOD: {method_name} | INTEGRATOR: {integrator}")
+    print(f"{'='*60}")
+    print("Position errors (mean ± std, meters):")
+    for b in BODIES:
+        mean = agg.get(f"{b}_mean", 0)
+        std = agg.get(f"{b}_std", 0)
+        print(f"  {b:10s}: {mean:12.3f} ± {std:12.3f}")
+    print(f"  {'RMS':10s}: {agg['RMS_mean']:12.3f} ± {agg.get('RMS_std',0):12.3f}")
+    print(f"  {'MAX':10s}: {agg['MAX_mean']:12.3f} ± {agg.get('MAX_std',0):12.3f}")
+    print(f"Time (s): {agg['_time_mean']:.4f} ± {agg.get('_time_std',0):.4f}")
+    if _HAS_PSUTIL:
+        mem_mean = agg['_mem_mean'] / 1e6
+        print(f"Memory peak (MB): {mem_mean:.2f}")
+
+def save_json(data: dict, path: Path):
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="N‑body ephemeris benchmark")
+    parser.add_argument("--method", choices=["kepler", "spice", "all"], default="all")
+    parser.add_argument("--integrators", nargs="+", default=["dp8"],
+                        help="Integrators to test (dp8, rk45, dop853, scipy:rk45, scipy:dop853)")
+    parser.add_argument("--delta-years", type=float, default=1.0,
+                        help="Integration duration in years")
+    parser.add_argument("--n-samples", type=int, default=30,
+                        help="Number of perturbed samples")
+    parser.add_argument("--sigma-pos", type=float, default=1e3,
+                        help="Position perturbation std (meters)")
+    parser.add_argument("--sigma-vel", type=float, default=1e-3,
+                        help="Velocity perturbation std (m/s)")
+    parser.add_argument("--rtol", type=float, default=1e-9)
+    parser.add_argument("--atol", type=float, default=1e-12)
+    parser.add_argument("--output", type=Path, help="Save results as JSON")
+    args = parser.parse_args()
+
+    # Initialize truth
+    try:
+        truth_eph = build_truth_provider()
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    print("SPICE truth provider initialized.")
+
+    # Time span in seconds
+    delta_sec = args.delta_years * 365.25 * 86400.0
+
+    all_output = {}
+    for integrator in args.integrators:
+        if args.method in ("kepler", "all"):
+            print(f"\nRunning method 1 (Kepler + noise) with {integrator}...")
+            errs = run_method_1_or_2(
+                "kepler", integrator, delta_sec, args.n_samples,
+                args.sigma_pos, args.sigma_vel, args.rtol, args.atol, truth_eph
+            )
+            agg = aggregate_results(errs)
+            key = f"kepler_{integrator}"
+            all_output[key] = agg
+            print_summary("Kepler (Method 1)", integrator, agg)
+
+        if args.method in ("spice", "all"):
+            print(f"\nRunning method 2 (SPICE + noise) with {integrator}...")
+            errs = run_method_1_or_2(
+                "spice", integrator, delta_sec, args.n_samples,
+                args.sigma_pos, args.sigma_vel, args.rtol, args.atol, truth_eph
+            )
+            agg = aggregate_results(errs)
+            key = f"spice_{integrator}"
+            all_output[key] = agg
+            print_summary("SPICE (Method 2)", integrator, agg)
+
+    if args.output:
+        save_json(all_output, args.output)
+        print(f"\nResults saved to {args.output}")
+
+if __name__ == "__main__":
+    main()

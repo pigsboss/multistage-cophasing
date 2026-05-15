@@ -59,6 +59,7 @@ class CelestialBody(Enum):
     SATURN = "saturn"
     URANUS = "uranus"
     NEPTUNE = "neptune"
+    SSB = "ssb"
 
 
 class EphemerisMode(Enum):
@@ -168,7 +169,8 @@ class HighPrecisionEphemeris(Ephemeris):
         CelestialBody.JUPITER: "jupiter",
         CelestialBody.SATURN: "saturn",
         CelestialBody.URANUS: "uranus",
-        CelestialBody.NEPTUNE: "neptune"
+        CelestialBody.NEPTUNE: "neptune",
+        CelestialBody.SSB: "0",
     }
     
     def __init__(self, 
@@ -383,7 +385,7 @@ class HighPrecisionEphemeris(Ephemeris):
         
         # 直接使用枚举值（小写字符串）作为 SPICE 目标名
         target_name = target.value
-        observer_name = observer.value
+        observer_name = self._SPICE_BODY_MAP.get(observer, observer.value)
         
         try:
             state = self._spice_interface.get_state(

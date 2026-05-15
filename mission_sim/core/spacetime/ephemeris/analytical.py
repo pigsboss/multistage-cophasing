@@ -15,7 +15,17 @@ from numba import njit
 from mission_sim.core.spacetime.time import utc_smooth_to_tdb
 from mission_sim.core.spacetime.ids import CoordinateFrame
 from mission_sim.core.spacetime.ephemeris.base import Ephemeris
-from mission_sim.utils.propagators.rk import integrate_dp8
+from mission_sim.utils.propagators.rk import integrate_dp8, integrate_rk45, integrate_dop853
+
+
+# ---------------------------------------------------------------------------
+# Optional scipy dependency
+# ---------------------------------------------------------------------------
+try:
+    from scipy.integrate import solve_ivp as _scipy_solve_ivp
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +105,25 @@ class NBodyPropagator:
     rtol, atol : float
         Relative and absolute tolerances for the embedded Runge‑Kutta
         integrator.
+    integrator : str, optional
+        Selector for the numerical integrator. Possible values:
+            ``'dp8'``, ``'rk45'``, ``'dop853'`` (built-in Numba versions)
+            ``'scipy:rk45'``, ``'scipy:dop853'`` (SciPy wrappers).
+        Defaults to ``'dp8'``.
     """
 
     def __init__(self, bodies, mu_list, initial_states_dict, epoch_tdb,
-                 rtol=1e-12, atol=1e-12):
+                 rtol=1e-12, atol=1e-12, integrator='dp8'):
         self.bodies = list(bodies)
         self.mu_arr = np.array(mu_list, dtype=np.float64)
         self.n_body = len(self.bodies)
+        self.integrator = integrator
+
+        # Validate scipy-based integrators
+        if self.integrator.startswith('scipy:') and not _HAS_SCIPY:
+            raise ImportError(
+                "scipy is required for integrator '{}'".format(self.integrator)
+            )
 
         # Assemble full state vector
         self.Y = np.empty(6 * self.n_body, dtype=np.float64)
@@ -122,16 +144,48 @@ class NBodyPropagator:
         if abs(t_tdb - self.t_current) < 1e-16:
             return
 
-        t_arr, Y_arr = integrate_dp8(
-            _nbody_derivs,
-            self.t_current,
-            self.Y,
-            (self.t_current, t_tdb),
-            rtol=self.rtol,
-            atol=self.atol,
-            args=(self.mu_arr, self.n_body),
-        )
-        self.Y[:] = Y_arr[-1]
+        if self.integrator == 'dp8':
+            t_arr, y_arr = integrate_dp8(
+                _nbody_derivs, self.t_current, self.Y,
+                (self.t_current, t_tdb),
+                rtol=self.rtol, atol=self.atol,
+                args=(self.mu_arr, self.n_body),
+            )
+        elif self.integrator == 'rk45':
+            t_arr, y_arr = integrate_rk45(
+                _nbody_derivs, self.t_current, self.Y,
+                (self.t_current, t_tdb),
+                rtol=self.rtol, atol=self.atol,
+                args=(self.mu_arr, self.n_body),
+            )
+        elif self.integrator == 'dop853':
+            t_arr, y_arr = integrate_dop853(
+                _nbody_derivs, self.t_current, self.Y,
+                (self.t_current, t_tdb),
+                rtol=self.rtol, atol=self.atol,
+                args=(self.mu_arr, self.n_body),
+            )
+        elif self.integrator.startswith('scipy:'):
+            method = self.integrator.split(':', 1)[1].upper()   # 'RK45' or 'DOP853'
+            sol = _scipy_solve_ivp(
+                _nbody_derivs,
+                (self.t_current, t_tdb),
+                self.Y,
+                method=method,
+                rtol=self.rtol,
+                atol=self.atol,
+                args=(self.mu_arr, self.n_body),
+            )
+            if not sol.success:
+                raise RuntimeError(f"Integration failed: {sol.message}")
+            self.Y[:] = sol.y[:, -1]
+            self.t_current = sol.t[-1]
+            return
+        else:
+            raise ValueError(f"Unknown integrator: {self.integrator}")
+
+        # For built-in integrators, copy back results
+        self.Y[:] = y_arr[-1]
         self.t_current = t_arr[-1]
 
     def get_body_state(self, body_name: str, t_tdb: float) -> np.ndarray:
