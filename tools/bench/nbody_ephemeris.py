@@ -343,7 +343,7 @@ def save_json(data: dict, path: Path):
 def main():
     parser = argparse.ArgumentParser(description="N‑body ephemeris benchmark")
     parser.add_argument("--method", choices=["kepler", "spice", "all"], default="all")
-    parser.add_argument("--integrators", nargs="+", default=["dp8"],
+    parser.add_argument("--integrators", nargs="+", default=["dop853"],
                         help="Integrators to test (dp8, rk45, dop853, scipy:rk45, scipy:dop853)")
     parser.add_argument("--delta-years", type=float, default=1.0,
                         help="Integration duration in years")
@@ -353,8 +353,8 @@ def main():
                         help="Position perturbation std (meters)")
     parser.add_argument("--sigma-vel", type=float, default=1e-3,
                         help="Velocity perturbation std (m/s)")
-    parser.add_argument("--max-step", type=float, default=1800.0,
-                        help="Max integration step size in seconds (default: 1800)")
+    parser.add_argument("--max-step", type=float, default=86400.0,
+                        help="Max integration step size in seconds (default: 86400)")
     parser.add_argument("--rtol", type=float, default=1e-9)
     parser.add_argument("--atol", type=float, default=1e-12)
     parser.add_argument("--output", type=Path, help="Save results as JSON")
