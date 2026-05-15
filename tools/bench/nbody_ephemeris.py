@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 N‑body ephemeris accuracy & performance benchmark
 ======================================================
@@ -280,26 +279,33 @@ def run_method_1_or_2(
         mu_sun = gm_dict["SUN"]
         inv_map = {v: k for k, v in _MEAN_NAME_MAP.items()}
 
-        # ---- Temporary verification: print initial deviations ----
-        print("\nInitial heliocentric deviations (JPL - SPICE) at J2000:")
+        # ---- Detailed JPL vs SPICE at J2000 ----
+        print("\nDetailed JPL vs SPICE at J2000 (heliocentric, equatorial):")
         for bname in bodies:
             if bname == "SUN":
                 continue
             kep_name = inv_map[bname]
             el = get_elements_short(kep_name, t_cy)
+            a, e_orb, inc, Omega, omega, M0 = (
+                el["a"], el["e"], el["i"], el["Omega"], el["omega"], el["M"]
+            )
+            print(f"\n{bname}:")
+            print(f"  a={a:.6e} m, e={e_orb:.8f}, i={inc:.8f} rad")
+            print(f"  Omega={Omega:.8f} rad, omega={omega:.8f} rad, M={M0:.8f} rad")
             state_ecl = kepler_elements_to_cartesian_batch(
-                np.array([el["a"]]), np.array([el["e"]]), np.array([el["i"]]),
-                np.array([el["Omega"]]), np.array([el["omega"]]), np.array([el["M"]]),
+                np.array([a]), np.array([e_orb]), np.array([inc]),
+                np.array([Omega]), np.array([omega]), np.array([M0]),
                 mu_sun
             )[0]
             state_eq = np.concatenate([
                 _R_ECL2EQ @ state_ecl[:3],
                 _R_ECL2EQ @ state_ecl[3:6]
             ])
-            # SPICE heliocentric state at J2000
             spice_state = get_truth_heliocentric_state(truth_eph, 0.0, [bname])
-            dev = np.linalg.norm(state_eq[:3] - spice_state[:3])
-            print(f"  {bname}: {dev:.3f} m")
+            diff = state_eq - spice_state
+            print(f"  JPL pos  = {state_eq[:3]} m")
+            print(f"  SPICE pos= {spice_state[:3]} m")
+            print(f"  |diff|   = {np.linalg.norm(diff[:3]):.6e} m")
         # -----------------------------------------------------------
 
         # Pre-compute final heliocentric equatorial state for each body
