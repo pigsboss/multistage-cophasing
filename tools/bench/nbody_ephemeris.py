@@ -301,6 +301,14 @@ def run_method_1_or_2(
                 _R_ECL2EQ @ state_ecl[:3],
                 _R_ECL2EQ @ state_ecl[3:6]
             ])
+            # 临时反向旋转验证
+            _R_EQ2ECL = _R_ECL2EQ.T
+            state_eq_test = np.concatenate([
+                _R_EQ2ECL @ state_ecl[:3],
+                _R_EQ2ECL @ state_ecl[3:6]
+            ])
+            diff_rev = state_eq_test - spice_state
+            print(f"  |diff (reverse rot)| = {np.linalg.norm(diff_rev[:3]):.6e} m")
             spice_state = get_truth_heliocentric_state(truth_eph, 0.0, [bname])
             diff = state_eq - spice_state
             print(f"  JPL pos  = {state_eq[:3]} m")
