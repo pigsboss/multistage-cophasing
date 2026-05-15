@@ -272,8 +272,7 @@ def run_method_1_or_2(
         for i, name in enumerate(bodies):
             print(f"{name}: {y_spice0[6*i:6*i+6]}")
         print("===== END DIAGNOSTIC =====\n")
-        # Exit after diagnostic to avoid running full benchmark
-        return []
+        # Diagnostic only – no early return; continue to integration loop.
 
     results = []
     for sample in range(n_samples):
