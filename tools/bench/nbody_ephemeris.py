@@ -8,9 +8,12 @@ SPICE truth obtained via HighPrecisionEphemeris.
 
 Two test methods:
   Method 1 – start from JPL mean Kepler elements at J2000,
-             perturbed by Gaussian noise, integrate, compare to SPICE.
+             perturbed by Gaussian noise, integrate each planet
+             independently as a two‑body problem, compare
+             heliocentric positions to SPICE.
   Method 2 – start from SPICE ICs at J2000,
-             perturbed by Gaussian noise, integrate, compare to SPICE.
+             perturbed by Gaussian noise, integrate with N‑body,
+             compare to SPICE (SSB‑referenced).
 
 Both methods use the same `--n-samples` and `--sigma-pos/vel`.
 No direct SPICE kernel handling is required – HighPrecisionEphemeris
@@ -50,6 +53,7 @@ from mission_sim.core.spacetime.ephemeris.high_precision import (
 )
 from mission_sim.core.spacetime.ephemeris.jpl_ssb_keplerian_elements import (
     get_all_planet_states,
+    get_elements_cartesian,
 )
 from mission_sim.utils.solvers.keplerian import (
     kepler_elements_to_cartesian_batch,
@@ -139,107 +143,6 @@ def ecliptic_dict_to_icrf_flat(state_dict: Dict[str, np.ndarray]) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------
-# New two‑body propagator (Method 1)
-# ----------------------------------------------------------------------
-def propagate_two_body_from_ssb(
-    y_ssb: np.ndarray,
-    dt: float,
-    bodies: List[str],
-    gm_dict: Dict[str, float],
-) -> np.ndarray:
-    """
-    Propagate a system state forward by *dt* seconds using independent
-    two‑body Keplerian motion for every planet.  The Sun's new SSB state
-    is derived from momentum conservation.
-
-    Parameters
-    ----------
-    y_ssb : ndarray, shape (6*len(bodies),)
-        Initial state in ICRF / SSB (positions and velocities).
-    dt : float
-        Propagation time (seconds).
-    bodies : list of str
-        Ordered body names.
-    gm_dict : dict
-        GM values for each body.
-
-    Returns
-    -------
-    y_new : ndarray, shape (6*len(bodies),)
-        Propagated SSB state.
-    """
-    mu_sun = gm_dict["SUN"]
-    n_bodies = len(bodies)
-    # Extract Sun state at initial epoch
-    idx_sun = bodies.index("SUN")
-    sun_state0 = y_ssb[6*idx_sun:6*idx_sun+6]
-
-    # Placeholders for final heliocentric states
-    helio_final = {}   # body_name -> (pos, vel) in ICRF
-
-    # Inverse mapping from uppercase name to Kepler element name
-    inv_map = {v: k for k, v in _MEAN_NAME_MAP.items()}
-
-    for i, bname in enumerate(bodies):
-        if bname == "SUN":
-            continue
-        # Heliocentric state at t0
-        state0_ssb = y_ssb[6*i:6*i+6]
-        rel0_pos = state0_ssb[:3] - sun_state0[:3]
-        rel0_vel = state0_ssb[3:6] - sun_state0[3:6]
-
-        # Convert to Kepler elements
-        a, e, i, Omega, omega, M0 = cartesian_to_kepler_elements(
-            rel0_pos, rel0_vel, mu_sun
-        )
-        if a <= 0.0:
-            # Degenerate case – keep original state
-            helio_final[bname] = (rel0_pos.copy(), rel0_vel.copy())
-            continue
-
-        # Mean motion
-        n = math.sqrt(mu_sun / (a * a * a))
-        M = M0 + n * dt
-
-        # Propagated heliocentric state (still in ICRF)
-        one_a = np.array([a])
-        one_e = np.array([e])
-        one_i = np.array([i])
-        one_Omega = np.array([Omega])
-        one_omega = np.array([omega])
-        one_M = np.array([M])
-        state_helio = kepler_elements_to_cartesian_batch(
-            one_a, one_e, one_i, one_Omega, one_omega, one_M, mu_sun
-        )[0]   # shape (6,)
-
-        helio_final[bname] = (state_helio[:3].copy(), state_helio[3:].copy())
-
-    # Compute final Sun SSB state via momentum conservation
-    total_mass = sum(gm_dict[b] for b in bodies)
-    sun_pos_new = np.zeros(3)
-    sun_vel_new = np.zeros(3)
-    for bname, (pos, vel) in helio_final.items():
-        m = gm_dict[bname]
-        sun_pos_new -= m * pos
-        sun_vel_new -= m * vel
-    sun_pos_new /= mu_sun
-    sun_vel_new /= mu_sun
-
-    # Assemble final SSB state array
-    y_new = np.empty(6 * n_bodies)
-    for i, bname in enumerate(bodies):
-        if bname == "SUN":
-            y_new[6*i:6*i+3] = sun_pos_new
-            y_new[6*i+3:6*i+6] = sun_vel_new
-        else:
-            pos, vel = helio_final[bname]
-            y_new[6*i:6*i+3] = pos + sun_pos_new
-            y_new[6*i+3:6*i+6] = vel + sun_vel_new
-
-    return y_new
-
-
-# ----------------------------------------------------------------------
 # Truth provider via HighPrecisionEphemeris
 # ----------------------------------------------------------------------
 def build_truth_provider() -> HighPrecisionEphemeris:
@@ -272,6 +175,31 @@ def get_truth_state(eph: HighPrecisionEphemeris, et_seconds: float,
         states.append(state)
 
     return np.concatenate(states)
+
+
+def get_truth_heliocentric_state(eph: HighPrecisionEphemeris, et_seconds: float,
+                                 bodies: List[str]) -> np.ndarray:
+    """
+    Return concatenated heliocentric states (relative to Sun) for the given bodies.
+    et_seconds : TDB seconds since J2000.
+    Returns array of shape (6 * len(bodies),).
+    """
+    states = []
+    for bname in bodies:
+        if bname == "SUN":
+            # Sun relative to itself is always zero
+            states.append(np.zeros(6))
+        else:
+            body = CelestialBody(bname.lower())
+            state = eph.get_state(
+                target_body=body,
+                epoch=et_seconds,
+                observer_body=CelestialBody.SUN,
+                frame=CoordinateFrame.J2000_ECI,
+            )
+            states.append(state)
+    return np.concatenate(states)
+
 
 # ----------------------------------------------------------------------
 # Timing / memory measurement
@@ -335,20 +263,28 @@ def run_method_1_or_2(
     # Reference state at J2000 (0 seconds) – only needed bodies
     y_spice0 = get_truth_state(truth_eph, 0.0, bodies)
 
-    # Target end state
-    y_spice_end = get_truth_state(truth_eph, delta_sec, bodies)
+    # Target end state (SSB-reference for spice, heliocentric for kepler)
+    if method == "kepler":
+        y_spice_end = get_truth_heliocentric_state(truth_eph, delta_sec, bodies)
+    else:
+        y_spice_end = get_truth_state(truth_eph, delta_sec, bodies)
 
     # Base initial state for each method
     if method == "kepler":
-        # Get Kepler initial state for all bodies, then extract subset
+        # Get Kepler initial state for all bodies in heliocentric equatorial
         t_cy = 0.0  # J2000
-        states_ecl = get_all_planet_states(t_cy)
-        full_y0 = ecliptic_dict_to_icrf_flat(states_ecl)  # 54 elements in BODIES order
-        # Extract only needed bodies
+        mu_sun = gm_dict["SUN"]
         base_y0 = np.empty(6 * len(bodies))
         for idx, bname in enumerate(bodies):
-            global_idx = BODIES.index(bname)
-            base_y0[6*idx:6*idx+6] = full_y0[6*global_idx:6*global_idx+6]
+            if bname == "SUN":
+                base_y0[6*idx:6*idx+6] = 0.0
+                continue
+            state_ecl = get_elements_cartesian(bname.lower(), t_cy, mu_sun)  # (6,) in ecliptic
+            state_eq = np.concatenate([
+                _R_ECL2EQ @ state_ecl[:3],
+                _R_ECL2EQ @ state_ecl[3:6]
+            ])
+            base_y0[6*idx:6*idx+6] = state_eq
     else:  # "spice"
         base_y0 = y_spice0.copy()
 
@@ -362,23 +298,43 @@ def run_method_1_or_2(
         noise_pos = np.random.normal(0, sigma_pos, pos_len)
         noise_vel = np.random.normal(0, sigma_vel, pos_len)
         y_init = base_y0.copy()
-        # Apply noise to correct position/velocity slots
         for i in range(len(bodies)):
             y_init[6*i:6*i+3] += noise_pos[3*i:3*i+3]
             y_init[6*i+3:6*i+6] += noise_vel[3*i:3*i+3]
 
-        # Build initial dict
-        init_dict = {}
-        for idx, bname in enumerate(bodies):
-            init_dict[bname] = y_init[6*idx:6*idx+6]
-
-        # Propagate – two‑body for method 1, N‑body for method 2
-        with Timer() as tmr:
-            if method == "kepler":
-                y_final = propagate_two_body_from_ssb(
-                    y_init, delta_sec, bodies, gm_dict
+        if method == "kepler":
+            # Propagate each planet independently via Kepler's equation
+            y_final = np.empty_like(y_init)
+            for i, bname in enumerate(bodies):
+                if bname == "SUN":
+                    y_final[6*i:6*i+6] = 0.0
+                    continue
+                state0 = y_init[6*i:6*i+6]
+                a, e_orb, inc, Omega, omega, M0 = cartesian_to_kepler_elements(
+                    state0[:3], state0[3:6], gm_dict["SUN"]
                 )
-            else:
+                if a <= 0.0:
+                    # fallback: keep initial state (very unlikely)
+                    y_final[6*i:6*i+6] = state0
+                    continue
+                n = math.sqrt(gm_dict["SUN"] / (a * a * a))
+                M = M0 + n * delta_sec
+                state_helio = kepler_elements_to_cartesian_batch(
+                    np.array([a]), np.array([e_orb]), np.array([inc]),
+                    np.array([Omega]), np.array([omega]), np.array([M]),
+                    gm_dict["SUN"]
+                )[0]
+                y_final[6*i:6*i+6] = state_helio
+            # measurement of time is trivial; skip timing inside loop
+            elapsed = 0.0
+            mem_peak = 0.0
+        else:
+            # Build initial dict for N‑body propagator
+            init_dict = {}
+            for idx, bname in enumerate(bodies):
+                init_dict[bname] = y_init[6*idx:6*idx+6]
+
+            with Timer() as tmr:
                 prop = NBodyPropagator(
                     bodies=bodies,
                     mu_list=mu_list,
@@ -393,11 +349,13 @@ def run_method_1_or_2(
                 y_final = np.empty(6 * len(bodies))
                 for idx, bname in enumerate(bodies):
                     y_final[6*idx:6*idx+6] = prop.get_body_state(bname, delta_sec)
+            elapsed = tmr.elapsed
+            mem_peak = tmr.mem_peak if tmr.mem_peak is not None else 0.0
 
         # Compute errors
         err = compute_errors(y_final, y_spice_end, bodies)
-        err["_time"] = tmr.elapsed
-        err["_mem"] = tmr.mem_peak if tmr.mem_peak is not None else 0.0
+        err["_time"] = elapsed
+        err["_mem"] = mem_peak
         results.append(err)
 
     return results
@@ -445,8 +403,8 @@ def save_json(data: dict, path: Path):
 def main():
     parser = argparse.ArgumentParser(description="N‑body ephemeris benchmark")
     parser.add_argument("--method", choices=["kepler", "spice", "all"], default="all")
-    parser.add_argument("--integrators", nargs="+", default=["dop853"],
-                        help="Integrators to test (dp8, rk45, dop853, scipy:rk45, scipy:dop853)")
+    parser.add_argument("--integrator", type=str, default="dop853",
+                        help="Integrator to use (dp8, rk45, dop853, scipy:rk45, scipy:dop853)")
     parser.add_argument("--delta-years", type=float, default=1.0,
                         help="Integration duration in years")
     parser.add_argument("--n-samples", type=int, default=30,
@@ -460,7 +418,6 @@ def main():
     parser.add_argument("--rtol", type=float, default=1e-9)
     parser.add_argument("--atol", type=float, default=1e-12)
     parser.add_argument("--output", type=Path, help="Save results as JSON")
-    # NEW: debug-two-body flag
     parser.add_argument("--debug-two-body", action="store_true",
                         help="Run Sun+Earth only for debugging")
     args = parser.parse_args()
@@ -478,40 +435,46 @@ def main():
 
     # Determine bodies and gm dict based on debug flag
     if args.debug_two_body:
-        use_bodies = ["SUN", "EARTH"]
-        use_gm = {k: GM_DICT[k] for k in use_bodies}
-        print("DEBUG: Two-body mode (Sun+Earth only)")
+        # For debug, only two bodies – but method 1 will still drop SUN
+        spice_bodies = ["SUN", "EARTH"]
+        spice_gm = {k: GM_DICT[k] for k in spice_bodies}
+        kepler_bodies = ["EARTH"]
+        kepler_gm = {"EARTH": GM_DICT["EARTH"]}
+        print("DEBUG: Two-body mode (Sun+Earth for SPICE; Earth only for Kepler)")
     else:
-        use_bodies = BODIES
-        use_gm = GM_DICT
+        spice_bodies = BODIES
+        spice_gm = GM_DICT
+        kepler_bodies = BODIES[1:]   # exclude Sun for heliocentric comparison
+        kepler_gm = {k: GM_DICT[k] for k in kepler_bodies}
 
     all_output = {}
-    for integrator in args.integrators:
-        if args.method in ("kepler", "all"):
-            print(f"\nRunning method 1 (Kepler + noise) with {integrator}...")
-            errs = run_method_1_or_2(
-                "kepler", integrator, delta_sec, args.n_samples,
-                args.sigma_pos, args.sigma_vel, args.rtol, args.atol,
-                args.max_step, truth_eph,
-                bodies=use_bodies, gm_dict=use_gm
-            )
-            agg = aggregate_results(errs)
-            key = f"kepler_{integrator}"
-            all_output[key] = agg
-            print_summary("Kepler (Method 1)", integrator, agg, bodies=use_bodies)
+    integrator = args.integrator
 
-        if args.method in ("spice", "all"):
-            print(f"\nRunning method 2 (SPICE + noise) with {integrator}...")
-            errs = run_method_1_or_2(
-                "spice", integrator, delta_sec, args.n_samples,
-                args.sigma_pos, args.sigma_vel, args.rtol, args.atol,
-                args.max_step, truth_eph,
-                bodies=use_bodies, gm_dict=use_gm
-            )
-            agg = aggregate_results(errs)
-            key = f"spice_{integrator}"
-            all_output[key] = agg
-            print_summary("SPICE (Method 2)", integrator, agg, bodies=use_bodies)
+    if args.method in ("kepler", "all"):
+        print(f"\nRunning method 1 (Kepler + noise) with {integrator}...")
+        errs = run_method_1_or_2(
+            "kepler", integrator, delta_sec, args.n_samples,
+            args.sigma_pos, args.sigma_vel, args.rtol, args.atol,
+            args.max_step, truth_eph,
+            bodies=kepler_bodies, gm_dict=kepler_gm
+        )
+        agg = aggregate_results(errs)
+        key = f"kepler_{integrator}"
+        all_output[key] = agg
+        print_summary("Kepler (Method 1)", integrator, agg, bodies=kepler_bodies)
+
+    if args.method in ("spice", "all"):
+        print(f"\nRunning method 2 (SPICE + noise) with {integrator}...")
+        errs = run_method_1_or_2(
+            "spice", integrator, delta_sec, args.n_samples,
+            args.sigma_pos, args.sigma_vel, args.rtol, args.atol,
+            args.max_step, truth_eph,
+            bodies=spice_bodies, gm_dict=spice_gm
+        )
+        agg = aggregate_results(errs)
+        key = f"spice_{integrator}"
+        all_output[key] = agg
+        print_summary("SPICE (Method 2)", integrator, agg, bodies=spice_bodies)
 
     if args.output:
         save_json(all_output, args.output)
