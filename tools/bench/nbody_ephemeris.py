@@ -371,17 +371,21 @@ def aggregate_results(errors_list: List[Dict[str, float]]) -> Dict[str, Any]:
     return agg
 
 def print_summary(method_name: str, integrator: str, agg: Dict[str, Any],
-                  bodies: List[str]):
+                  bodies: List[str], unit_scale: float = 1.0, unit_str: str = "m"):
     print(f"\n{'='*60}")
     print(f"METHOD: {method_name} | INTEGRATOR: {integrator}")
     print(f"{'='*60}")
-    print("Position errors (mean ± std, meters):")
+    print(f"Position errors (mean ± std, {unit_str}):")
     for b in bodies:
-        mean = agg.get(f"{b}_mean", 0)
-        std = agg.get(f"{b}_std", 0)
+        mean = agg.get(f"{b}_mean", 0) * unit_scale
+        std = agg.get(f"{b}_std", 0) * unit_scale
         print(f"  {b:10s}: {mean:12.3f} ± {std:12.3f}")
-    print(f"  {'RMS':10s}: {agg['RMS_mean']:12.3f} ± {agg.get('RMS_std',0):12.3f}")
-    print(f"  {'MAX':10s}: {agg['MAX_mean']:12.3f} ± {agg.get('MAX_std',0):12.3f}")
+    rms_mean = agg.get("RMS_mean", 0) * unit_scale
+    rms_std = agg.get("RMS_std", 0) * unit_scale
+    max_mean = agg.get("MAX_mean", 0) * unit_scale
+    max_std = agg.get("MAX_std", 0) * unit_scale
+    print(f"  {'RMS':10s}: {rms_mean:12.3f} ± {rms_std:12.3f}")
+    print(f"  {'MAX':10s}: {max_mean:12.3f} ± {max_std:12.3f}")
     print(f"Time (s): {agg['_time_mean']:.4f} ± {agg.get('_time_std',0):.4f}")
     if _HAS_PSUTIL:
         mem_mean = agg['_mem_mean'] / 1e6
@@ -445,7 +449,8 @@ def main():
         agg = aggregate_results(errs)
         key = f"kepler_{integrator}"
         all_output[key] = agg
-        print_summary("Kepler (Method 1)", integrator, agg, bodies=kepler_bodies)
+        print_summary("Kepler (Method 1)", integrator, agg, bodies=kepler_bodies,
+                      unit_scale=1e-3, unit_str="km")
 
     if args.method in ("spice", "all"):
         print(f"\nRunning method 2 (SPICE + noise) with {integrator}...")
