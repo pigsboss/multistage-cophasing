@@ -51,7 +51,10 @@ from mission_sim.core.spacetime.ephemeris.high_precision import (
 from mission_sim.core.spacetime.ephemeris.jpl_ssb_keplerian_elements import (
     get_all_planet_states,
 )
-from mission_sim.utils.solvers.keplerian import kepler_elements_to_cartesian_batch
+from mission_sim.utils.solvers.keplerian import (
+    kepler_elements_to_cartesian_batch,
+    cartesian_to_kepler_elements,
+)
 
 # ----------------------------------------------------------------------
 # Configuration constants
@@ -133,6 +136,108 @@ def ecliptic_dict_to_icrf_flat(state_dict: Dict[str, np.ndarray]) -> np.ndarray:
         else:
             raise KeyError(f"No Kepler element data for {body}")
     return flat
+
+
+# ----------------------------------------------------------------------
+# New two‑body propagator (Method 1)
+# ----------------------------------------------------------------------
+def propagate_two_body_from_ssb(
+    y_ssb: np.ndarray,
+    dt: float,
+    bodies: List[str],
+    gm_dict: Dict[str, float],
+) -> np.ndarray:
+    """
+    Propagate a system state forward by *dt* seconds using independent
+    two‑body Keplerian motion for every planet.  The Sun's new SSB state
+    is derived from momentum conservation.
+
+    Parameters
+    ----------
+    y_ssb : ndarray, shape (6*len(bodies),)
+        Initial state in ICRF / SSB (positions and velocities).
+    dt : float
+        Propagation time (seconds).
+    bodies : list of str
+        Ordered body names.
+    gm_dict : dict
+        GM values for each body.
+
+    Returns
+    -------
+    y_new : ndarray, shape (6*len(bodies),)
+        Propagated SSB state.
+    """
+    mu_sun = gm_dict["SUN"]
+    n_bodies = len(bodies)
+    # Extract Sun state at initial epoch
+    idx_sun = bodies.index("SUN")
+    sun_state0 = y_ssb[6*idx_sun:6*idx_sun+6]
+
+    # Placeholders for final heliocentric states
+    helio_final = {}   # body_name -> (pos, vel) in ICRF
+
+    # Inverse mapping from uppercase name to Kepler element name
+    inv_map = {v: k for k, v in _MEAN_NAME_MAP.items()}
+
+    for i, bname in enumerate(bodies):
+        if bname == "SUN":
+            continue
+        # Heliocentric state at t0
+        state0_ssb = y_ssb[6*i:6*i+6]
+        rel0_pos = state0_ssb[:3] - sun_state0[:3]
+        rel0_vel = state0_ssb[3:6] - sun_state0[3:6]
+
+        # Convert to Kepler elements
+        a, e, i, Omega, omega, M0 = cartesian_to_kepler_elements(
+            rel0_pos, rel0_vel, mu_sun
+        )
+        if a <= 0.0:
+            # Degenerate case – keep original state
+            helio_final[bname] = (rel0_pos.copy(), rel0_vel.copy())
+            continue
+
+        # Mean motion
+        n = math.sqrt(mu_sun / (a * a * a))
+        M = M0 + n * dt
+
+        # Propagated heliocentric state (still in ICRF)
+        one_a = np.array([a])
+        one_e = np.array([e])
+        one_i = np.array([i])
+        one_Omega = np.array([Omega])
+        one_omega = np.array([omega])
+        one_M = np.array([M])
+        state_helio = kepler_elements_to_cartesian_batch(
+            one_a, one_e, one_i, one_Omega, one_omega, one_M, mu_sun
+        )[0]   # shape (6,)
+
+        helio_final[bname] = (state_helio[:3].copy(), state_helio[3:].copy())
+
+    # Compute final Sun SSB state via momentum conservation
+    total_mass = sum(gm_dict[b] for b in bodies)
+    sun_pos_new = np.zeros(3)
+    sun_vel_new = np.zeros(3)
+    for bname, (pos, vel) in helio_final.items():
+        m = gm_dict[bname]
+        sun_pos_new -= m * pos
+        sun_vel_new -= m * vel
+    sun_pos_new /= mu_sun
+    sun_vel_new /= mu_sun
+
+    # Assemble final SSB state array
+    y_new = np.empty(6 * n_bodies)
+    for i, bname in enumerate(bodies):
+        if bname == "SUN":
+            y_new[6*i:6*i+3] = sun_pos_new
+            y_new[6*i+3:6*i+6] = sun_vel_new
+        else:
+            pos, vel = helio_final[bname]
+            y_new[6*i:6*i+3] = pos + sun_pos_new
+            y_new[6*i+3:6*i+6] = vel + sun_vel_new
+
+    return y_new
+
 
 # ----------------------------------------------------------------------
 # Truth provider via HighPrecisionEphemeris
@@ -267,24 +372,27 @@ def run_method_1_or_2(
         for idx, bname in enumerate(bodies):
             init_dict[bname] = y_init[6*idx:6*idx+6]
 
-        # Propagate
+        # Propagate – two‑body for method 1, N‑body for method 2
         with Timer() as tmr:
-            prop = NBodyPropagator(
-                bodies=bodies,
-                mu_list=mu_list,
-                initial_states_dict=init_dict,
-                epoch_tdb=0.0,
-                integrator=integrator,
-                rtol=rtol,
-                atol=atol,
-                max_step=max_step,   # 强制最大步长
-            )
-            prop.propagate_to(delta_sec)
-
-        # Collect final state
-        y_final = np.empty(6 * len(bodies))
-        for idx, bname in enumerate(bodies):
-            y_final[6*idx:6*idx+6] = prop.get_body_state(bname, delta_sec)
+            if method == "kepler":
+                y_final = propagate_two_body_from_ssb(
+                    y_init, delta_sec, bodies, gm_dict
+                )
+            else:
+                prop = NBodyPropagator(
+                    bodies=bodies,
+                    mu_list=mu_list,
+                    initial_states_dict=init_dict,
+                    epoch_tdb=0.0,
+                    integrator=integrator,
+                    rtol=rtol,
+                    atol=atol,
+                    max_step=max_step,
+                )
+                prop.propagate_to(delta_sec)
+                y_final = np.empty(6 * len(bodies))
+                for idx, bname in enumerate(bodies):
+                    y_final[6*idx:6*idx+6] = prop.get_body_state(bname, delta_sec)
 
         # Compute errors
         err = compute_errors(y_final, y_spice_end, bodies)
