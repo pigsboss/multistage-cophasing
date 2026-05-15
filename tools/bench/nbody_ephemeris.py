@@ -392,6 +392,15 @@ def main():
             r_rel, v_rel, mu_sun
         )
 
+        # ---- 重建验证 ----
+        state_rel_recon = kepler_elements_to_cartesian_batch(
+            np.array([a]), np.array([e]), np.array([i]),
+            np.array([Omega]), np.array([omega]), np.array([M0]),
+            mu_sun
+        )[0]
+        recon_err = np.linalg.norm(state_rel_recon[:3] - r_rel)
+        print(f"Reconstruction error at t0: {recon_err:.3f} m")
+
         n = math.sqrt(mu_sun / a ** 3)
         dt = delta_sec
         M_end = M0 + n * dt

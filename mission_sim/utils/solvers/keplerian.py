@@ -101,7 +101,7 @@ def cartesian_to_kepler_elements(r_vec, v_vec, mu):
             omega = 2.0 * np.pi - omega
     elif e > eps:
         omega = np.arccos(e_vec[0] / e)
-        if e_vec[0] < 0.0:
+        if e_vec[1] < 0.0:
             omega = 2.0 * np.pi - omega
     else:
         omega = 0.0
