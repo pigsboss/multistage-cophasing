@@ -164,6 +164,13 @@ def get_truth_state(eph: HighPrecisionEphemeris, et_seconds: float,
             frame=frame,
         )
         states.append(state)
+
+    # --- TEMPORARY DEBUG: print Sun state ---
+    if "SUN" in bodies:
+        idx = bodies.index("SUN")
+        sun_state = states[idx]
+        print(f"DEBUG get_truth_state: SUN at et={et_seconds:.0f} -> pos={sun_state[:3]}, vel={sun_state[3:6]}, |v|={np.linalg.norm(sun_state[3:6]):.2f} m/s")
+
     return np.concatenate(states)
 
 # ----------------------------------------------------------------------
@@ -243,6 +250,11 @@ def run_method_1_or_2(
             base_y0[6*idx:6*idx+6] = full_y0[6*global_idx:6*global_idx+6]
     else:  # "spice"
         base_y0 = y_spice0.copy()
+        # Verify that Sun velocity is small (should be ~10 m/s from SPICE)
+        idx_sun = bodies.index("SUN")
+        sun_vel_from_spice = base_y0[6*idx_sun+3:6*idx_sun+6]
+        if np.linalg.norm(sun_vel_from_spice) > 50.0:
+            raise RuntimeError(f"Sun velocity from SPICE too large: {sun_vel_from_spice} (|v|={np.linalg.norm(sun_vel_from_spice):.2f} m/s)")
 
     # Prepare propagator factory
     mu_list = [gm_dict[b] for b in bodies]
