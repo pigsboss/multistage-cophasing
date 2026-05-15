@@ -259,11 +259,6 @@ def run_method_1_or_2(
     # Prepare propagator factory
     mu_list = [gm_dict[b] for b in bodies]
 
-    # --- DIAGNOSTIC BLOCK REMOVED / DISABLED ---
-    # The following debug block is skipped to avoid confusion.
-    # To re-enable for debugging, remove the early return.
-    return []
-
     results = []
     for sample in range(n_samples):
         # Generate noise
