@@ -44,7 +44,7 @@ except ImportError:
 # ----------------------------------------------------------------------
 # Mission‑Sim imports
 # ----------------------------------------------------------------------
-from mission_sim.core.spacetime.ephemeris.analytical import NBodyPropagator, _nbody_derivs
+from mission_sim.core.spacetime.ephemeris.analytical import NBodyPropagator
 from mission_sim.core.spacetime.ephemeris.high_precision import (
     HighPrecisionEphemeris,
     CelestialBody,
@@ -412,8 +412,6 @@ def main():
     parser.add_argument("--rtol", type=float, default=1e-9)
     parser.add_argument("--atol", type=float, default=1e-12)
     parser.add_argument("--output", type=Path, help="Save results as JSON")
-    parser.add_argument("--debug-two-body", action="store_true",
-                        help="Run Sun+Earth only for debugging")
     args = parser.parse_args()
 
     # Initialize truth
@@ -427,21 +425,11 @@ def main():
     # Time span in seconds
     delta_sec = args.delta_years * 365.25 * 86400.0
 
-    # Determine bodies and gm dict based on debug flag
-    if args.debug_two_body:
-        # For debug, only two bodies – but method 1 will still drop SUN
-        spice_bodies = ["SUN", "EARTH"]
-        spice_gm = {k: GM_DICT[k] for k in spice_bodies}
-        kepler_bodies = ["EARTH"]
-        # Fix: include SUN in kepler_gm for gm_dict["SUN"]
-        kepler_gm = {"SUN": GM_DICT["SUN"], "EARTH": GM_DICT["EARTH"]}
-        print("DEBUG: Two-body mode (Sun+Earth for SPICE; Earth only for Kepler)")
-    else:
-        spice_bodies = BODIES
-        spice_gm = GM_DICT
-        kepler_bodies = BODIES[1:]   # exclude Sun for heliocentric comparison
-        # Fix: include SUN in kepler_gm for gm_dict["SUN"]
-        kepler_gm = {"SUN": GM_DICT["SUN"], **{k: GM_DICT[k] for k in kepler_bodies}}
+    # Always use full planet set
+    spice_bodies = BODIES
+    spice_gm = GM_DICT
+    kepler_bodies = BODIES[1:]   # exclude Sun for heliocentric comparison
+    kepler_gm = {"SUN": GM_DICT["SUN"], **{k: GM_DICT[k] for k in kepler_bodies}}
 
     all_output = {}
     integrator = args.integrator
