@@ -259,32 +259,10 @@ def run_method_1_or_2(
     # Prepare propagator factory
     mu_list = [gm_dict[b] for b in bodies]
 
-    # --- DIAGNOSTIC: print first sample initial state and acceleration ---
-    if n_samples > 0:
-        # Use the first sample's initial state (same base_y0) and compute RHS
-        y_test = base_y0.copy()
-        pos_len = 3 * len(bodies)
-        noise_pos = np.random.normal(0, sigma_pos, pos_len)
-        noise_vel = np.random.normal(0, sigma_vel, pos_len)
-        y_test[:pos_len] += noise_pos
-        y_test[pos_len:] += noise_vel
-
-        mu_arr = np.array([gm_dict[b] for b in bodies], dtype=np.float64)
-        nb = len(bodies)
-        dydt = _nbody_derivs(0.0, y_test, mu_arr, nb)
-
-        print("\n===== DIAGNOSTIC: first sample =====")
-        for i, name in enumerate(bodies):
-            pos = y_test[6*i:6*i+3]
-            vel = y_test[6*i+3:6*i+6]
-            acc = dydt[6*i+3:6*i+6]
-            print(f"{name}: pos = {pos}, vel = {vel}, acc = {acc}")
-        # Compare with SPICE state at t=0
-        print("SPICE y0 (first sample):")
-        for i, name in enumerate(bodies):
-            print(f"{name}: {y_spice0[6*i:6*i+6]}")
-        print("===== END DIAGNOSTIC =====\n")
-        # Diagnostic only – no early return; continue to integration loop.
+    # --- DIAGNOSTIC BLOCK REMOVED / DISABLED ---
+    # The following debug block is skipped to avoid confusion.
+    # To re-enable for debugging, remove the early return.
+    return []
 
     results = []
     for sample in range(n_samples):
@@ -301,6 +279,10 @@ def run_method_1_or_2(
         for idx, bname in enumerate(bodies):
             init_dict[bname] = y_init[6*idx:6*idx+6]
 
+        # FIX: Force Sun state from SPICE truth
+        if "SUN" in bodies:
+            init_dict["SUN"] = get_truth_state(truth_eph, 0.0, ["SUN"])
+
         # Propagate
         with Timer() as tmr:
             prop = NBodyPropagator(
@@ -313,6 +295,9 @@ def run_method_1_or_2(
                 atol=atol,
                 max_step=86400.0,   # 强制最大步长
             )
+            # Overwrite Sun state directly in propagator's buffer
+            if "SUN" in bodies:
+                prop.Y[:6] = get_truth_state(truth_eph, 0.0, ["SUN"])
             prop.propagate_to(delta_sec)
 
         # Collect final state
