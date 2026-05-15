@@ -110,14 +110,18 @@ class NBodyPropagator:
             ``'dp8'``, ``'rk45'``, ``'dop853'`` (built-in Numba versions)
             ``'scipy:rk45'``, ``'scipy:dop853'`` (SciPy wrappers).
         Defaults to ``'dp8'``.
+    max_step : float, optional
+        Maximum allowed step size in seconds. If >0, the integrator
+        step size is capped to this value. Defaults to 86400.0.
     """
 
     def __init__(self, bodies, mu_list, initial_states_dict, epoch_tdb,
-                 rtol=1e-12, atol=1e-12, integrator='dp8'):
+                 rtol=1e-12, atol=1e-12, integrator='dop853', max_step=86400.0):
         self.bodies = list(bodies)
         self.mu_arr = np.array(mu_list, dtype=np.float64)
         self.n_body = len(self.bodies)
         self.integrator = integrator
+        self.max_step = float(max_step)
 
         # Validate scipy-based integrators
         if self.integrator.startswith('scipy:') and not _HAS_SCIPY:
@@ -149,6 +153,7 @@ class NBodyPropagator:
                 _nbody_derivs, self.t_current, self.Y,
                 (self.t_current, t_tdb),
                 rtol=self.rtol, atol=self.atol,
+                max_step=self.max_step,
                 args=(self.mu_arr, self.n_body),
             )
         elif self.integrator == 'rk45':
@@ -156,6 +161,7 @@ class NBodyPropagator:
                 _nbody_derivs, self.t_current, self.Y,
                 (self.t_current, t_tdb),
                 rtol=self.rtol, atol=self.atol,
+                max_step=self.max_step,
                 args=(self.mu_arr, self.n_body),
             )
         elif self.integrator == 'dop853':
@@ -163,6 +169,7 @@ class NBodyPropagator:
                 _nbody_derivs, self.t_current, self.Y,
                 (self.t_current, t_tdb),
                 rtol=self.rtol, atol=self.atol,
+                max_step=self.max_step,
                 args=(self.mu_arr, self.n_body),
             )
         elif self.integrator.startswith('scipy:'):
@@ -174,6 +181,7 @@ class NBodyPropagator:
                 method=method,
                 rtol=self.rtol,
                 atol=self.atol,
+                max_step=self.max_step,
                 args=(self.mu_arr, self.n_body),
             )
             if not sol.success:

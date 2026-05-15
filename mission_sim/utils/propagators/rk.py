@@ -385,7 +385,7 @@ _step_dp8    = _make_rk_step(TABLE_DP8)
 # 通用自适应积分器
 # ---------------------------------------------------------------------------
 @njit
-def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, args=()):
+def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, max_step=0.0, args=()):
     """
     通用的方向感知自适应积分循环。
     返回 (t_arr, y_arr)，包含所有中间步。
@@ -396,6 +396,10 @@ def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, args=(
     direction = 1.0 if tf >= t0 else -1.0
 
     h = h0 if h0 > 0.0 else 0.1 * (tf - t0)   # signed
+
+    # 初始步长上限
+    if max_step > 0.0:
+        h = direction * min(abs(h), max_step)
 
     max_steps = 100000
     t_arr = np.empty(max_steps, dtype=np.float64)
@@ -421,9 +425,13 @@ def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, args=(
 
             power = 1.0 / order
             h = direction * abs(_compute_new_h(abs(h), err, power))
+            if max_step > 0.0:
+                h = direction * min(abs(h), max_step)
         else:
             power = 1.0 / order
             h_new = _compute_new_h(abs(h), err, power)
+            if max_step > 0.0:
+                h_new = min(h_new, max_step)
             h = direction * h_new
 
     t_arr = t_arr[:step+1].copy()
@@ -434,16 +442,16 @@ def _integrate_generic(step_fn, f, t0, y0, tf, rtol, atol, order, h0=0.0, args=(
 # 三个公开的积分入口
 # ---------------------------------------------------------------------------
 @njit
-def integrate_rk45(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
-    return _integrate_generic(_step_rk45, f, t0, y0, t_span[1], rtol, atol, TABLE_RK45.order, h0, args)
+def integrate_rk45(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, max_step=0.0, args=()):
+    return _integrate_generic(_step_rk45, f, t0, y0, t_span[1], rtol, atol, TABLE_RK45.order, h0, max_step, args)
 
 @njit
-def integrate_dop853(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
-    return _integrate_generic(_step_dop853, f, t0, y0, t_span[1], rtol, atol, TABLE_DOP853.order, h0, args)
+def integrate_dop853(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, max_step=0.0, args=()):
+    return _integrate_generic(_step_dop853, f, t0, y0, t_span[1], rtol, atol, TABLE_DOP853.order, h0, max_step, args)
 
 @njit
-def integrate_dp8(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, args=()):
-    return _integrate_generic(_step_dp8, f, t0, y0, t_span[1], rtol, atol, TABLE_DP8.order, h0, args)
+def integrate_dp8(f, t0, y0, t_span, rtol=1e-8, atol=1e-12, h0=0.0, max_step=0.0, args=()):
+    return _integrate_generic(_step_dp8, f, t0, y0, t_span[1], rtol, atol, TABLE_DP8.order, h0, max_step, args)
 
 # ---------------------------------------------------------------------------
 # 批量并行版本（使用线程池并行）
