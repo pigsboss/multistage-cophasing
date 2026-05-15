@@ -40,7 +40,7 @@ except ImportError:
 # ----------------------------------------------------------------------
 # Mission‑Sim imports
 # ----------------------------------------------------------------------
-from mission_sim.core.spacetime.ephemeris.analytical import NBodyPropagator
+from mission_sim.core.spacetime.ephemeris.analytical import NBodyPropagator, _nbody_derivs
 from mission_sim.core.spacetime.ephemeris.high_precision import (
     HighPrecisionEphemeris,
     CelestialBody,
@@ -246,6 +246,34 @@ def run_method_1_or_2(
 
     # Prepare propagator factory
     mu_list = [gm_dict[b] for b in bodies]
+
+    # --- DIAGNOSTIC: print first sample initial state and acceleration ---
+    if n_samples > 0:
+        # Use the first sample's initial state (same base_y0) and compute RHS
+        y_test = base_y0.copy()
+        pos_len = 3 * len(bodies)
+        noise_pos = np.random.normal(0, sigma_pos, pos_len)
+        noise_vel = np.random.normal(0, sigma_vel, pos_len)
+        y_test[:pos_len] += noise_pos
+        y_test[pos_len:] += noise_vel
+
+        mu_arr = np.array([gm_dict[b] for b in bodies], dtype=np.float64)
+        nb = len(bodies)
+        dydt = _nbody_derivs(0.0, y_test, mu_arr, nb)
+
+        print("\n===== DIAGNOSTIC: first sample =====")
+        for i, name in enumerate(bodies):
+            pos = y_test[6*i:6*i+3]
+            vel = y_test[6*i+3:6*i+6]
+            acc = dydt[6*i+3:6*i+6]
+            print(f"{name}: pos = {pos}, vel = {vel}, acc = {acc}")
+        # Compare with SPICE state at t=0
+        print("SPICE y0 (first sample):")
+        for i, name in enumerate(bodies):
+            print(f"{name}: {y_spice0[6*i:6*i+6]}")
+        print("===== END DIAGNOSTIC =====\n")
+        # Exit after diagnostic to avoid running full benchmark
+        return []
 
     results = []
     for sample in range(n_samples):
