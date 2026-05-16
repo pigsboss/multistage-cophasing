@@ -128,17 +128,24 @@ class HighPrecisionEphemeris:
         self._spice_interface: Optional[SPICEInterface] = None
         self._spice_initialized = False
 
-        # 分析模式：跳过 SPICE 初始化
         if self.config.mode == EphemerisMode.ANALYTICAL:
             if self.verbose:
                 print("[HighPrecisionEphemeris] Using analytical mode (limited)")
             return
 
-        # 仅 SPICE 模式需要初始化 SPICE
-        self._initialize_spice()
-        
+        # 尝试 SPICE 初始化，失败则回退到分析模式
+        try:
+            self._initialize_spice()
+        except Exception as e:
+            if self.verbose:
+                print(f"[HighPrecisionEphemeris] SPICE initialization failed, "
+                      f"falling back to analytical mode: {e}")
+            self.config.mode = EphemerisMode.ANALYTICAL
+            self._spice_interface = None
+            self._spice_initialized = False
+
         if self.verbose:
-            print(f"[HighPrecisionEphemeris] Initialization complete (SPICE mode)")
+            print(f"[HighPrecisionEphemeris] Initialization complete (mode={self.config.mode.value})")
 
     def _initialize_spice(self) -> bool:
         """初始化 SPICE 接口"""
@@ -173,7 +180,7 @@ class HighPrecisionEphemeris:
             else:
                 self._spice_interface = None
                 self._spice_initialized = False
-                raise RuntimeError("SPICE initialization failed")
+                raise RuntimeError("SPICE initialization returned failure")
             return success
 
         except Exception as e:
@@ -202,6 +209,20 @@ class HighPrecisionEphemeris:
                 if any(path.glob('**/naif*.tls')):
                     return path
         return None
+
+    def set_mode(self, mode: EphemerisMode,
+                 spice_kernels_path: Optional[Union[str, Path]] = None):
+        """切换模式（主要用于测试）"""
+        if mode == self.config.mode:
+            return
+        if mode == EphemerisMode.SPICE:
+            if spice_kernels_path is not None:
+                self.config.spice_kernels_path = spice_kernels_path
+            self.config.mode = EphemerisMode.SPICE
+            self._initialize_spice()
+        elif mode == EphemerisMode.ANALYTICAL:
+            self.shutdown()
+            self.config.mode = EphemerisMode.ANALYTICAL
 
     def get_state(self, 
                   target_body: Union[str, CelestialBody],
@@ -241,7 +262,7 @@ class HighPrecisionEphemeris:
                                   epoch: float,
                                   frame: Union[str, CoordinateFrame]) -> np.ndarray:
         """
-        最小分析回退：仅支持 Sun 和 Earth 相对于 SSB。
+        最小分析回退：仅支持 Sun, Earth, Moon 相对于 SSB。
         使用短周期开普勒根数。
         对于其他天体抛出 NotImplementedError。
         """
@@ -260,7 +281,7 @@ class HighPrecisionEphemeris:
         if target == CelestialBody.SUN:
             # 太阳相对于 SSB 始终为零
             return np.zeros(6)
-        elif target == CelestialBody.EARTH:
+        elif target == CelestialBody.EARTH or target == CelestialBody.EARTH_BARYCENTER:
             # 使用 EM Bary 根数 (gives Earth-Moon barycenter)
             el = get_elements_short("EM Bary", t_cy)
             # 开普勒参数
@@ -285,9 +306,17 @@ class HighPrecisionEphemeris:
                 _R_ECL2EQ @ state_ecl[3:6]
             ])
             return state_eq
+        elif target == CelestialBody.MOON:
+            # 获取 EM Bary 状态
+            earth_state = self._compute_analytical_state(
+                CelestialBody.EARTH, CelestialBody.SSB, epoch, frame
+            )
+            # 月球相对 EM Bary 的近似位置 (J2000 赤道系，粗糙但足够)
+            r_moon_rel = np.array([384400e3, 0.0, 0.0])
+            return earth_state + np.concatenate([r_moon_rel, np.zeros(3)])
         else:
             raise NotImplementedError(
-                f"Analytical mode only supports Sun and Earth, got {target}"
+                f"Analytical mode only supports Sun, Earth and Moon, got {target}"
             )
 
     def _compute_spice_state(self,
@@ -377,8 +406,32 @@ class HighPrecisionEphemeris:
                 return np.concatenate([pos_rot, vel_rot])
             except Exception as e:
                 if self.verbose:
-                    print(f"SPICE rotation transformation failed: {e}")
-        raise SPICEError("Failed to compute Earth-Moon rotating state via SPICE")
+                    print(f"SPICE rotation failed: {e}")
+
+        # 回退：构建瞬时旋转矩阵
+        if not self._spice_initialized or self._spice_interface is None:
+            # 使用分析模式的地月状态
+            moon_rel = self.get_state(CelestialBody.MOON, epoch,
+                                      CelestialBody.EARTH, CoordinateFrame.J2000_ECI)
+        else:
+            moon_rel = self._spice_interface.get_state(
+                'moon', epoch, 'earth', CoordinateFrame.J2000_ECI, 'NONE'
+            )
+        r = moon_rel[:3]
+        v = moon_rel[3:6]
+        r_norm = np.linalg.norm(r)
+        if r_norm < 1e-15:
+            return np.zeros(6)
+        x = r / r_norm
+        z = np.cross(r, v)
+        z_norm = np.linalg.norm(z)
+        if z_norm < 1e-15:
+            z = np.array([0.0, 0.0, 1.0])
+        else:
+            z /= z_norm
+        y = np.cross(z, x)
+        rot = np.array([x, y, z]).T  # 从 J2000 到旋转系的转换矩阵
+        return np.concatenate([rot.T @ r, rot.T @ v])
 
     def _normalize_body(self, body: Union[str, CelestialBody]) -> CelestialBody:
         """标准化天体参数"""

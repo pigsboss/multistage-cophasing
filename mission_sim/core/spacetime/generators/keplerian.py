@@ -125,7 +125,20 @@ class KeplerianGenerator(BaseTrajectoryGenerator):
         if sim_time < 0:
             raise ValueError(f"Simulation time must be non-negative, got sim_time={sim_time:.6e} s")
 
+        # Generate time sequence (vector)
+        num_points = int(sim_time / dt) + 1
+        times = np.linspace(0, sim_time, num_points) + epoch
+
+        # Calculate mean anomaly array (vectorized)
+        n = np.sqrt(mu / a**3)
+        M_array = M0 + n * (times - epoch)
+
+        # Batch convert to Cartesian coordinates (vectorized)
+        states_array = self.elements_to_cartesian_batch(a, e, i, Omega, omega, M_array, mu)
+
         return KeplerEphemeris(
+            times=times,
+            states=states_array,
             a=a,
             e=e,
             i=i,

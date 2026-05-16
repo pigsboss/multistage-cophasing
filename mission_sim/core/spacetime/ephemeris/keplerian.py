@@ -21,6 +21,8 @@ class KeplerEphemeris(Ephemeris):
 
     def __init__(
         self,
+        times: np.ndarray,
+        states: np.ndarray,
         a: float,
         e: float,
         i: float,
@@ -32,6 +34,8 @@ class KeplerEphemeris(Ephemeris):
         frame: CoordinateFrame = CoordinateFrame.J2000_ECI,
     ):
         """
+        :param times: 时间序列 (N,) (TDB seconds, relative to J2000)
+        :param states: 状态数组 (N, 6)
         :param a: 半长轴 (m)
         :param e: 偏心率 (0 ≤ e < 1)
         :param i: 倾角 (rad)
@@ -42,10 +46,8 @@ class KeplerEphemeris(Ephemeris):
         :param mu: 中心天体引力常数 (m³/s²)
         :param frame: 坐标系
         """
-        # 调用基类构造，提供占位数据以满足契约
-        dummy_times = np.array([epoch])
-        dummy_states = np.zeros((1, 6))
-        super().__init__(dummy_times, dummy_states, frame)
+        # 调用基类构造，提供完整的时间序列和状态
+        super().__init__(times, states, frame)
 
         self.a = a
         self.e = e
