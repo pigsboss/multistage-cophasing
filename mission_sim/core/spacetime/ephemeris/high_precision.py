@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-高精度星历模块 — 纯 SPICE 实现
+高精度星历模块 — 纯 SPICE 实现 + 最小分析回退
 
 提供太阳系天体的高精度位置和速度计算，集成 NASA SPICE 工具包。
-删除了原有的分析模型、CRTBP、数值积分等未使用模式，使模块专注于
-高精度 SPICE 星历服务。
+新增 ANALYTICAL 模式用于测试环境。
 
 特性：
 1. 支持主要太阳系天体（太阳、地球、月球、火星等）
@@ -14,12 +13,13 @@
 5. 支持外部星历数据加载
 
 作者: MCPC开发团队
-版本: 3.0.0 (SPICE‑only)
+版本: 3.1.0
 """
 
 import os
 import numpy as np
 import warnings
+import math
 from typing import Dict, List, Optional, Union
 from pathlib import Path
 from enum import Enum
@@ -40,11 +40,25 @@ except ImportError:
     SPICEInterface = None
     warnings.warn("SPICE interface not available. All operations will fail.")
 
+# 分析回退需要的导入
+from mission_sim.core.spacetime.ephemeris.jpl_ssb_keplerian_elements import get_elements_short
+from mission_sim.utils.solvers.keplerian import kepler_elements_to_cartesian_batch
+
+
+# 黄道→赤道旋转常量 (J2000)
+_OBLIQUITY_J2000 = math.radians(23.4392911111)
+_R_ECL2EQ = np.array([
+    [1.0, 0.0,                        0.0                      ],
+    [0.0, math.cos(_OBLIQUITY_J2000), -math.sin(_OBLIQUITY_J2000)],
+    [0.0, math.sin(_OBLIQUITY_J2000),  math.cos(_OBLIQUITY_J2000)]
+])
+
 
 class CelestialBody(Enum):
     """太阳系天体枚举"""
     SUN = "sun"
     EARTH = "earth"
+    EARTH_BARYCENTER = "earth_barycenter"
     MOON = "moon"
     MARS = "mars"
     VENUS = "venus"
@@ -57,12 +71,13 @@ class CelestialBody(Enum):
 
 
 class EphemerisMode(Enum):
-    """星历计算模式（仅保留 SPICE 用于兼容性）"""
+    """星历计算模式"""
     SPICE = "spice"
+    ANALYTICAL = "analytical"
 
 
 class EphemerisConfig:
-    """星历配置（仅 SPICE 相关参数）"""
+    """星历配置"""
     def __init__(self,
                  mode: EphemerisMode = EphemerisMode.SPICE,
                  spice_kernels_path: Optional[Union[str, Path]] = None,
@@ -81,7 +96,7 @@ class EphemerisConfig:
 
 class HighPrecisionEphemeris:
     """
-    高精度星历类 — 纯 SPICE 实现
+    高精度星历类 — 纯 SPICE 实现 + 最小分析回退
     
     提供太阳系天体的高精度位置和速度计算，支持多种坐标系。
     """
@@ -113,7 +128,13 @@ class HighPrecisionEphemeris:
         self._spice_interface: Optional[SPICEInterface] = None
         self._spice_initialized = False
 
-        # 直接初始化 SPICE
+        # 分析模式：跳过 SPICE 初始化
+        if self.config.mode == EphemerisMode.ANALYTICAL:
+            if self.verbose:
+                print("[HighPrecisionEphemeris] Using analytical mode (limited)")
+            return
+
+        # 仅 SPICE 模式需要初始化 SPICE
         self._initialize_spice()
         
         if self.verbose:
@@ -201,6 +222,10 @@ class HighPrecisionEphemeris:
         Returns:
             np.ndarray: 状态向量 [x, y, z, vx, vy, vz] (m, m/s)
         """
+        # 分析模式使用简单的开普勒回退
+        if self.config.mode == EphemerisMode.ANALYTICAL:
+            return self._compute_analytical_state(target_body, observer_body, epoch, frame)
+        
         if not self._spice_initialized:
             raise SPICEError("SPICE not initialized. Cannot compute state.")
         
@@ -209,6 +234,61 @@ class HighPrecisionEphemeris:
         coord_frame = self._normalize_frame(frame)
 
         return self._compute_spice_state(target, observer, epoch, coord_frame, abcorr)
+
+    def _compute_analytical_state(self,
+                                  target_body: Union[str, CelestialBody],
+                                  observer_body: Union[str, CelestialBody],
+                                  epoch: float,
+                                  frame: Union[str, CoordinateFrame]) -> np.ndarray:
+        """
+        最小分析回退：仅支持 Sun 和 Earth 相对于 SSB。
+        使用短周期开普勒根数。
+        对于其他天体抛出 NotImplementedError。
+        """
+        target = self._normalize_body(target_body)
+        observer = self._normalize_body(observer_body)
+
+        # 仅支持 observer = SSB
+        if observer != CelestialBody.SSB:
+            raise NotImplementedError(
+                f"Analytical mode only supports observer=SSB, got {observer}"
+            )
+
+        # 将 epoch 秒转换为儒略世纪 (J2000)
+        t_cy = epoch / (36525.0 * 86400.0)
+
+        if target == CelestialBody.SUN:
+            # 太阳相对于 SSB 始终为零
+            return np.zeros(6)
+        elif target == CelestialBody.EARTH:
+            # 使用 EM Bary 根数 (gives Earth-Moon barycenter)
+            el = get_elements_short("EM Bary", t_cy)
+            # 开普勒参数
+            a = el["a"]
+            e = el["e"]
+            inc = el["i"]
+            Omega = el["Omega"]
+            omega = el["omega"]
+            M = el["M"]
+            mu = 1.32712440041279419e20  # 太阳 GM (m^3/s^2)
+
+            # 在黄道系中计算状态
+            state_ecl = kepler_elements_to_cartesian_batch(
+                np.array([a]), np.array([e]), np.array([inc]),
+                np.array([Omega]), np.array([omega]), np.array([M]),
+                mu
+            )[0]
+
+            # 旋转到 ICRF 赤道坐标系
+            state_eq = np.concatenate([
+                _R_ECL2EQ @ state_ecl[:3],
+                _R_ECL2EQ @ state_ecl[3:6]
+            ])
+            return state_eq
+        else:
+            raise NotImplementedError(
+                f"Analytical mode only supports Sun and Earth, got {target}"
+            )
 
     def _compute_spice_state(self,
                             target: CelestialBody,
@@ -274,8 +354,11 @@ class HighPrecisionEphemeris:
 
     def get_earth_moon_rotating_state(self, epoch: float) -> np.ndarray:
         """
-        获取指定时间地月旋转系的状态（纯 SPICE 实现）
+        获取指定时间地月旋转系的状态（仅 SPICE 模式）
         """
+        if self.config.mode == EphemerisMode.ANALYTICAL:
+            raise NotImplementedError("Rotating state not available in analytical mode")
+
         if self._spice_initialized:
             try:
                 moon_state = self.get_state(
@@ -295,7 +378,6 @@ class HighPrecisionEphemeris:
             except Exception as e:
                 if self.verbose:
                     print(f"SPICE rotation transformation failed: {e}")
-        # 不应退回到 CRTBP，抛出异常
         raise SPICEError("Failed to compute Earth-Moon rotating state via SPICE")
 
     def _normalize_body(self, body: Union[str, CelestialBody]) -> CelestialBody:
@@ -341,6 +423,8 @@ class HighPrecisionEphemeris:
         self.shutdown()
 
     def __repr__(self):
+        if self.config.mode == EphemerisMode.ANALYTICAL:
+            return "HighPrecisionEphemeris(mode=ANALYTICAL)"
         status = "SPICE-Ready" if self._spice_initialized else "SPICE-Failed"
         return f"HighPrecisionEphemeris(status={status})"
 

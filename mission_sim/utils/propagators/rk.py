@@ -462,7 +462,8 @@ def integrate_dp8_batch(f, t0, y0_batch, t_span, rtol=1e-8, atol=1e-12, h0=0.0, 
 
     def task(idx):
         y0 = y0_batch[idx]
-        return integrate_dp8(f, t0, y0, t_span, rtol, atol, h0, args)
+        return integrate_dp8(f, t0, y0, t_span, rtol=rtol, atol=atol, h0=h0,
+                             max_step=0.0, args=args)
 
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(task, range(N)))

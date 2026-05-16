@@ -165,12 +165,18 @@ def get_truth_state(eph: HighPrecisionEphemeris, et_seconds: float,
     """
     Return concatenated state for the given bodies (order preserved) wrt SSB.
     et_seconds: TDB seconds since J2000.
+
+    Note: For Earth, uses Earth‑Moon barycenter to match SPICE behaviour.
     """
     states = []
     for bname in bodies:
-        body = CelestialBody(bname.lower())
+        # Use Earth‑Moon barycenter for "EARTH"
+        if bname == "EARTH":
+            target_body = CelestialBody.EARTH_BARYCENTER
+        else:
+            target_body = CelestialBody(bname.lower())
         state = eph.get_state(
-            target_body=body,
+            target_body=target_body,
             epoch=et_seconds,
             observer_body=CelestialBody.SSB,
             frame=frame,
@@ -193,6 +199,7 @@ def get_truth_heliocentric_state(eph: HighPrecisionEphemeris, et_seconds: float,
             # Sun relative to itself is always zero
             states.append(np.zeros(6))
         else:
+            # For heliocentric state we want Earth (planet), not barycenter
             body = CelestialBody(bname.lower())
             state = eph.get_state(
                 target_body=body,

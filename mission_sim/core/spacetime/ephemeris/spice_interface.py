@@ -327,7 +327,8 @@ class SPICECalculator:
         'sun': 10,
         'mercury': 1,           # Mercury barycenter (NAIF 1)
         'venus': 2,             # Venus barycenter (NAIF 2)
-        'earth': 3,             # Earth-Moon Barycenter (NAIF 3)
+        'earth': 399,           # Earth (planet, NAIF 399)
+        'earth_barycenter': 3,  # Earth-Moon Barycenter (NAIF 3)
         'moon': 301,
         'mars': 4,              # Mars barycenter (NAIF 4)
         'mars_barycenter': 4,
@@ -409,7 +410,7 @@ class SPICECalculator:
             # 调用 SPICE spkezr 函数
             # 传递字符串 ID 给 spkezr 以避免 CSPICE 内部错误
             state_km, lt = spice.spkezr(
-                target_id,      # str like "1"
+                target_id,      # str like "399"
                 epoch,
                 spice_frame,
                 abcorr,
